@@ -1,0 +1,220 @@
+"""
+Live Trading Engine.
+Wraps the broker adapter and handles real-money order execution,
+position management, and risk enforcement.
+"""
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime, date
+from typing import Optional
+from loguru import logger
+
+from app.engines.strategy_engine.base_strategy import BaseStrategy, SignalType, ExitReason
+from app.engines.live_trading.broker_base import BrokerBase, OrderRequest, OrderSide, OrderType
+
+TICK_SIZES  = {"ES": 0.25, "NQ": 0.25, "RTY": 0.10, "YM": 1.0}
+TICK_VALUES = {"ES": 12.50, "NQ": 5.00, "RTY": 5.00, "YM": 5.00}
+
+
+@dataclass
+class LivePosition:
+    instrument: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    contracts: int
+    entry_time: datetime
+    broker_order_id: str = ""
+    sl_order_id: str = ""
+    tp_order_id: str = ""
+    metadata: dict = field(default_factory=dict)
+
+
+class LiveTrader:
+    """
+    Live trading engine that:
+    - Receives signals from a strategy
+    - Places actual orders via the broker
+    - Places SL/TP bracket orders automatically
+    - Monitors fill confirmations
+    - Enforces all risk controls including kill switch
+    """
+
+    def __init__(
+        self,
+        strategy: BaseStrategy,
+        broker: BrokerBase,
+        instrument: str,
+        commission_per_side: float = 2.25,
+    ):
+        self.strategy   = strategy
+        self.broker     = broker
+        self.instrument = instrument.upper()
+        self.commission = commission_per_side
+
+        self._position: Optional[LivePosition] = None
+        self._is_running: bool = False
+        self._kill_switch: bool = False
+        self._daily_pnl: float = 0.0
+        self._daily_trades: int = 0
+        self._current_date: Optional[date] = None
+        self._bars_buffer: dict[str, list] = {}
+
+    async def start(self):
+        if not self.broker.is_connected:
+            connected = await self.broker.connect()
+            if not connected:
+                raise RuntimeError("Failed to connect to broker")
+
+        self._is_running = True
+        self.strategy.reset_daily_counters()
+
+        # Subscribe to market data
+        await self.broker.subscribe_quotes(self.instrument, self.on_tick)
+        tfs = [self.strategy.config.primary_timeframe, self.strategy.config.execution_timeframe] + self.strategy.config.higher_timeframes
+        for tf in set(tfs):
+            await self.broker.subscribe_bars(self.instrument, tf, lambda bar, t=tf: asyncio.create_task(self.on_bar(t, bar)))
+
+        logger.info(f"[LiveTrader] LIVE TRADING STARTED | {self.instrument} | Strategy: {self.strategy.config.name}")
+
+    async def stop(self):
+        self._is_running = False
+        if self._position:
+            logger.warning("[LiveTrader] Stopping with open position. Consider closing manually.")
+        await self.broker.disconnect()
+        logger.info("[LiveTrader] Stopped")
+
+    def trigger_kill_switch(self):
+        self._kill_switch = True
+        self.strategy.trigger_kill_switch()
+        logger.warning("[LiveTrader] ⚠️  KILL SWITCH ACTIVATED — all trading halted.")
+
+    async def on_bar(self, timeframe: str, bar: dict):
+        if not self._is_running or self._kill_switch:
+            return
+
+        if timeframe not in self._bars_buffer:
+            self._bars_buffer[timeframe] = []
+        self._bars_buffer[timeframe].append(bar)
+        if len(self._bars_buffer[timeframe]) > 500:
+            self._bars_buffer[timeframe] = self._bars_buffer[timeframe][-500:]
+
+        import pandas as pd
+        bars_dict = {
+            tf: pd.DataFrame(bars).set_index("timestamp")
+            for tf, bars in self._bars_buffer.items()
+            if bars
+        }
+
+        ts = bar.get("timestamp", datetime.utcnow())
+        today = ts.date() if isinstance(ts, datetime) else ts
+        if self._current_date != today:
+            self._current_date = today
+            self._daily_pnl    = 0.0
+            self._daily_trades = 0
+            self.strategy.reset_daily_counters()
+
+        if not self._position and self.strategy.check_risk_controls():
+            signal = self.strategy.on_bar(bars_dict)
+            if signal and signal.signal != SignalType.NONE:
+                await self._execute_entry(signal)
+
+    async def on_tick(self, tick: dict):
+        if not self._is_running or self._kill_switch or not self._position:
+            return
+        # Tick-level exit check (belt and suspenders on top of bracket orders)
+        p = self._position
+        price = tick["price"]
+        if p.direction == "long":
+            if price <= p.stop_loss:
+                logger.info(f"[LiveTrader] Tick SL reached @ {price:.2f}")
+                await self._cancel_bracket_and_close(price, ExitReason.SL_HIT)
+        else:
+            if price >= p.stop_loss:
+                logger.info(f"[LiveTrader] Tick SL reached @ {price:.2f}")
+                await self._cancel_bracket_and_close(price, ExitReason.SL_HIT)
+
+    async def _execute_entry(self, signal):
+        side = OrderSide.BUY if signal.signal == SignalType.LONG else OrderSide.SELL
+
+        # Place market entry order
+        entry_order = await self.broker.place_order(OrderRequest(
+            instrument=self.instrument,
+            side=side,
+            quantity=signal.contracts,
+            order_type=OrderType.MARKET,
+        ))
+        logger.info(f"[LiveTrader] Entry order placed: {entry_order.broker_order_id}")
+
+        # Place bracket SL order
+        sl_side  = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+        sl_order = await self.broker.place_order(OrderRequest(
+            instrument=self.instrument,
+            side=sl_side,
+            quantity=signal.contracts,
+            order_type=OrderType.STOP,
+            stop_price=signal.stop_loss,
+        ))
+
+        # Place bracket TP order
+        tp_order = await self.broker.place_order(OrderRequest(
+            instrument=self.instrument,
+            side=sl_side,
+            quantity=signal.contracts,
+            order_type=OrderType.LIMIT,
+            price=signal.take_profit,
+        ))
+
+        self._position = LivePosition(
+            instrument=self.instrument,
+            direction=signal.signal.value,
+            entry_price=signal.entry_price,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+            contracts=signal.contracts,
+            entry_time=datetime.utcnow(),
+            broker_order_id=entry_order.broker_order_id,
+            sl_order_id=sl_order.broker_order_id,
+            tp_order_id=tp_order.broker_order_id,
+            metadata=signal.metadata,
+        )
+        logger.info(f"[LiveTrader] LIVE POSITION OPEN | {side.value.upper()} {signal.contracts}x {self.instrument} @ {signal.entry_price:.2f}")
+
+    async def _cancel_bracket_and_close(self, price: float, reason: ExitReason):
+        p = self._position
+        if not p:
+            return
+        # Cancel remaining bracket orders
+        if p.sl_order_id:
+            await self.broker.cancel_order(p.sl_order_id)
+        if p.tp_order_id:
+            await self.broker.cancel_order(p.tp_order_id)
+
+        # Place closing market order
+        close_side = OrderSide.SELL if p.direction == "long" else OrderSide.BUY
+        await self.broker.place_order(OrderRequest(
+            instrument=self.instrument,
+            side=close_side,
+            quantity=p.contracts,
+            order_type=OrderType.MARKET,
+        ))
+
+        tick_size  = TICK_SIZES.get(self.instrument, 0.25)
+        tick_value = TICK_VALUES.get(self.instrument, 12.50)
+        if p.direction == "long":
+            pnl_ticks = (price - p.entry_price) / tick_size
+        else:
+            pnl_ticks = (p.entry_price - price) / tick_size
+
+        net_pnl = (pnl_ticks * tick_value * p.contracts) - (self.commission * 2 * p.contracts)
+        self._daily_pnl    += net_pnl
+        self._daily_trades += 1
+        self.strategy.record_trade_result(net_pnl)
+
+        logger.info(f"[LiveTrader] POSITION CLOSED | {reason.value} @ {price:.2f} | Net PnL: ${net_pnl:,.2f}")
+        self._position = None
+
+        # Check if daily loss limit hit
+        if self.strategy.config.max_daily_loss and self._daily_pnl <= -abs(self.strategy.config.max_daily_loss):
+            self.trigger_kill_switch()
