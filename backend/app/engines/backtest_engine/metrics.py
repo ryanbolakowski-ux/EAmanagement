@@ -13,7 +13,12 @@ class BacktestMetricsResult:
     total_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
+    breakeven_trades: int = 0
     win_rate: float = 0.0
+    # Effective win rate excludes break-even exits from the denominator —
+    # answers "of trades that took a real outcome, what % won?" Much more
+    # meaningful when the break-even-at-1R rule is active.
+    effective_win_rate: float = 0.0
 
     net_profit: float = 0.0
     gross_profit: float = 0.0
@@ -55,12 +60,20 @@ def calculate_metrics(
         return m
 
     m.total_trades = len(trades)
-    wins   = [t for t in trades if t["is_winner"]]
-    losses = [t for t in trades if not t["is_winner"]]
+    # BE exits are flagged is_winner=True at the runner level, so they roll
+    # up into 'wins' naturally — matches the user's intent: 'BE counts as win'.
+    breakevens = [t for t in trades if t.get("exit_reason") == "breakeven"]
+    wins       = [t for t in trades if t.get("is_winner")]
+    losses     = [t for t in trades if not t.get("is_winner")]
 
-    m.winning_trades = len(wins)
-    m.losing_trades  = len(losses)
-    m.win_rate       = m.winning_trades / m.total_trades if m.total_trades else 0.0
+    m.winning_trades   = len(wins)  # includes BE
+    m.losing_trades    = len(losses)
+    m.breakeven_trades = len(breakevens)
+    m.win_rate         = m.winning_trades / m.total_trades if m.total_trades else 0.0
+    # 'Effective' WR excludes BE — useful as a more conservative read-out.
+    real_wins = m.winning_trades - m.breakeven_trades
+    decisive  = real_wins + m.losing_trades
+    m.effective_win_rate = (real_wins / decisive) if decisive else 0.0
 
     pnls = [t["net_pnl"] for t in trades]
     m.net_profit  = sum(pnls)

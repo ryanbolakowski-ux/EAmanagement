@@ -50,7 +50,7 @@ async def list_trades(
     return [
         TradeResponse(
             id=str(t.id), strategy_id=str(t.strategy_id), instrument=t.instrument,
-            direction=t.direction.value, mode=t.mode.value, status=t.status.value,
+            direction=t.direction, mode=t.mode, status=t.status,
             entry_price=t.entry_price, exit_price=t.exit_price,
             stop_loss=t.stop_loss, take_profit=t.take_profit, contracts=t.contracts,
             pnl=t.pnl, net_pnl=t.net_pnl,
@@ -60,3 +60,92 @@ async def list_trades(
         )
         for t in result.scalars().all()
     ]
+
+
+@router.get("/chart-data")
+async def get_trades_chart_data(
+    mode: str = "paper",
+    instrument: str = "ES",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return recent OHLCV candles + trade markers for paper/live chart."""
+    from datetime import datetime, timedelta, timezone
+
+    # Get trades for this mode/instrument
+    query = (
+        select(Trade)
+        .where(Trade.user_id == current_user.id, Trade.mode == mode, Trade.instrument == instrument)
+        .order_by(Trade.entry_time.asc())
+        .limit(200)
+    )
+    result = await db.execute(query)
+    all_trades = result.scalars().all()
+
+    # Determine date range from trades, or last 7 days if no trades
+    now = datetime.now(timezone.utc)
+    if all_trades and all_trades[0].entry_time:
+        start = all_trades[0].entry_time - timedelta(hours=6)
+    else:
+        start = now - timedelta(days=7)
+    end = now
+
+    # Fetch candles
+    from app.engines.backtest_engine.market_data_fetcher import fetch_futures_data
+    df = await fetch_futures_data(instrument, start, end, "15m")
+    candles = []
+    if df is not None and not df.empty:
+        for ts, row in df.iterrows():
+            candles.append({
+                "time": int(ts.timestamp()),
+                "open": round(float(row["open"]), 2),
+                "high": round(float(row["high"]), 2),
+                "low": round(float(row["low"]), 2),
+                "close": round(float(row["close"]), 2),
+            })
+
+    # Build markers from trades
+    markers = []
+    for t in all_trades:
+        if t.entry_time and t.entry_price:
+            markers.append({
+                "time": int(t.entry_time.timestamp()),
+                "type": "entry",
+                "direction": t.direction,
+                "price": t.entry_price,
+                "is_winner": (t.net_pnl or 0) > 0,
+            })
+        if t.exit_time and t.exit_price:
+            markers.append({
+                "time": int(t.exit_time.timestamp()),
+                "type": "exit",
+                "direction": t.direction,
+                "price": t.exit_price,
+                "is_winner": (t.net_pnl or 0) > 0,
+            })
+
+    return {"candles": candles, "markers": markers}
+
+
+@router.get("/open-positions")
+async def get_open_positions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.engines.paper_trading.runner import get_open_positions as _get_open
+    from sqlalchemy import text
+    
+    positions = _get_open()
+    
+    # Filter to only this user's sessions
+    if not positions:
+        return []
+    
+    session_ids = [p["session_id"] for p in positions]
+    placeholders = ",".join([f"'{s}'" for s in session_ids])
+    result = await db.execute(
+        text(f"SELECT id FROM trade_sessions WHERE user_id = '{current_user.id}' AND id IN ({placeholders})")
+    )
+    user_sessions = {str(r[0]) for r in result.fetchall()}
+    
+    return [p for p in positions if p["session_id"] in user_sessions]

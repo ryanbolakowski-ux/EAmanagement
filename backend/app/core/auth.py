@@ -52,6 +52,6 @@ def require_live_trading(current_user: User = Depends(get_current_user)) -> User
     if current_user.subscription_tier not in live_tiers:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Live trading requires Tier 3 or above.",
+            detail="Live trading requires a paid plan.",
         )
     return current_user

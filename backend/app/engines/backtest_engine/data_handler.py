@@ -48,7 +48,9 @@ class DataHandler:
         df = pd.read_csv(filepath, parse_dates=["timestamp"])
         df = df.sort_values("timestamp").reset_index(drop=True)
         df = df.set_index("timestamp")
-        df.index = pd.DatetimeIndex(df.index, tz="UTC")
+        df.index = pd.DatetimeIndex(df.index)
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
         self._base_data = df
         logger.info(f"Loaded {len(df)} bars for {self.instrument} from {filepath}")
 
@@ -99,8 +101,10 @@ class DataHandler:
             if tf not in self._resampled:
                 continue
             df = self._resampled[tf]
-            sliced = df[df.index <= timestamp].tail(lookback)
-            result[tf] = sliced
+            # Binary search instead of full boolean scan — O(log n) vs O(n)
+            idx = df.index.searchsorted(timestamp, side="right")
+            start = max(0, idx - lookback)
+            result[tf] = df.iloc[start:idx]
         return result
 
     def get_timeframe_bars(self, timeframe: str) -> pd.DataFrame:

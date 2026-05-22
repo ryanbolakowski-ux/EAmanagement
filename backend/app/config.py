@@ -3,7 +3,7 @@ from typing import List
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "Edge Asset Management"
+    APP_NAME: str = "Theta Algos"
     APP_ENV: str = "development"
     SECRET_KEY: str = "changeme-at-least-32-characters-long!!"
     ALGORITHM: str = "HS256"
@@ -26,6 +26,10 @@ class Settings(BaseSettings):
 
     # Market data
     POLYGON_API_KEY: str = ""
+    IPQS_API_KEY: str = ""
+    EMAIL_KILL_SWITCH: str = "0"
+    GEO_BLOCK_ENABLED: str = "1"
+    IPQS_FRAUD_THRESHOLD: int = 85
 
     # Celery
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
@@ -34,6 +38,11 @@ class Settings(BaseSettings):
     # Stripe
     STRIPE_SECRET_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
+
+    # Email (Resend)
+    RESEND_API_KEY: str = ""
+    EMAIL_FROM: str = "onboarding@resend.dev"
+    FRONTEND_URL: str = "https://thetaalgos.com"
 
     @property
     def cors_origins_list(self) -> List[str]:

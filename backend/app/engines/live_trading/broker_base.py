@@ -100,6 +100,11 @@ class BrokerBase(ABC):
     async def get_order_status(self, broker_order_id: str) -> OrderResponse:
         ...
 
+
+    async def get_balance(self) -> dict:
+        """Return {equity, buying_power, cash, account_type, ...}."""
+        return {"equity": 0.0, "buying_power": 0.0, "cash": 0.0, "account_type": "cash", "raw": {}}
+
     # ─────────────────────────────────────────────────────────────────────────
     # Account
     # ─────────────────────────────────────────────────────────────────────────

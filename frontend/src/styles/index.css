@@ -1,12 +1,12 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
 :root {
-  --bg:         #f8fafc;
-  --surface:    #ffffff;
+  --bg:         #f1f5f9;
+  --surface:    #f8fafc;
   --border:     #e2e8f0;
   --border-2:   #cbd5e1;
   --text-1:     #0f172a;
@@ -98,3 +98,137 @@ button, a, input, select { transition: all 0.15s ease; }
 .badge-red    { background: var(--red-light);  color: #b91c1c; }
 .badge-grey   { background: #f1f5f9; color: #475569; }
 .badge-amber  { background: #fffbeb; color: #92400e; }
+
+
+/* ── Landing-page entrance animations ────────────────────────────────────── */
+@keyframes edge-fade-up {
+  from { opacity: 0; transform: translate3d(0, 24px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes edge-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes edge-scale-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes edge-bg-grid {
+  from { background-position: 0 0; }
+  to   { background-position: 80px 80px; }
+}
+@keyframes edge-blue-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.45; }
+  50%      { transform: scale(1.08); opacity: 0.7; }
+}
+@keyframes edge-line-grow {
+  from { stroke-dashoffset: 1200; }
+  to   { stroke-dashoffset: 0; }
+}
+
+.anim-fade-up      { opacity: 0; animation: edge-fade-up   0.7s ease-out forwards; }
+.anim-fade-in      { opacity: 0; animation: edge-fade-in   0.9s ease-out forwards; }
+.anim-scale-in     { opacity: 0; animation: edge-scale-in  0.7s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
+.anim-bg-grid      { animation: edge-bg-grid 24s linear infinite; }
+.anim-blue-pulse   { animation: edge-blue-pulse 6s ease-in-out infinite; }
+.anim-line-grow path { stroke-dasharray: 1200; stroke-dashoffset: 1200; animation: edge-line-grow 2.6s cubic-bezier(0.2, 0.8, 0.2, 1) 0.3s forwards; }
+
+/* Scroll-triggered reveals — element starts hidden and animates when this class is added */
+.reveal              { opacity: 0; transform: translate3d(0, 28px, 0); transition: opacity 0.65s ease-out, transform 0.65s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.reveal.is-visible   { opacity: 1; transform: translate3d(0, 0, 0); }
+
+/* ── Mobile mode (forced by DevicePicker, independent of viewport width) ── */
+body.device-mobile .p-5  { padding: 0.75rem; }
+body.device-mobile .p-6  { padding: 0.875rem; }
+body.device-mobile .p-8  { padding: 1rem; }
+body.device-mobile .px-6 { padding-left: 0.875rem; padding-right: 0.875rem; }
+body.device-mobile .py-5 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+body.device-mobile .grid-cols-4,
+body.device-mobile .lg\:grid-cols-4,
+body.device-mobile .md\:grid-cols-4,
+body.device-mobile .sm\:grid-cols-4,
+body.device-mobile .grid-cols-3,
+body.device-mobile .lg\:grid-cols-3,
+body.device-mobile .md\:grid-cols-3,
+body.device-mobile .sm\:grid-cols-3,
+body.device-mobile .sm\:grid-cols-5 {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+body.device-mobile table { font-size: 0.75rem; }
+body.device-mobile table td,
+body.device-mobile table th { padding: 0.5rem 0.6rem !important; }
+body.device-mobile .max-w-5xl,
+body.device-mobile .max-w-4xl,
+body.device-mobile .max-w-3xl { max-width: calc(100vw - 1rem) !important; }
+body.device-mobile button { min-height: 36px; }
+
+/* Respect users who don't want motion */
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-up, .anim-fade-in, .anim-scale-in,
+  .anim-bg-grid, .anim-blue-pulse, .anim-line-grow path,
+  .reveal { animation: none !important; transition: none !important; opacity: 1 !important; transform: none !important; }
+}
+
+
+/* Only target inputs that EXPLICITLY opted into the dark theme via
+   \`dark:bg-slate-800\` (or similar). Public/marketing pages now strip
+   their dark variants entirely and stay light, so we mustn't paint their
+   inputs with light text. */
+.dark input.dark\:bg-slate-800,
+.dark select.dark\:bg-slate-800,
+.dark textarea.dark\:bg-slate-800,
+.dark input.dark\:bg-slate-900,
+.dark select.dark\:bg-slate-900,
+.dark textarea.dark\:bg-slate-900 {
+  color: #f1f5f9; /* slate-100 */
+}
+.dark input.dark\:bg-slate-800::placeholder,
+.dark textarea.dark\:bg-slate-800::placeholder,
+.dark input.dark\:bg-slate-900::placeholder,
+.dark textarea.dark\:bg-slate-900::placeholder {
+  color: #64748b; /* slate-500 */
+}
+
+/* ── Dark-mode universal safety net ──────────────────────────────────── */
+/* In dark mode every near-white surface becomes dark-slate, every input
+   gets readable light text, and no white-on-white can occur anywhere.
+   These are !important so they win over any inline / utility class that
+   forgot a dark variant. */
+.dark .bg-white,
+.dark .bg-slate-50,
+.dark .bg-slate-100 {
+  background-color: #0f172a !important;       /* slate-900 */
+}
+.dark .bg-slate-200 {
+  background-color: #1e293b !important;       /* slate-800 */
+}
+.dark .bg-slate-300 {
+  background-color: #334155 !important;       /* slate-700 */
+}
+/* Borders that hug those near-white surfaces */
+.dark .border-slate-100,
+.dark .border-slate-200,
+.dark .border-slate-300 {
+  border-color: #334155 !important;           /* slate-700 */
+}
+/* Inputs/selects/textareas — always readable on dark backgrounds */
+.dark input:not([type="checkbox"]):not([type="radio"]),
+.dark select,
+.dark textarea {
+  background-color: #1e293b !important;       /* slate-800 */
+  color: #f1f5f9 !important;                  /* slate-100 */
+  border-color: #334155 !important;           /* slate-700 */
+}
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #64748b !important;                  /* slate-500 */
+}
+/* Catch-all: any element with explicit dark text on a now-dark surface
+   gets flipped to light text. Tailwind's text-slate-9XX classes specify
+   colors as inline rules with !important via Tailwind's preflight, so
+   we have to override per-class. */
+.dark .text-slate-900,
+.dark .text-slate-800 { color: #f1f5f9 !important; }
+.dark .text-slate-700 { color: #e2e8f0 !important; }
+.dark .text-slate-600 { color: #cbd5e1 !important; }
+.dark .text-slate-500 { color: #94a3b8 !important; }

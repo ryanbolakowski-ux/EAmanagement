@@ -14,6 +14,10 @@ from app.engines.live_trading.broker_base import BrokerBase, OrderRequest, Order
 
 TICK_SIZES  = {"ES": 0.25, "NQ": 0.25, "RTY": 0.10, "YM": 1.0}
 TICK_VALUES = {"ES": 12.50, "NQ": 5.00, "RTY": 5.00, "YM": 5.00}
+MINI_TO_MICRO = {"ES": "MES", "NQ": "MNQ", "RTY": "M2K", "YM": "MYM"}
+TICK_SIZES.update({"MES": 0.25, "MNQ": 0.25, "M2K": 0.10, "MYM": 1.0})
+TICK_VALUES.update({"MES": 1.25, "MNQ": 0.50, "M2K": 0.50, "MYM": 0.50})
+
 
 
 @dataclass
@@ -130,19 +134,74 @@ class LiveTrader:
             if price <= p.stop_loss:
                 logger.info(f"[LiveTrader] Tick SL reached @ {price:.2f}")
                 await self._cancel_bracket_and_close(price, ExitReason.SL_HIT)
+            elif price >= p.take_profit:
+                # Bug #12 fix: also exit on tick-level TP. Belt and suspenders
+                # in case the broker-side bracket TP order silently rejects
+                # or cancels (Tradovate has done this on partial fills).
+                logger.info(f"[LiveTrader] Tick TP reached @ {price:.2f}")
+                await self._cancel_bracket_and_close(price, ExitReason.TP_HIT)
         else:
             if price >= p.stop_loss:
                 logger.info(f"[LiveTrader] Tick SL reached @ {price:.2f}")
                 await self._cancel_bracket_and_close(price, ExitReason.SL_HIT)
+            elif price <= p.take_profit:
+                logger.info(f"[LiveTrader] Tick TP reached @ {price:.2f}")
+                await self._cancel_bracket_and_close(price, ExitReason.TP_HIT)
+
+    def _pick_contract_size(self, entry, stop, tick_size, tick_value, cap):
+        """Risk-based size: never risk more than 1% of starting equity (or
+        $100, whichever is greater) on a single trade. Conservative default
+        for live trading."""
+        if entry == stop or tick_size <= 0 or tick_value <= 0:
+            return 0
+        risk_per_contract = abs(entry - stop) / tick_size * tick_value
+        if risk_per_contract <= 0:
+            return 0
+        # Default $200 dollar-risk per trade for live. Override via
+        # self.session_risk_per_trade if you wire it through.
+        max_risk = getattr(self, "session_risk_per_trade", 200.0)
+        sized = int(max_risk // risk_per_contract)
+        return max(0, min(cap, sized))
+
+    def _pick_contract_size_with_micro(self, entry, stop, configured_instrument, cap):
+        """Mirror of paper_trader._pick_contract_size_with_micro — sizes on
+        the configured (mini) symbol; falls back to the micro variant when
+        the account can't afford even one mini, with 10x the contract cap."""
+        ts = TICK_SIZES.get(configured_instrument, 0.25)
+        tv = TICK_VALUES.get(configured_instrument, 12.50)
+        n = self._pick_contract_size(entry, stop, ts, tv, cap)
+        if n >= 1:
+            return n, configured_instrument, ts, tv
+        micro = MINI_TO_MICRO.get(configured_instrument)
+        if not micro:
+            return 0, configured_instrument, ts, tv
+        ts_m = TICK_SIZES.get(micro, 0.25)
+        tv_m = TICK_VALUES.get(micro, 1.25)
+        n_m = self._pick_contract_size(entry, stop, ts_m, tv_m, cap * 10)
+        return n_m, micro, ts_m, tv_m
 
     async def _execute_entry(self, signal):
         side = OrderSide.BUY if signal.signal == SignalType.LONG else OrderSide.SELL
 
+        # Bug #11 fix: risk-based sizing rather than trusting signal.contracts
+        # (which is just strategy.max_contracts). Falls back to micros when
+        # the account can't afford a mini.
+        strategy_cap = max(1, int(getattr(signal, "contracts", 1) or 1))
+        contracts, traded_instrument, _ts, _tv = self._pick_contract_size_with_micro(
+            signal.entry_price, signal.stop_loss, self.instrument, strategy_cap,
+        )
+        if contracts < 1:
+            logger.warning(f"[LiveTrader] Rejected trade — account can't afford even 1 micro on {self.instrument} @ {signal.entry_price} (SL={signal.stop_loss})")
+            return
+        # If we fell back to micros, swap the traded instrument
+        if traded_instrument != self.instrument:
+            logger.info(f"[LiveTrader] Sized down to {traded_instrument} (account can't afford {self.instrument})")
+
         # Place market entry order
         entry_order = await self.broker.place_order(OrderRequest(
-            instrument=self.instrument,
+            instrument=traded_instrument,
             side=side,
-            quantity=signal.contracts,
+            quantity=contracts,
             order_type=OrderType.MARKET,
         ))
         logger.info(f"[LiveTrader] Entry order placed: {entry_order.broker_order_id}")
@@ -150,29 +209,29 @@ class LiveTrader:
         # Place bracket SL order
         sl_side  = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
         sl_order = await self.broker.place_order(OrderRequest(
-            instrument=self.instrument,
+            instrument=traded_instrument,
             side=sl_side,
-            quantity=signal.contracts,
+            quantity=contracts,
             order_type=OrderType.STOP,
             stop_price=signal.stop_loss,
         ))
 
         # Place bracket TP order
         tp_order = await self.broker.place_order(OrderRequest(
-            instrument=self.instrument,
+            instrument=traded_instrument,
             side=sl_side,
-            quantity=signal.contracts,
+            quantity=contracts,
             order_type=OrderType.LIMIT,
             price=signal.take_profit,
         ))
 
         self._position = LivePosition(
-            instrument=self.instrument,
+            instrument=traded_instrument,
             direction=signal.signal.value,
             entry_price=signal.entry_price,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
-            contracts=signal.contracts,
+            contracts=contracts,
             entry_time=datetime.utcnow(),
             broker_order_id=entry_order.broker_order_id,
             sl_order_id=sl_order.broker_order_id,

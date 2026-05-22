@@ -31,7 +31,7 @@ class Strategy(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[StrategyStatus] = mapped_column(Enum(StrategyStatus), default=StrategyStatus.DRAFT)
+    status: Mapped[StrategyStatus] = mapped_column(Enum(StrategyStatus, name="strategystatus"), default=StrategyStatus.DRAFT)
 
     # Instrument config
     instruments: Mapped[list] = mapped_column(JSON, default=list)  # e.g. ["ES", "NQ"]
@@ -56,6 +56,7 @@ class Strategy(Base):
 
     # Full strategy definition as structured JSON (rule tree)
     rule_tree: Mapped[dict] = mapped_column(JSON, default=dict)
+    starred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Risk controls
     max_daily_loss: Mapped[float | None] = mapped_column(nullable=True)
@@ -79,7 +80,7 @@ class StrategyCondition(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     strategy_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("strategies.id"), nullable=False)
-    condition_type: Mapped[ConditionType] = mapped_column(Enum(ConditionType), nullable=False)
+    condition_type: Mapped[ConditionType] = mapped_column(Enum(ConditionType, name="conditiontype"), nullable=False)
     sequence_order: Mapped[int] = mapped_column(Integer, nullable=False)  # Order of execution
     timeframe: Mapped[str | None] = mapped_column(String(10), nullable=True)
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)

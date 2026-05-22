@@ -1,0 +1,49 @@
+# Secrets — NEVER commit
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!.env.template
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Timestamped backup files left by inline edits
+*.bak
+*.bak.*
+*.orig
+
+# Logs / data
+*.log
+logs/
+data/cache/
+*.duckdb
+*.duckdb.wal
+
+# Local databento / market data dumps
+backend/data/
+backend/*.parquet
+backend/dl_*.py

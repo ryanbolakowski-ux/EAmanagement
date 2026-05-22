@@ -22,10 +22,48 @@ TRADOVATE_DEMO_URL  = "https://demo.tradovate.com/v1"
 TRADOVATE_WS_LIVE   = "wss://live.tradovate.com/v1/websocket"
 TRADOVATE_WS_DEMO   = "wss://demo.tradovate.com/v1/websocket"
 
-INSTRUMENT_MAP = {
-    "ES": "ESU4",   # Update to current contract month
-    "NQ": "NQU4",
-}
+# CME front-month contract codes follow CCYY: H=Mar, M=Jun, U=Sep, Z=Dec.
+# Tradovate accepts the bare root (`ESM6`) — month code + 1-digit year.
+# `current_front_month("ES")` returns the active contract for today.
+def current_front_month(root: str, today=None) -> str:
+    from datetime import date as _date
+    today = today or _date.today()
+    # Quarterly cycle — Mar(3), Jun(6), Sep(9), Dec(12). Active contract
+    # is the next quarterly month strictly after the current.
+    months = [(3, "H"), (6, "M"), (9, "U"), (12, "Z")]
+    yr = today.year
+    code = None
+    for m, c in months:
+        # Roll one week before expiry (8th of the expiry month). Front-month
+        # is "this quarter" until that date, then the next quarter.
+        if today.month < m or (today.month == m and today.day < 8):
+            code = c
+            yr_code = yr % 10
+            break
+    if code is None:
+        # Past December — front month is next year's March
+        code = "H"
+        yr_code = (yr + 1) % 10
+    return f"{root}{code}{yr_code}"
+
+
+def instrument_to_tradovate_symbol(instrument: str) -> str:
+    """Translate the platform's instrument code (e.g. `ES`, `NQ`, `MES`,
+    `MNQ`) into the correct Tradovate front-month contract symbol."""
+    roots = {"ES": "ES", "NQ": "NQ", "RTY": "RTY", "YM": "YM",
+             "MES": "MES", "MNQ": "MNQ", "M2K": "M2K", "MYM": "MYM"}
+    root = roots.get(instrument.upper(), instrument.upper())
+    return current_front_month(root)
+
+
+# Legacy alias — uses the dynamic resolver
+class _InstrumentMap(dict):
+    def get(self, key, default=None):
+        try:
+            return instrument_to_tradovate_symbol(key)
+        except Exception:
+            return default or key
+INSTRUMENT_MAP = _InstrumentMap()
 
 
 class TradovateBroker(BrokerBase):
@@ -181,7 +219,7 @@ class TradovateBroker(BrokerBase):
 
     async def get_account_info(self) -> AccountInfo:
         try:
-            async with self._session.get(
+            async with self._session.post(
                 f"{self.base_url}/cashbalance/getcashbalancesnapshot",
                 json={"accountId": self._account_id},
                 headers=self._headers(),

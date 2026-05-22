@@ -18,7 +18,7 @@ class OptimizationRun(Base):
     __tablename__ = "optimization_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    strategy_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("strategies.id"), nullable=False)
+    strategy_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
     instrument: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -40,7 +40,7 @@ class OptimizationRun(Base):
     total_combinations: Mapped[int] = mapped_column(Integer, default=0)
     completed_combinations: Mapped[int] = mapped_column(Integer, default=0)
 
-    status: Mapped[OptimizationStatus] = mapped_column(Enum(OptimizationStatus), default=OptimizationStatus.QUEUED)
+    status: Mapped[OptimizationStatus] = mapped_column(Enum(OptimizationStatus, name="optimizationstatus"), default=OptimizationStatus.QUEUED)
     celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 

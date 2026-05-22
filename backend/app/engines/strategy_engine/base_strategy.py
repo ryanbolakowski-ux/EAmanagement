@@ -19,6 +19,7 @@ class SignalType(str, Enum):
 class ExitReason(str, Enum):
     TP_HIT = "tp_hit"
     SL_HIT = "sl_hit"
+    BREAKEVEN = "breakeven"  # stop was moved to entry and triggered there
     MANUAL = "manual"
     SESSION_END = "session_end"
     KILL_SWITCH = "kill_switch"
@@ -52,6 +53,35 @@ class StrategyConfig:
     fvg_max_size_ticks: Optional[int] = None
     max_daily_loss: Optional[float] = None
     max_trades_per_day: Optional[int] = None
+    # Optional confirmation filters. When True, the engine vetoes entries
+    # that don't pass the corresponding indicator check.
+    use_rsi_filter: bool = False
+    rsi_period: int = 14
+    rsi_long_max: float = 70.0    # block longs when RSI is overheated
+    rsi_short_min: float = 30.0   # block shorts when RSI is oversold
+    use_vwap_filter: bool = False
+
+    # ── Options-specific config (used by the options engine, ignored elsewhere) ──
+    # The user-provided framework defines five swing-options modes:
+    #   trend_pullback | breakout | vertical_spread | earnings_catalyst | wheel
+    options_mode: Optional[str] = None
+    # Position sizing as a % of account equity (1-2% per the user's rules)
+    options_risk_per_trade_pct: float = 1.5
+    # Days to expiration: at least 30 to minimize theta decay
+    options_min_dte: int = 30
+    options_max_dte: int = 60
+    # Delta band for strike selection. 0.30-0.50 = balance of leverage and decay,
+    # 0.55+ = more ITM (safer, less leverage), set higher when prefer_itm is on.
+    options_target_delta_min: float = 0.30
+    options_target_delta_max: float = 0.50
+    options_prefer_itm: bool = False
+    # Vertical-spread width in strikes (e.g. 5 = sell strike +5 above the long leg)
+    options_spread_width: int = 5
+    # Breakout strategy: require today's volume be at least Nx the 20-day average
+    options_breakout_volume_mult: float = 2.0
+    # Skip trades when earnings are within N days (default 7), unless mode is
+    # earnings_catalyst (which DEPENDS on earnings being near).
+    options_avoid_earnings_days: int = 7
 
 
 class BaseStrategy(ABC):

@@ -4,6 +4,8 @@ import { BrowserRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import './styles/index.css'
+// Side-effect import: applies the saved theme class to <html> before first paint
+import './stores/themeStore'
 
 const queryClient = new QueryClient({
   defaultOptions: {

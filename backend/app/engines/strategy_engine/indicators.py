@@ -1,21 +1,17 @@
 """
 Market structure indicators used by the strategy engine.
-Implements: Liquidity Sweeps, Fair Value Gaps (FVG), Inverse FVGs (IFVG).
-All functions operate on pandas DataFrames with OHLCV columns.
+Implements: Liquidity Sweeps, Fair Value Gaps (FVG), Swing Detection.
+Based on LuxAlgo FVG logic for gap detection and mitigation tracking.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import pandas as pd
 import numpy as np
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Data structures
-# ─────────────────────────────────────────────────────────────────────────────
-
 @dataclass
 class FairValueGap:
-    direction: str          # "bullish" or "bearish"
+    direction: str
     high: float
     low: float
     midpoint: float
@@ -23,6 +19,7 @@ class FairValueGap:
     timestamp: pd.Timestamp
     size_ticks: float
     filled: bool = False
+    ce_level: float = 0.0  # Consequent Encroachment (50%)
 
     @property
     def size(self) -> float:
@@ -31,7 +28,7 @@ class FairValueGap:
 
 @dataclass
 class LiquiditySweep:
-    direction: str          # "high_sweep" or "low_sweep"
+    direction: str
     swept_level: float
     sweep_bar_index: int
     sweep_timestamp: pd.Timestamp
@@ -42,279 +39,302 @@ class LiquiditySweep:
 
 @dataclass
 class SwingLevel:
-    direction: str          # "high" or "low"
+    direction: str
     price: float
     bar_index: int
     timestamp: pd.Timestamp
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Instrument tick sizes
-# ─────────────────────────────────────────────────────────────────────────────
-
 TICK_SIZES = {
-    "ES": 0.25,
-    "NQ": 0.25,
-    "RTY": 0.10,
-    "YM": 1.0,
-    "CL": 0.01,
-    "GC": 0.10,
+    "ES": 0.25, "NQ": 0.25, "RTY": 0.10, "YM": 1.0, "CL": 0.01, "GC": 0.10,
 }
 
-def get_tick_size(instrument: str) -> float:
+def get_tick_size(instrument: str, use_etf: bool = False) -> float:
+    if use_etf:
+        # ETF equivalents have much smaller tick sizes
+        ETF_TICK_SIZES = {"ES": 0.03, "NQ": 0.03, "RTY": 0.01, "YM": 0.05}
+        return ETF_TICK_SIZES.get(instrument.upper(), 0.03)
     return TICK_SIZES.get(instrument.upper(), 0.25)
-
 
 def price_to_ticks(price_diff: float, instrument: str) -> float:
     tick = get_tick_size(instrument)
-    return abs(price_diff) / tick
+    return abs(price_diff) / tick if tick > 0 else 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Swing High / Swing Low detection
-# ─────────────────────────────────────────────────────────────────────────────
-
-def find_swing_highs(df: pd.DataFrame, lookback: int = 5) -> list[SwingLevel]:
-    """Find swing highs: bars where high is the highest in +/- lookback bars."""
+def find_swing_highs(df: pd.DataFrame, lookback: int = 3) -> list[SwingLevel]:
     swings = []
     highs = df["high"].values
     for i in range(lookback, len(highs) - lookback):
         window = highs[i - lookback: i + lookback + 1]
-        if highs[i] == window.max():
+        if highs[i] == window.max() and np.sum(window == highs[i]) == 1:
             swings.append(SwingLevel(
-                direction="high",
-                price=float(highs[i]),
-                bar_index=i,
-                timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else df["timestamp"].iloc[i],
+                direction="high", price=float(highs[i]), bar_index=i,
+                timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else pd.Timestamp.now(),
             ))
     return swings
 
 
-def find_swing_lows(df: pd.DataFrame, lookback: int = 5) -> list[SwingLevel]:
-    """Find swing lows: bars where low is the lowest in +/- lookback bars."""
+def find_swing_lows(df: pd.DataFrame, lookback: int = 3) -> list[SwingLevel]:
     swings = []
     lows = df["low"].values
     for i in range(lookback, len(lows) - lookback):
         window = lows[i - lookback: i + lookback + 1]
-        if lows[i] == window.min():
+        if lows[i] == window.min() and np.sum(window == lows[i]) == 1:
             swings.append(SwingLevel(
-                direction="low",
-                price=float(lows[i]),
-                bar_index=i,
-                timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else df["timestamp"].iloc[i],
+                direction="low", price=float(lows[i]), bar_index=i,
+                timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else pd.Timestamp.now(),
             ))
     return swings
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Liquidity Sweep Detection
-# ─────────────────────────────────────────────────────────────────────────────
-
 def detect_liquidity_sweeps(
-    df: pd.DataFrame,
-    lookback: int = 5,
-    instrument: str = "ES",
-    min_sweep_ticks: float = 1.0,
+    df: pd.DataFrame, lookback: int = 3, instrument: str = "ES", min_sweep_ticks: float = 0.5,
 ) -> list[LiquiditySweep]:
-    """
-    Detect when price sweeps a previous swing high or low and closes back inside.
-    A sweep of a high = wick above prior swing high + close below it (bearish sweep).
-    A sweep of a low  = wick below prior swing low  + close above it (bullish sweep).
-    """
     sweeps = []
     tick = get_tick_size(instrument)
-
     swing_highs = find_swing_highs(df, lookback)
-    swing_lows  = find_swing_lows(df, lookback)
+    swing_lows = find_swing_lows(df, lookback)
 
     for i in range(lookback + 1, len(df)):
         bar = df.iloc[i]
-
-        # Check against recent swing highs (bearish sweep)
         for sh in swing_highs:
-            if sh.bar_index >= i:
+            if sh.bar_index >= i or i - sh.bar_index > lookback * 4:
                 continue
-            if i - sh.bar_index > lookback * 3:
-                continue  # Too old
             swept_amount = (bar["high"] - sh.price) / tick
             if swept_amount >= min_sweep_ticks and bar["close"] < sh.price:
                 sweeps.append(LiquiditySweep(
-                    direction="high_sweep",
-                    swept_level=sh.price,
-                    sweep_bar_index=i,
-                    sweep_timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else df["timestamp"].iloc[i],
-                    sweep_high=float(bar["high"]),
-                    sweep_low=float(bar["low"]),
-                    sweep_close=float(bar["close"]),
+                    direction="high_sweep", swept_level=sh.price, sweep_bar_index=i,
+                    sweep_timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else pd.Timestamp.now(),
+                    sweep_high=float(bar["high"]), sweep_low=float(bar["low"]), sweep_close=float(bar["close"]),
                 ))
-
-        # Check against recent swing lows (bullish sweep)
         for sl in swing_lows:
-            if sl.bar_index >= i:
-                continue
-            if i - sl.bar_index > lookback * 3:
+            if sl.bar_index >= i or i - sl.bar_index > lookback * 4:
                 continue
             swept_amount = (sl.price - bar["low"]) / tick
             if swept_amount >= min_sweep_ticks and bar["close"] > sl.price:
                 sweeps.append(LiquiditySweep(
-                    direction="low_sweep",
-                    swept_level=sl.price,
-                    sweep_bar_index=i,
-                    sweep_timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else df["timestamp"].iloc[i],
-                    sweep_high=float(bar["high"]),
-                    sweep_low=float(bar["low"]),
-                    sweep_close=float(bar["close"]),
+                    direction="low_sweep", swept_level=sl.price, sweep_bar_index=i,
+                    sweep_timestamp=df.index[i] if isinstance(df.index, pd.DatetimeIndex) else pd.Timestamp.now(),
+                    sweep_high=float(bar["high"]), sweep_low=float(bar["low"]), sweep_close=float(bar["close"]),
                 ))
-
     return sweeps
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fair Value Gap (FVG) Detection
-# ─────────────────────────────────────────────────────────────────────────────
-
 def detect_fvgs(
-    df: pd.DataFrame,
-    instrument: str = "ES",
-    min_size_ticks: float = 4.0,
-    max_size_ticks: Optional[float] = None,
+    df: pd.DataFrame, instrument: str = "ES",
+    min_size_ticks: float = 1.0, max_size_ticks: Optional[float] = None,
+    use_atr_filter: bool = False, atr_multiplier: float = 0.25,
 ) -> list[FairValueGap]:
     """
-    FVG = 3-bar pattern:
-      Bullish FVG: bar[i-2].high < bar[i].low  (gap between candle 1 and candle 3)
-      Bearish FVG: bar[i-2].low  > bar[i].high
+    LuxAlgo-style FVG detection.
+    Bullish FVG: candle[i].low > candle[i-2].high (gap between wick of c1 and wick of c3)
+    Bearish FVG: candle[i].high < candle[i-2].low
+    Tracks CE (Consequent Encroachment = 50% of gap) and mitigation.
     """
     fvgs = []
     tick = get_tick_size(instrument)
 
+    atr_values = None
+    if use_atr_filter and len(df) >= 14:
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
+        tr = np.maximum(highs[1:] - lows[1:], np.maximum(
+            np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])
+        ))
+        atr_values = pd.Series(tr).rolling(14).mean().values
+
     for i in range(2, len(df)):
         c1 = df.iloc[i - 2]
+        c2 = df.iloc[i - 1]  # Middle candle (the displacement)
         c3 = df.iloc[i]
-        ts = df.index[i] if isinstance(df.index, pd.DatetimeIndex) else df["timestamp"].iloc[i]
+        ts = df.index[i] if isinstance(df.index, pd.DatetimeIndex) else pd.Timestamp.now()
 
-        # Bullish FVG
-        if c1["high"] < c3["low"]:
-            gap_low  = float(c1["high"])
+        # Bullish FVG: gap up - c3 low is above c1 high
+        if c3["low"] > c1["high"]:
+            gap_low = float(c1["high"])
             gap_high = float(c3["low"])
-            size_ticks = price_to_ticks(gap_high - gap_low, instrument)
+            gap_size = gap_high - gap_low
+            size_ticks = gap_size / tick if tick > 0 else 0
+
+            # ATR filter: gap must be significant relative to ATR
+            if use_atr_filter and atr_values is not None and i - 1 < len(atr_values):
+                atr = atr_values[i - 1]
+                if atr > 0 and gap_size < atr * atr_multiplier:
+                    continue
+
             if size_ticks >= min_size_ticks and (max_size_ticks is None or size_ticks <= max_size_ticks):
+                ce = gap_low + gap_size * 0.5
+                # Check if already filled by subsequent bars
+                filled = False
+                for j in range(i + 1, min(i + 20, len(df))):
+                    if df.iloc[j]["low"] <= gap_low:
+                        filled = True
+                        break
                 fvgs.append(FairValueGap(
-                    direction="bullish",
-                    high=gap_high,
-                    low=gap_low,
-                    midpoint=(gap_high + gap_low) / 2,
-                    bar_index=i,
-                    timestamp=ts,
-                    size_ticks=size_ticks,
+                    direction="bullish", high=gap_high, low=gap_low,
+                    midpoint=ce, bar_index=i, timestamp=ts,
+                    size_ticks=size_ticks, filled=filled, ce_level=ce,
                 ))
 
-        # Bearish FVG
-        elif c1["low"] > c3["high"]:
-            gap_low  = float(c3["high"])
+        # Bearish FVG: gap down - c3 high is below c1 low
+        if c3["high"] < c1["low"]:
             gap_high = float(c1["low"])
-            size_ticks = price_to_ticks(gap_high - gap_low, instrument)
+            gap_low = float(c3["high"])
+            gap_size = gap_high - gap_low
+            size_ticks = gap_size / tick if tick > 0 else 0
+
+            if use_atr_filter and atr_values is not None and i - 1 < len(atr_values):
+                atr = atr_values[i - 1]
+                if atr > 0 and gap_size < atr * atr_multiplier:
+                    continue
+
             if size_ticks >= min_size_ticks and (max_size_ticks is None or size_ticks <= max_size_ticks):
+                ce = gap_high - gap_size * 0.5
+                filled = False
+                for j in range(i + 1, min(i + 20, len(df))):
+                    if df.iloc[j]["high"] >= gap_high:
+                        filled = True
+                        break
                 fvgs.append(FairValueGap(
-                    direction="bearish",
-                    high=gap_high,
-                    low=gap_low,
-                    midpoint=(gap_high + gap_low) / 2,
-                    bar_index=i,
-                    timestamp=ts,
-                    size_ticks=size_ticks,
+                    direction="bearish", high=gap_high, low=gap_low,
+                    midpoint=ce, bar_index=i, timestamp=ts,
+                    size_ticks=size_ticks, filled=filled, ce_level=ce,
                 ))
 
     return fvgs
 
 
-def mark_filled_fvgs(fvgs: list[FairValueGap], df: pd.DataFrame) -> list[FairValueGap]:
-    """Mark FVGs as filled once price closes fully through them."""
-    for fvg in fvgs:
-        subsequent = df.iloc[fvg.bar_index + 1:]
-        if fvg.direction == "bullish":
-            if (subsequent["low"] < fvg.low).any():
-                fvg.filled = True
-        else:
-            if (subsequent["high"] > fvg.high).any():
-                fvg.filled = True
-    return fvgs
 
-
-def price_in_fvg(price: float, fvg: FairValueGap) -> bool:
-    """Returns True if price is inside the FVG zone."""
-    return fvg.low <= price <= fvg.high
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Inverse FVG (IFVG) Detection
-# ─────────────────────────────────────────────────────────────────────────────
-
-def detect_inverse_fvgs(
-    fvgs: list[FairValueGap],
-    df: pd.DataFrame,
-    instrument: str = "ES",
+def detect_ifvgs(
+    df: pd.DataFrame, instrument: str = "ES",
+    min_size_ticks: float = 1.0, max_size_ticks: Optional[float] = None,
 ) -> list[FairValueGap]:
     """
-    An IFVG forms when price returns to a previously detected FVG
-    and then fails to continue — the zone flips from support to resistance or vice versa.
-    Returns FVG objects with direction inverted (they now act in the opposite role).
+    Inverse FVG (IFVG) detection.
+    An IFVG forms when price fills/trades through an existing FVG and creates
+    a new gap in the OPPOSITE direction.
+    
+    Bullish IFVG: A bearish FVG gets filled, and on the fill candle sequence,
+    a new bullish gap forms (support level).
+    Bearish IFVG: A bullish FVG gets filled, and on the fill candle sequence,
+    a new bearish gap forms (resistance level).
     """
+    fvgs = detect_fvgs(df, instrument, min_size_ticks=0.5)
     ifvgs = []
+    tick = get_tick_size(instrument)
+    
     for fvg in fvgs:
-        if fvg.filled:
+        if not fvg.filled:
             continue
-        subsequent = df.iloc[fvg.bar_index + 1:]
-        if fvg.direction == "bullish":
-            # Price returns into the bullish FVG from above
-            entered = subsequent[(subsequent["low"] <= fvg.high) & (subsequent["low"] >= fvg.low)]
-            if not entered.empty:
-                # Check if the candle that re-entered rejected (closed back above)
-                entry_bar = entered.iloc[0]
-                if entry_bar["close"] > fvg.midpoint:
-                    # Rejection — it's now an IFVG (acts as support confirmed)
-                    ifvgs.append(FairValueGap(
-                        direction="bullish_confirmed",
-                        high=fvg.high,
-                        low=fvg.low,
-                        midpoint=fvg.midpoint,
-                        bar_index=fvg.bar_index,
-                        timestamp=fvg.timestamp,
-                        size_ticks=fvg.size_ticks,
-                    ))
-        elif fvg.direction == "bearish":
-            entered = subsequent[(subsequent["high"] >= fvg.low) & (subsequent["high"] <= fvg.high)]
-            if not entered.empty:
-                entry_bar = entered.iloc[0]
-                if entry_bar["close"] < fvg.midpoint:
-                    ifvgs.append(FairValueGap(
-                        direction="bearish_confirmed",
-                        high=fvg.high,
-                        low=fvg.low,
-                        midpoint=fvg.midpoint,
-                        bar_index=fvg.bar_index,
-                        timestamp=fvg.timestamp,
-                        size_ticks=fvg.size_ticks,
-                    ))
+        # Find where the FVG was filled
+        for i in range(fvg.bar_index + 1, min(fvg.bar_index + 30, len(df))):
+            filled_here = False
+            if fvg.direction == "bullish" and df.iloc[i]["low"] <= fvg.low:
+                filled_here = True
+            elif fvg.direction == "bearish" and df.iloc[i]["high"] >= fvg.high:
+                filled_here = True
+            
+            if filled_here and i + 2 < len(df):
+                # Check for inverse gap forming at the fill point
+                c1 = df.iloc[i]
+                c3 = df.iloc[i + 2]
+                ts = df.index[i + 2] if isinstance(df.index, pd.DatetimeIndex) else pd.Timestamp.now()
+                
+                if fvg.direction == "bearish" and c3["low"] > c1["high"]:
+                    # Bearish FVG filled -> Bullish IFVG forms (support)
+                    gap_low = float(c1["high"])
+                    gap_high = float(c3["low"])
+                    size_ticks = (gap_high - gap_low) / tick if tick > 0 else 0
+                    if size_ticks >= min_size_ticks:
+                        ce = gap_low + (gap_high - gap_low) * 0.5
+                        ifvgs.append(FairValueGap(
+                            direction="bullish", high=gap_high, low=gap_low,
+                            midpoint=ce, bar_index=i + 2, timestamp=ts,
+                            size_ticks=size_ticks, filled=False, ce_level=ce,
+                        ))
+                
+                elif fvg.direction == "bullish" and c3["high"] < c1["low"]:
+                    # Bullish FVG filled -> Bearish IFVG forms (resistance)
+                    gap_high = float(c1["low"])
+                    gap_low = float(c3["high"])
+                    size_ticks = (gap_high - gap_low) / tick if tick > 0 else 0
+                    if size_ticks >= min_size_ticks:
+                        ce = gap_high - (gap_high - gap_low) * 0.5
+                        ifvgs.append(FairValueGap(
+                            direction="bearish", high=gap_high, low=gap_low,
+                            midpoint=ce, bar_index=i + 2, timestamp=ts,
+                            size_ticks=size_ticks, filled=False, ce_level=ce,
+                        ))
+                break
+    
     return ifvgs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Session Filter
-# ─────────────────────────────────────────────────────────────────────────────
-
-SESSION_HOURS_UTC = {
-    "NY":     (13, 21),  # 9am–5pm EST
-    "LONDON": (8, 16),
-    "ASIA":   (0, 8),
-    "NY_AM":  (13, 17),  # 9am–1pm EST only
-}
-
-def is_in_session(timestamp: pd.Timestamp, sessions: list[str]) -> bool:
-    if not sessions:
+def is_in_session(timestamp, session_filters: list[str]) -> bool:
+    if not session_filters:
         return True
-    hour_utc = timestamp.hour
-    for session in sessions:
-        bounds = SESSION_HOURS_UTC.get(session.upper())
-        if bounds and bounds[0] <= hour_utc < bounds[1]:
-            return True
+    if not isinstance(timestamp, pd.Timestamp):
+        timestamp = pd.Timestamp(timestamp)
+    if timestamp.tz is not None:
+        est = timestamp.tz_convert("US/Eastern")
+    else:
+        est = timestamp.tz_localize("UTC").tz_convert("US/Eastern")
+    hour = est.hour
+    minute = est.minute
+    t = hour * 60 + minute
+
+    sessions = {
+        "NY": (9 * 60 + 30, 16 * 60),
+        "NY_AM": (9 * 60 + 30, 12 * 60),
+        "NY_PM": (14 * 60, 15 * 60),
+        "LONDON": (2 * 60, 5 * 60),
+        "LONDON_CLOSE": (10 * 60, 12 * 60),
+        "ASIA": (20 * 60, 24 * 60),
+    }
+
+    for sf in session_filters:
+        key = sf.upper()
+        if key in sessions:
+            start, end = sessions[key]
+            if start <= t < end:
+                return True
     return False
+
+
+def compute_rsi(closes, period: int = 14):
+    """Wilder's RSI on the most recent bar. Returns None if not enough data."""
+    s = pd.Series(closes)
+    if len(s) < period + 1:
+        return None
+    delta = s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    last_loss = avg_loss.iloc[-1]
+    if last_loss == 0:
+        return 100.0
+    rs = avg_gain.iloc[-1] / last_loss
+    return float(100.0 - (100.0 / (1.0 + rs)))
+
+
+def compute_session_vwap(df):
+    """Session-anchored VWAP for the latest bar. Resets at the start of each
+    UTC trading day. Returns None if df is empty.
+    """
+    if df is None or df.empty:
+        return None
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return None
+    last_ts = df.index[-1]
+    anchor = pd.Timestamp(last_ts.year, last_ts.month, last_ts.day, tz=last_ts.tz)
+    today = df[df.index >= anchor]
+    if today.empty:
+        today = df.tail(60)
+    typical = (today["high"] + today["low"] + today["close"]) / 3.0
+    vol = today["volume"].clip(lower=0).fillna(0) if "volume" in today else pd.Series([0] * len(today), index=today.index)
+    total_vol = vol.sum()
+    if total_vol <= 0:
+        return float(typical.iloc[-1])
+    return float((typical * vol).sum() / total_vol)

@@ -5,14 +5,32 @@ Tracks PnL, open positions, and session metrics identically to live trading.
 """
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 from loguru import logger
+import redis as redis_lib
 
 from app.engines.strategy_engine.base_strategy import BaseStrategy, TradeSignal, SignalType, ExitReason
 
-TICK_VALUES = {"ES": 12.50, "NQ": 5.00, "RTY": 5.00, "YM": 5.00}
-TICK_SIZES  = {"ES": 0.25,  "NQ": 0.25, "RTY": 0.10, "YM": 1.0}
+# Shared connection used by every PaperTrader to coordinate signal locks across
+# sibling traders running on the same (user, strategy, instrument). Without this,
+# multiple sessions on the same setup all open identical trades simultaneously.
+_redis = redis_lib.Redis(host="redis", port=6379, db=0, decode_responses=True)
+_SIGNAL_LOCK_TTL = 600  # seconds — matches typical max position holding window
+
+TICK_VALUES = {
+    "ES":  12.50, "NQ":  5.00, "RTY": 5.00, "YM":  5.00,
+    "MES": 1.25,  "MNQ": 0.50, "M2K": 0.50, "MYM": 0.50,
+}
+TICK_SIZES = {
+    "ES":  0.25, "NQ":  0.25, "RTY": 0.10, "YM":  1.0,
+    "MES": 0.25, "MNQ": 0.25, "M2K": 0.10, "MYM": 1.0,
+}
+# When the paper account is too small to risk even one mini, fall back
+# to the 1/10-notional micro variant. Without this every signal would
+# either size to 100 contracts (old bug) or be rejected for an account
+# under ~$50k.
+MINI_TO_MICRO = {"ES": "MES", "NQ": "MNQ", "RTY": "M2K", "YM": "MYM"}
 
 
 @dataclass
@@ -60,13 +78,22 @@ class PaperTrader:
         instrument: str,
         commission_per_side: float = 2.25,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        starting_balance: float = 10_000.0,
+        risk_per_trade_pct: float = 1.0,
+        max_contracts_cap: int = 20,
+        daily_loss_pct_kill: float = 3.0,
     ):
         self.strategy    = strategy
         self.instrument  = instrument.upper()
         self.commission  = commission_per_side
         self.session_id  = session_id
+        self.user_id     = user_id
+        self.strategy_id = strategy_id
 
         self._position: Optional[PaperPosition] = None
+        self._last_price: float = 0.0
         self._completed_trades: list[PaperTradeResult] = []
         self._is_running: bool = False
         self._current_date: Optional[date] = None
@@ -74,7 +101,22 @@ class PaperTrader:
         self._daily_trades: int = 0
         self._kill_switch: bool = False
 
+        # ── Risk-based sizing state ────────────────────────────────────
+        # Without this every signal opens `strategy.max_contracts` contracts
+        # regardless of account size — that bug cost the user $87k in a day.
+        # We now size each trade off current equity (starting balance + rolling
+        # P&L) using the same stop-distance math as the backtest engine.
+        self._starting_balance: float = float(starting_balance)
+        self._equity: float = float(starting_balance)
+        self._risk_per_trade_pct: float = float(risk_per_trade_pct)
+        self._max_contracts_cap: int = int(max_contracts_cap)
+        self._daily_loss_pct_kill: float = float(daily_loss_pct_kill)
+
         self._bars_buffer: dict[str, list] = {}  # timeframe -> list of bar dicts
+        # When True, on_bar updates the buffer but does NOT evaluate signals.
+        # The runner sets this during the activation catch-up burst so we don't
+        # retroactively fire on bars that printed minutes-to-hours ago.
+        self._warmup: bool = False
 
     # ─────────────────────────────────────────────────────────────────────────
     # Lifecycle
@@ -99,6 +141,10 @@ class PaperTrader:
         """Called when a new bar closes on any subscribed timeframe."""
         if not self._is_running or self._kill_switch:
             return
+
+        # Track last price for unrealized PnL
+        if "close" in bar:
+            self._last_price = float(bar["close"])
 
         # Buffer bar
         if timeframe not in self._bars_buffer:
@@ -128,10 +174,23 @@ class PaperTrader:
         if self._position:
             await self._check_position_exits(bar)
 
+        # During warmup we only want to seed the buffer with recent bars; we
+        # must not open positions on stale signals (e.g. an FVG that printed
+        # 30 minutes ago). The runner clears this flag once the buffer has
+        # caught up to live data.
+        if self._warmup:
+            return
+
         # Look for entry signal
         if not self._position and self.strategy.check_risk_controls():
             signal = self.strategy.on_bar(bars_dict)
             if signal and signal.signal != SignalType.NONE:
+                # Cross-session signal lock: only one trader for this user's
+                # (strategy, instrument) can hold a position at a time. If
+                # another runner already opened the same setup we skip silently.
+                if not self._acquire_signal_lock():
+                    logger.debug(f"[PaperTrader] {self.instrument} signal skipped — sibling trader already active")
+                    return
                 await self._open_position(signal, bar["timestamp"])
 
     async def on_tick(self, tick: dict):
@@ -144,23 +203,170 @@ class PaperTrader:
     # Position management
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _signal_lock_key(self) -> Optional[str]:
+        if not (self.user_id and self.strategy_id):
+            return None
+        return f"signal_lock:{self.user_id}:{self.strategy_id}:{self.instrument}"
+
+    def _acquire_signal_lock(self) -> bool:
+        """Try to grab the (user, strategy, instrument) lock. Returns False if
+        another trader already holds it — caller should skip the signal."""
+        key = self._signal_lock_key()
+        if not key:
+            return True  # local-only/test mode: don't block
+        try:
+            ok = _redis.set(key, self.session_id or "anon", nx=True, ex=_SIGNAL_LOCK_TTL)
+            return bool(ok)
+        except Exception:
+            return True  # fail-open if Redis is unreachable
+
+    def _release_signal_lock(self) -> None:
+        key = self._signal_lock_key()
+        if not key:
+            return
+        try:
+            # Only delete if we still own it — guard against expired locks
+            owner = _redis.get(key)
+            if owner == (self.session_id or "anon"):
+                _redis.delete(key)
+        except Exception:
+            pass
+
+    # ── Risk-based contract sizing ───────────────────────────────────────
+    def _pick_contract_size(self, entry: float, stop: float,
+                            tick_size: float, tick_value: float,
+                            strategy_cap: int) -> int:
+        """Return the number of contracts to trade given the stop distance and
+        the user's risk budget. Mirrors the backtest engine's sizing so paper
+        and backtest stay consistent. Zero means the account is too small to
+        risk even one contract — caller should fall back to micro or skip."""
+        stop_dist_ticks = abs(entry - stop) / tick_size
+        if stop_dist_ticks <= 0:
+            return 0
+        loss_per_contract = stop_dist_ticks * tick_value + (self.commission * 2)
+        if loss_per_contract <= 0:
+            return 0
+        risk_dollars = self._equity * (self._risk_per_trade_pct / 100.0)
+        if risk_dollars <= 0:
+            return 0
+        raw = int(risk_dollars // loss_per_contract)
+        return max(0, min(raw, strategy_cap, self._max_contracts_cap))
+
+    def _pick_contract_size_with_micro(self, entry: float, stop: float,
+                                        configured_instrument: str,
+                                        strategy_cap: int):
+        """Size on the configured (mini) symbol; if the account can't afford
+        even one mini, fall back to the micro variant at 10× the cap.
+        Returns (contracts, instrument, tick_size, tick_value)."""
+        ts = TICK_SIZES.get(configured_instrument, 0.25)
+        tv = TICK_VALUES.get(configured_instrument, 12.50)
+        n = self._pick_contract_size(entry, stop, ts, tv, strategy_cap)
+        if n >= 1:
+            return n, configured_instrument, ts, tv
+        micro = MINI_TO_MICRO.get(configured_instrument)
+        if not micro:
+            return 0, configured_instrument, ts, tv
+        ts_m = TICK_SIZES.get(micro, 0.25)
+        tv_m = TICK_VALUES.get(micro, 1.25)
+        n_m = self._pick_contract_size(entry, stop, ts_m, tv_m, strategy_cap * 10)
+        return n_m, micro, ts_m, tv_m
+
     async def _open_position(self, signal: TradeSignal, timestamp):
+        # Recompute size from current equity & stop distance — never trust
+        # signal.contracts (which is just strategy.max_contracts).
+        strategy_cap = max(1, int(self.strategy.config.max_contracts or 1))
+        contracts, traded_instrument, _ts, _tv = self._pick_contract_size_with_micro(
+            signal.entry_price, signal.stop_loss, self.instrument, strategy_cap,
+        )
+        if contracts < 1:
+            logger.warning(
+                f"[Paper] SKIP signal on {self.instrument} — account too small "
+                f"to risk {self._risk_per_trade_pct}% (equity ${self._equity:,.0f})"
+            )
+            self._release_signal_lock()
+            return
+        # Bug fix: use bar timestamp (deterministic, bar-aligned) instead of
+        # datetime.now() which causes millisecond-apart entry/exit times
+        # when SL/TP triggers on the same bar.
+        _entry_ts = timestamp if isinstance(timestamp, datetime) else datetime.now(timezone.utc)
+        if getattr(_entry_ts, "tzinfo", None) is None:
+            _entry_ts = _entry_ts.replace(tzinfo=timezone.utc)
         self._position = PaperPosition(
-            instrument=self.instrument,
+            instrument=traded_instrument,
             direction=signal.signal.value,
             entry_price=signal.entry_price,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
-            contracts=signal.contracts,
-            entry_time=timestamp if isinstance(timestamp, datetime) else timestamp.to_pydatetime(),
-            metadata=signal.metadata,
+            contracts=contracts,
+            entry_time=_entry_ts,
+            metadata={**(signal.metadata or {}), "sized_from_equity": self._equity,
+                     "configured_instrument": self.instrument,
+                     "traded_instrument": traded_instrument},
         )
-        logger.info(f"[Paper] OPEN {signal.signal.value.upper()} @ {signal.entry_price:.2f} | SL={signal.stop_loss:.2f} | TP={signal.take_profit:.2f}")
+        logger.info(
+            f"[Paper] OPEN {signal.signal.value.upper()} {contracts}x {traded_instrument} "
+            f"@ {signal.entry_price:.2f} | SL={signal.stop_loss:.2f} | TP={signal.take_profit:.2f} "
+            f"| equity=${self._equity:,.0f} risk={self._risk_per_trade_pct}%"
+        )
+
+        # Email a signal receipt to the user — they want to know when paper
+        # fires so they can mirror on prop-firm accounts (where algo execution
+        # is banned, paper acts as their signal stream).
+        try:
+            from app.database import async_session_factory as _asf
+            from app.models.user import User as _U
+            from app.services.email import send_trade_receipt_email
+            from app.engines.options.premarket_scheduler import (
+                _claim_session_slot as _claim_sess,
+                _claim_daily_slot as _claim_day,
+                _current_session_label as _sess_label,
+            )
+            from sqlalchemy import select as _sel
+            import asyncio as _asyncio
+            async def _send():
+                # Atomic email cap before sending — paper signals share the
+                # same 1-per-(user, instrument-family, session) + 8/day budget
+                sess = _sess_label()
+                if not await _claim_sess(str(self.user_id), traded_instrument, sess):
+                    logger.info(f"[Paper] CAP-HIT {traded_instrument} for user — already signaled {sess} session")
+                    return
+                if not await _claim_day(str(self.user_id), max_per_day=8):
+                    logger.info(f"[Paper] CAP-HIT {traded_instrument} for user — daily cap (8) reached")
+                    return
+                async with _asf() as db:
+                    u = (await db.execute(_sel(_U).where(_U.id == self.user_id))).scalar_one_or_none()
+                if u and u.email:
+                    send_trade_receipt_email(
+                        to=u.email, username=u.username or "",
+                        ticker=traded_instrument,
+                        direction=signal.signal.value,
+                        entry=signal.entry_price,
+                        stop=signal.stop_loss,
+                        target=signal.take_profit,
+                        contracts=contracts,
+                        reason=(signal.metadata or {}).get("note") or self.strategy.config.name,
+                        strategy_name=self.strategy.config.name,
+                        mode="paper",
+                    )
+            _asyncio.create_task(_send())
+        except Exception as e:
+            logger.warning(f"[Paper] signal email skipped: {e}")
 
     async def _check_position_exits(self, bar: dict):
         p = self._position
         if not p:
             return
+        # Bug fix: don't allow exit on the same bar as entry. In reality
+        # you can't enter at one bar's close and have SL/TP trigger before
+        # the next tick prints. Without this guard, SL+TP both trigger on
+        # the entry bar producing 0-second hold trades.
+        bar_ts = bar.get("timestamp")
+        if isinstance(bar_ts, datetime) and isinstance(p.entry_time, datetime):
+            try:
+                if bar_ts <= p.entry_time:
+                    return
+            except Exception:
+                pass
         hit_tp = hit_sl = False
         if p.direction == "long":
             if bar["low"] <= p.stop_loss:
@@ -205,8 +411,10 @@ class PaperTrader:
         if not p:
             return
 
-        tick_size  = TICK_SIZES.get(self.instrument, 0.25)
-        tick_value = TICK_VALUES.get(self.instrument, 12.50)
+        # Bug #13 fix: use p.instrument (the actual traded symbol, which may
+        # be a micro after fallback) not self.instrument (the configured one).
+        tick_size  = TICK_SIZES.get(p.instrument, 0.25)
+        tick_value = TICK_VALUES.get(p.instrument, 12.50)
 
         if p.direction == "long":
             pnl_ticks = (exit_price - p.entry_price) / tick_size
@@ -225,7 +433,7 @@ class PaperTrader:
             exit_price=exit_price,
             contracts=p.contracts,
             entry_time=p.entry_time,
-            exit_time=exit_time if isinstance(exit_time, datetime) else exit_time.to_pydatetime(),
+            exit_time=exit_time if isinstance(exit_time, datetime) else datetime.now(timezone.utc),
             pnl=pnl,
             commission=commission,
             net_pnl=net_pnl,
@@ -237,10 +445,27 @@ class PaperTrader:
         self._completed_trades.append(result)
         self._daily_pnl    += net_pnl
         self._daily_trades += 1
+        self._equity       += net_pnl   # roll equity for next trade sizing
         self.strategy.record_trade_result(net_pnl)
 
-        logger.info(f"[Paper] CLOSE {reason.value} @ {exit_price:.2f} | Net PnL: ${net_pnl:,.2f} | {'WIN' if is_winner else 'LOSS'}")
+        logger.info(
+            f"[Paper] CLOSE {reason.value} @ {exit_price:.2f} | Net PnL: ${net_pnl:,.2f} "
+            f"| {'WIN' if is_winner else 'LOSS'} | equity=${self._equity:,.0f}"
+        )
         self._position = None
+        self._release_signal_lock()
+
+        # ── Daily-loss circuit breaker ──────────────────────────────
+        # If we drop more than `daily_loss_pct_kill` % of starting balance
+        # in a single session day, flip the kill switch — no more trades
+        # today. Prevents another $87k-style bleed.
+        loss_cap = self._starting_balance * (self._daily_loss_pct_kill / 100.0)
+        if loss_cap > 0 and self._daily_pnl <= -loss_cap:
+            logger.error(
+                f"[Paper] DAILY LOSS LIMIT HIT (${self._daily_pnl:,.0f} <= -${loss_cap:,.0f}) "
+                f"— killing session for the day."
+            )
+            self.trigger_kill_switch()
 
     def trigger_kill_switch(self):
         self._kill_switch = True
@@ -252,10 +477,24 @@ class PaperTrader:
         trades = self._completed_trades
         total  = len(trades)
         wins   = sum(1 for t in trades if t.is_winner)
+        closed_pnl = sum(t.net_pnl for t in trades)
+        
+        # Calculate unrealized P&L from open position
+        unrealized = 0.0
+        if self._position and hasattr(self, '_last_price') and self._last_price:
+            tick_value = TICK_VALUES.get(self._position.instrument, 5.0)  # #13 fix
+            tick_size = 0.25 if self._position.instrument in ('ES', 'NQ', 'YM') else 0.10
+            if self._position.direction == 'long':
+                unrealized = ((self._last_price - self._position.entry_price) / tick_size) * tick_value * self._position.contracts
+            else:
+                unrealized = ((self._position.entry_price - self._last_price) / tick_size) * tick_value * self._position.contracts
+        
         return {
             "total_trades": total,
             "win_rate":     (wins / total) if total else 0.0,
-            "net_pnl":      sum(t.net_pnl for t in trades),
+            "net_pnl":      closed_pnl + unrealized,
+            "closed_pnl":   closed_pnl,
+            "unrealized_pnl": unrealized,
             "daily_pnl":    self._daily_pnl,
             "is_running":   self._is_running,
             "kill_switch":  self._kill_switch,

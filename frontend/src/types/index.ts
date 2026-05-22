@@ -9,9 +9,12 @@ export interface User {
   subscription_tier: SubscriptionTier
   is_active: boolean
   trial_ends_at: string | null
+  is_admin?: boolean
+  totp_enabled?: boolean
+  totp_setup_pending?: boolean
 }
 
-export type SubscriptionTier = 'free_trial' | 'tier_1' | 'tier_3' | 'tier_4' | 'tier_5'
+export type SubscriptionTier = 'free_trial' | 'tier_2' | 'tier_3' | 'tier_4' | 'tier_5'
 
 export interface TokenResponse {
   access_token: string
@@ -34,9 +37,16 @@ export interface Strategy {
   instruments: string[]
   primary_timeframe: string
   execution_timeframe: string
+  higher_timeframes: string[]
   risk_reward_ratio: number
   stop_loss_type: 'ticks' | 'structure'
+  stop_loss_ticks: number
+  max_contracts: number
   session_filters: string[]
+  fvg_min_size_ticks: number
+  fvg_max_size_ticks: number | null
+  max_daily_loss: number | null
+  max_trades_per_day: number | null
   created_at: string
 }
 
@@ -56,6 +66,7 @@ export interface StrategyCreate {
   fvg_max_size_ticks?: number
   max_daily_loss?: number
   max_trades_per_day?: number
+  rule_tree?: Record<string, unknown>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,12 +78,14 @@ export type BacktestStatus = 'queued' | 'running' | 'completed' | 'failed' | 'ca
 export interface BacktestRun {
   id: string
   strategy_id: string
+  strategy_name: string
   instrument: string
   start_date: string
   end_date: string
   status: BacktestStatus
   created_at: string
   completed_at: string | null
+  progress: number
 }
 
 export interface BacktestMetrics {

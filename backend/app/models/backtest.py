@@ -24,7 +24,7 @@ class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    strategy_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("strategies.id"), nullable=False)
+    strategy_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
     # Run config
@@ -35,14 +35,18 @@ class BacktestRun(Base):
     initial_capital: Mapped[float] = mapped_column(Float, default=100000.0)
     commission_per_side: Mapped[float] = mapped_column(Float, default=2.25)  # per contract
     slippage_ticks: Mapped[int] = mapped_column(Integer, default=1)
+    risk_per_trade_pct: Mapped[float] = mapped_column(Float, default=1.0)
+    trailing_drawdown: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_loss_limit: Mapped[float] = mapped_column(Float, default=0.0)
 
     # Snapshot of strategy params at time of run
     strategy_params_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # Status
-    status: Mapped[BacktestStatus] = mapped_column(Enum(BacktestStatus), default=BacktestStatus.QUEUED)
+    status: Mapped[BacktestStatus] = mapped_column(Enum(BacktestStatus, name="backteststatus"), default=BacktestStatus.QUEUED)
     celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    progress: Mapped[float | None] = mapped_column(Float, default=0.0, nullable=True)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -63,6 +67,8 @@ class BacktestMetrics(Base):
     total_trades: Mapped[int] = mapped_column(Integer, default=0)
     winning_trades: Mapped[int] = mapped_column(Integer, default=0)
     losing_trades: Mapped[int] = mapped_column(Integer, default=0)
+    breakeven_trades: Mapped[int] = mapped_column(Integer, default=0)
+    effective_win_rate: Mapped[float] = mapped_column(default=0.0)
     win_rate: Mapped[float] = mapped_column(Float, default=0.0)
 
     net_profit: Mapped[float] = mapped_column(Float, default=0.0)
@@ -95,7 +101,7 @@ class BacktestTrade(Base):
     backtest_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("backtest_runs.id"), nullable=False)
 
     instrument: Mapped[str] = mapped_column(String(20), nullable=False)
-    direction: Mapped[TradeDirection] = mapped_column(Enum(TradeDirection), nullable=False)
+    direction: Mapped[TradeDirection] = mapped_column(Enum(TradeDirection, name="tradedirection"), nullable=False)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     exit_price: Mapped[float] = mapped_column(Float, nullable=False)
     contracts: Mapped[int] = mapped_column(Integer, default=1)

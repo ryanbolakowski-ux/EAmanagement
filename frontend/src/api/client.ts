@@ -1,13 +1,13 @@
 import axios from 'axios'
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+  baseURL: '',
   headers: { 'Content-Type': 'application/json' },
 })
 
 // Attach JWT token on every request
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('access_token')
+  const token = sessionStorage.getItem('access_token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -18,9 +18,15 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (error) => {
-    if (error.response?.status === 401) {
-      localStorage.removeItem('access_token')
+    const status = error.response?.status
+    const detail = error.response?.data?.detail
+    if (status === 401) {
+      sessionStorage.removeItem('access_token')
       window.location.href = '/login'
+    } else if (status === 451) {
+      if (window.location.pathname !== '/not-available') window.location.href = '/not-available'
+    } else if (status === 403 && detail === 'kyc_required') {
+      if (window.location.pathname !== '/kyc') window.location.href = '/app/kyc'
     }
     return Promise.reject(error)
   },
