@@ -4,6 +4,7 @@ All sends are best-effort — failures are logged, not raised, so transactional
 flows (registration, password reset request) don't fall over when Resend is
 flaky or rate-limited.
 """
+import os
 import resend
 from loguru import logger
 
