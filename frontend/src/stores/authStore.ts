@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { User, SubscriptionTier } from '../types'
+const _API_BASE = ((import.meta as any).env?.VITE_API_URL || '');
 
 interface AuthState {
   user: User | null
@@ -35,7 +36,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const t = sessionStorage.getItem('access_token')
     if (t) {
       try {
-        fetch('/api/v1/admin/lock', {
+        fetch(_API_BASE + '/api/v1/admin/lock', {
           method: 'POST',
           headers: { Authorization: `Bearer ${t}` },
         }).catch(() => {/* server unreachable — local logout still proceeds */})

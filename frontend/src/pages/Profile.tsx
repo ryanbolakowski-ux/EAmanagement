@@ -6,6 +6,7 @@ import { useAuthStore } from '../stores/authStore'
 import { useNavigate } from 'react-router-dom'
 import { User, CreditCard, TrendingUp, Shield, ArrowLeft, Check, ShieldCheck, Sun, Moon, Monitor, Smartphone, X, FileText } from "lucide-react"
 import { useThemeStore } from '../stores/themeStore'
+const _API_BASE = ((import.meta as any).env?.VITE_API_URL || '');
 
 const TIERS = [
   { id: 'free_trial', name: 'Tier 1 (Free Trial)', price: 0,
@@ -293,7 +294,7 @@ function AcknowledgementsCard() {
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['legal-status'],
-    queryFn: () => fetch('/api/v1/legal/status', {
+    queryFn: () => fetch(_API_BASE + '/api/v1/legal/status', {
       headers: { Authorization: `Bearer ${useAuthStore.getState().token}` },
     }).then(r => r.json()),
   })
@@ -395,7 +396,7 @@ function AckDocModal({ kind, onClose, onAccepted }: { kind: string; onClose: () 
   const ref = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    fetch(`/api/v1/legal/documents/${kind}`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`${_API_BASE}/api/v1/legal/documents/${kind}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json()).then(setDoc).catch(() => setErr('Could not load document'))
   }, [kind, token])
 
@@ -413,7 +414,7 @@ function AckDocModal({ kind, onClose, onAccepted }: { kind: string; onClose: () 
   async function accept() {
     setBusy(true); setErr(null)
     try {
-      const r = await fetch('/api/v1/legal/acknowledge', {
+      const r = await fetch(_API_BASE + '/api/v1/legal/acknowledge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ kind }),

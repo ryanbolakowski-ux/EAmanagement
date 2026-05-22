@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { paperTradingApi } from '../api/endpoints'
 import Candlestick, { type Candle, type FVG } from './Candlestick'
+const _API_BASE = ((import.meta as any).env?.VITE_API_URL || '');
 
 type TradeComment = { id: string; body: string; mark_x: number | null; mark_y: number | null; mark_label: string | null; created_at: string }
 
@@ -88,7 +89,7 @@ export function TradeChartModal({ tradeId, onClose }: { tradeId: string; onClose
     paperTradingApi.getTradeChart(tradeId)
       .then((res) => { if (!cancelled) setData(res.data) })
       .then(() => {
-        fetch(`/api/v1/paper-trading/trades/${tradeId}/comments`, {
+        fetch(`${_API_BASE}/api/v1/paper-trading/trades/${tradeId}/comments`, {
           headers: { Authorization: `Bearer ${localStorage.getItem('edge_token') || ''}` },
         }).then(r => r.ok ? r.json() : []).then((cs: any[]) => { if (!cancelled) setComments(cs || []) }).catch(() => {})
       })
@@ -119,14 +120,14 @@ export function TradeChartModal({ tradeId, onClose }: { tradeId: string; onClose
     if (!newComment.trim() || savingComment) return
     setSavingComment(true)
     try {
-      const r = await fetch(`/api/v1/paper-trading/trades/${tradeId}/comments`, {
+      const r = await fetch(`${_API_BASE}/api/v1/paper-trading/trades/${tradeId}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('edge_token') || ''}` },
         body: JSON.stringify({ body: newComment.trim(), mark_label: step.label }),
       })
       if (r.ok) {
         setNewComment('')
-        const refreshed = await fetch(`/api/v1/paper-trading/trades/${tradeId}/comments`, {
+        const refreshed = await fetch(`${_API_BASE}/api/v1/paper-trading/trades/${tradeId}/comments`, {
           headers: { Authorization: `Bearer ${localStorage.getItem('edge_token') || ''}` },
         }).then(r => r.json())
         setComments(refreshed || [])

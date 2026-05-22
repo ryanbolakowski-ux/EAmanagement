@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 import { fmtEntryTime, fmtHold } from '../components/TradeMetrics'
 
-const API = '/api/v1/admin'
+const API = ((import.meta as any).env?.VITE_API_URL || '') + '/api/v1/admin'
 const TIER_LABELS: Record<string, string> = {
   free_trial: 'Free Trial', tier_2: 'Futures Signals', tier_3: 'Options Scanner', tier_4: 'Options Live', tier_5: 'Fully Automated',
 }
