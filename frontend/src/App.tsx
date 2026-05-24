@@ -38,6 +38,13 @@ import PendingTradeConfirm from './pages/PendingTradeConfirm'
 import Options from './pages/Options'
 import DevicePicker from './components/DevicePicker'
 
+function AuthenticatedOnly({ children }: { children: React.ReactNode }) {
+  // Only render children if user has a JWT in sessionStorage. Pre-auth pages
+  // (login, register, forgot-password) should never see DevicePicker etc.
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  return isAuthenticated ? <>{children}</> : null
+}
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />
@@ -53,7 +60,9 @@ function AdminAwareIndex() {
 export default function App() {
   return (
     <>
-    <DevicePicker />
+    <AuthenticatedOnly>
+      <DevicePicker />
+    </AuthenticatedOnly>
     <Routes>
       {/* Public routes */}
       <Route path="/"         element={<Landing />} />
