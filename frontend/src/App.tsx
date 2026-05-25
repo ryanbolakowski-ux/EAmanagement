@@ -39,7 +39,7 @@ import Options from './pages/Options'
 import DevicePicker from './components/DevicePicker'
 
 function AuthenticatedOnly({ children }: { children: React.ReactNode }) {
-  // Only render children if user has a JWT in sessionStorage. Pre-auth pages
+  // Only render children if user has a JWT in localStorage. Pre-auth pages
   // (login, register, forgot-password) should never see DevicePicker etc.
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   return isAuthenticated ? <>{children}</> : null

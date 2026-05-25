@@ -21,11 +21,11 @@ const TIER_ORDER: Record<SubscriptionTier, number> = {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
-  token: sessionStorage.getItem('access_token'),
-  isAuthenticated: !!sessionStorage.getItem('access_token'),
+  token: localStorage.getItem('access_token'),
+  isAuthenticated: !!localStorage.getItem('access_token'),
 
   setAuth: (user, token) => {
-    sessionStorage.setItem('access_token', token)
+    localStorage.setItem('access_token', token)
     set({ user, token, isAuthenticated: true })
   },
 
@@ -33,7 +33,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // Fire-and-forget: invalidate the admin safe-word flag on the server
     // so re-login requires the passcode again. Don't await — we want
     // logout to feel instant.
-    const t = sessionStorage.getItem('access_token')
+    const t = localStorage.getItem('access_token')
     if (t) {
       try {
         fetch(_API_BASE + '/api/v1/admin/lock', {
@@ -42,7 +42,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }).catch(() => {/* server unreachable — local logout still proceeds */})
       } catch { /* ignore */ }
     }
-    sessionStorage.removeItem('access_token')
+    localStorage.removeItem('access_token')
     set({ user: null, token: null, isAuthenticated: false })
   },
 

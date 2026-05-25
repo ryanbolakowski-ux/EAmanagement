@@ -12,7 +12,7 @@ export const api = axios.create({
 
 // Attach JWT token on every request
 api.interceptors.request.use((config) => {
-  const token = sessionStorage.getItem('access_token')
+  const token = localStorage.getItem('access_token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -26,7 +26,7 @@ api.interceptors.response.use(
     const status = error.response?.status
     const detail = error.response?.data?.detail
     if (status === 401) {
-      sessionStorage.removeItem('access_token')
+      localStorage.removeItem('access_token')
       window.location.href = '/login'
     } else if (status === 451) {
       if (window.location.pathname !== '/not-available') window.location.href = '/not-available'

@@ -17,7 +17,7 @@ export default function Login() {
   const navigate = useNavigate()
 
   const finishLogin = async (accessToken: string) => {
-    sessionStorage.setItem('access_token', accessToken)
+    localStorage.setItem('access_token', accessToken)
     const meRes = await authApi.me()
     setAuth(meRes.data, accessToken)
     const params = new URLSearchParams(window.location.search); const rt = params.get('returnTo'); navigate(rt && rt.startsWith('/') ? rt : '/app')
@@ -36,7 +36,7 @@ export default function Login() {
         setError('Unexpected login response.')
       }
     } catch (err: any) {
-      if (!err.response) { setError('Cannot reach server. If this persists, hard refresh (Cmd+Shift+R) or clear Safari site data for thetaalgos.vercel.app.') } else if (err.response.status === 401) { setError('Wrong email or password.') } else { setError(err.response?.data?.detail || 'Login failed (HTTP ' + err.response.status + ').') }
+      if (!err.response) { setError('Cannot reach API server. Try a hard refresh (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows). If that fails, clear site data for thetaalgos.vercel.app and reload.') } else if (err.response.status === 401) { setError('Wrong email or password.') } else { setError(err.response?.data?.detail || 'Login failed (HTTP ' + err.response.status + ').') }
     } finally { setLoading(false) }
   }
 

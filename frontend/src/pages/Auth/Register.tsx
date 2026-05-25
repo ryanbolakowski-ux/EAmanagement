@@ -38,7 +38,7 @@ export default function Register() {
     setLoading(true); setError('')
     try {
       const { data } = await authApi.register(email, username, password)
-      sessionStorage.setItem('access_token', data.access_token)
+      localStorage.setItem('access_token', data.access_token)
       // Log the acknowledgment now that we have a token
       try {
         await api.post('/api/v1/legal/acknowledge', { kind: 'terms_of_service', detail: 'accepted on registration' })
