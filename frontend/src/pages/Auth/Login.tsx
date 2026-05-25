@@ -36,7 +36,7 @@ export default function Login() {
         setError('Unexpected login response.')
       }
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Invalid email or password.')
+      if (!err.response) { setError('Cannot reach server. If this persists, hard refresh (Cmd+Shift+R) or clear Safari site data for thetaalgos.vercel.app.') } else if (err.response.status === 401) { setError('Wrong email or password.') } else { setError(err.response?.data?.detail || 'Login failed (HTTP ' + err.response.status + ').') }
     } finally { setLoading(false) }
   }
 
