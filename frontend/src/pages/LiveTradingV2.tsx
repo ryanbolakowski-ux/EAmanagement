@@ -219,6 +219,15 @@ function TodayPickCard() {
   })
   const pick = data?.pick
   const ms = data?.market_status
+  if (ms?.status === 'holiday') {
+    return (
+      <div className="rounded-2xl border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/30 p-5 text-center">
+        <div className="text-3xl mb-2">🏛️</div>
+        <div className="font-extrabold text-rose-800 dark:text-rose-200 mb-1">Markets closed — {ms.holiday_name}</div>
+        <div className="text-xs text-rose-700/80 dark:text-rose-300/80 mt-1">Theta Scanner resumes <strong>{ms.next_open} at 9:25 AM ET</strong>.</div>
+      </div>
+    )
+  }
   if (ms?.status === 'weekend') {
     return (
       <div className="rounded-2xl border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-900/60 p-5 text-center">

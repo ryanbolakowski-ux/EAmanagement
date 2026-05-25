@@ -84,19 +84,31 @@ def _get_market_status_sync() -> dict:
         et = _dts.now().astimezone(zoneinfo.ZoneInfo("America/New_York"))
     except Exception:
         et = _dts.utcnow()
-    # Weekend check (Sat=5, Sun=6 in Python weekday)
-    wd = et.weekday()
-    if wd >= 5:
-        days_to_monday = 7 - wd
-        monday = (et + _tds(days=days_to_monday)).strftime("%A %b %d")
-        return {"status": "weekend", "today": et.strftime("%A"), "next_open": monday}
+    # Weekend or US market holiday → market closed
+    from app.engines.market_calendar import is_trading_day as _is_td, holiday_name as _hn, next_trading_day as _ntd
+    today = et.date()
+    if not _is_td(today):
+        nxt = _ntd(today)
+        next_open = nxt.strftime("%A %b %d")
+        hn = _hn(today)
+        if hn:
+            # Full-day holiday — show holiday name
+            return {
+                "status": "holiday",
+                "holiday_name": hn,
+                "today": et.strftime("%A"),
+                "next_open": next_open,
+            }
+        else:
+            # Weekend
+            return {"status": "weekend", "today": et.strftime("%A"), "next_open": next_open}
     return {"status": "open"}
 
 
 async def _get_market_status(db) -> dict:
     """Full check: weekend, then news-blackout via news_blackouts table."""
     base = _get_market_status_sync()
-    if base["status"] == "weekend":
+    if base["status"] in ("weekend", "holiday"):
         return base
     # News-blackout: any high-severity event within -30 min to +60 min of now
     try:
@@ -132,7 +144,7 @@ async def today_pick(
     """Return the most-recent Theta Scanner pick + current market status."""
     # 1. Market status comes first — weekend / news blackout overrides everything
     status = await _get_market_status(db)
-    if status["status"] == "weekend":
+    if status["status"] in ("weekend", "holiday"):
         return {
             "pick": None, "market_status": status,
             "message": f"Markets closed — it's {status['today']}. Scanner resumes {status['next_open']} at 9:25 AM ET.",

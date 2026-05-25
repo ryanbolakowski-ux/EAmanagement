@@ -264,3 +264,13 @@ async def get_dashboard_summary(
             "win_rate":     round(live_wr, 4),
         },
     }
+
+
+@router.get("/market-status")
+async def get_market_status():
+    """Returns whether US equity markets are open right now, plus
+    holiday info. Used by the dashboard 'Today’s Pick' card to
+    explain why no pick was generated on closed days."""
+    from app.engines.market_calendar import market_status
+    return market_status()
+
