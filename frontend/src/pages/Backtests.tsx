@@ -74,7 +74,7 @@ export default function Backtests() {
         instrument: form.instrument,
         start_date: form.start_date,
         end_date: form.end_date,
-        status: 'PENDING',
+        status: 'queued',
         progress: 0,
       }
       qc.setQueryData(['backtests'], (old: any) => Array.isArray(old) ? [newRun, ...old] : [newRun])
@@ -141,10 +141,10 @@ export default function Backtests() {
               <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">
                 {r.start_date?.slice(0, 10)} → {r.end_date?.slice(0, 10)}
               </div>
-              {(r.status === 'RUNNING' || r.status === 'PENDING') && (
+              {((r.status||'').toLowerCase() === 'running' || (r.status||'').toLowerCase() === 'queued' || (r.status||'').toLowerCase() === 'pending') && (
                 <div className="mt-2">
                   <div className="flex items-center justify-between text-[10px] text-blue-700 dark:text-blue-300 mb-1">
-                    <span className="font-bold">{r.status === 'PENDING' ? 'Queued' : 'Running'}</span>
+                    <span className="font-bold">{(r.status||'').toLowerCase() === 'queued' || (r.status||'').toLowerCase() === 'pending' ? 'Queued' : 'Running'}</span>
                     <span className="font-mono font-bold">{(r.progress ?? 0).toFixed(0)}%</span>
                   </div>
                   <div className="h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
@@ -174,11 +174,11 @@ export default function Backtests() {
                     <span className="text-sm text-slate-500 dark:text-slate-400">{selectedRun.start_date?.slice(0,10)} to {selectedRun.end_date?.slice(0,10)}</span>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    {(selectedRun.status === 'RUNNING' || selectedRun.status === 'PENDING') && (
+                    {((selectedRun.status||'').toLowerCase() === 'running' || (selectedRun.status||'').toLowerCase() === 'queued' || (selectedRun.status||'').toLowerCase() === 'pending') && (
                       <span className="inline-block w-3 h-3 border-2 border-blue-600 dark:border-blue-400 border-r-transparent rounded-full animate-spin"/>
                     )}
                     <span className={`badge ${STATUS_COLORS[selectedRun.status] || 'badge-grey'}`}>{selectedRun.status.toLowerCase()}</span>
-                    {(selectedRun.status === 'RUNNING' || selectedRun.status === 'PENDING') && (
+                    {((selectedRun.status||'').toLowerCase() === 'running' || (selectedRun.status||'').toLowerCase() === 'queued' || (selectedRun.status||'').toLowerCase() === 'pending') && (
                       <span className="font-mono font-extrabold text-sm text-blue-700 dark:text-blue-300 tabular-nums">
                         {(selectedRun.progress ?? 0).toFixed(0)}%
                       </span>
@@ -189,7 +189,7 @@ export default function Backtests() {
                   </div>
                 </div>
                 {/* Inline progress bar — sits right under the status row */}
-                {(selectedRun.status === 'RUNNING' || selectedRun.status === 'PENDING') && (
+                {((selectedRun.status||'').toLowerCase() === 'running' || (selectedRun.status||'').toLowerCase() === 'queued' || (selectedRun.status||'').toLowerCase() === 'pending') && (
                   <div className="mt-3">
                     <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
                       <div className="h-full bg-gradient-to-r from-blue-500 to-violet-600 transition-all duration-700 ease-out"
