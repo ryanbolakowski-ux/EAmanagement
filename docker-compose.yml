@@ -41,7 +41,6 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      REDIS_URL: redis://redis:6379/0
       FRONTEND_URL: https://thetaalgos.com
     ports:
       - "127.0.0.1:8000:8000"   # backend: nginx proxies, no need for public bind

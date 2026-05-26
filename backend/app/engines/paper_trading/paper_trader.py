@@ -1,3 +1,4 @@
+import os
 """
 Paper Trading Engine.
 Uses real-time market data feeds but simulates order fills.
@@ -15,7 +16,7 @@ from app.engines.strategy_engine.base_strategy import BaseStrategy, TradeSignal,
 # Shared connection used by every PaperTrader to coordinate signal locks across
 # sibling traders running on the same (user, strategy, instrument). Without this,
 # multiple sessions on the same setup all open identical trades simultaneously.
-_redis = redis_lib.Redis(host="redis", port=6379, db=0, decode_responses=True)
+_redis = redis_lib.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True, db=0)
 _SIGNAL_LOCK_TTL = 600  # seconds — matches typical max position holding window
 
 TICK_VALUES = {

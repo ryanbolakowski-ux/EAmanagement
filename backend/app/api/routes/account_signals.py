@@ -1,9 +1,11 @@
+import os
 """Account Signals — strategy watchers that emit notifications instead of
 placing orders. Used for prop-firm funded accounts where automated trading
 is prohibited."""
 import asyncio
 import json
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -202,7 +204,7 @@ def send_signal_email(
         elif 9*60+30 <= _t_min < 12*60:             _sess = "NY_AM"
         elif 14*60+30 <= _t_min < 16*60+30:         _sess = "NY_PM"
         else:                                        _sess = "DEAD"
-        _rc = _r_sync.Redis(host="edge_redis", port=6379, decode_responses=True)
+        _rc = _r_sync.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
         _MICRO = {"MES":"ES","MNQ":"NQ","MYM":"YM","M2K":"RTY"}
         _inst_fam = _MICRO.get(instrument.upper(), instrument.upper())
         _day = _date_fs.today().isoformat()
@@ -211,7 +213,8 @@ def send_signal_email(
             return False
         # ONE futures email per session per user — first qualifying setup wins.
         # Was: per-instrument-family. Now: total cap across ES/NQ/YM.
-        _key = f"futures_email:{to}:{_sess}:{_day}"
+        _strat_slug = re.sub(r"[^a-zA-Z0-9_]", "_", strategy_name or "unknown")[:32]
+        _key = f"futures_email:{to}:{_strat_slug}:{_sess}:{_day}"
         if not _rc.set(_key, "1", ex=4*3600, nx=True):
             from loguru import logger as _lg; _lg.info(f"[futures-email] CAP-HIT {instrument} for {to} session={_sess}")
             return False

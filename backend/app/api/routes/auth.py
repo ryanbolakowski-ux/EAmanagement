@@ -1,3 +1,4 @@
+import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
@@ -27,7 +28,7 @@ router = APIRouter()
 
 # Redis is used to hold short-lived tokens (password reset, 2FA challenge).
 # Keeping these out of the DB avoids a migration and gives us TTL for free.
-_redis = redis_lib.Redis(host="redis", port=6379, db=0, decode_responses=True)
+_redis = redis_lib.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True, db=0)
 PWRESET_TTL = 60 * 60          # 1 hour
 TWOFA_CHALLENGE_TTL = 5 * 60   # 5 minutes
 
@@ -307,3 +308,27 @@ async def disable_2fa(
     current_user.totp_enabled = False
     await db.commit()
     return {"status": "ok", "totp_enabled": False}
+
+
+# Diagnostic: tells you if a login attempt would succeed without actually issuing a JWT.
+# Use this when 'invalid credentials' is mysterious — quickly proves whether backend rejects you
+# vs the frontend never reaching the backend.
+@router.post('/diag-login')
+async def diag_login(
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    """Diagnostic: same logic as /login but returns reason + masked info. Never issues a token."""
+    typed_email = (form.username or '').strip()
+    result = await db.execute(select(User).where(func.lower(User.email) == typed_email.lower()))
+    user = result.scalar_one_or_none()
+    if not user:
+        return {'ok': False, 'reason': 'NO_USER_FOUND', 'hint': f'no user with email matching (case-insensitive): {typed_email}'}
+    if not verify_password(form.password, user.hashed_password):
+        return {'ok': False, 'reason': 'WRONG_PASSWORD',
+                'hint': 'email matched a user but the password does not — your password manager may be filling an old value',
+                'user_email': user.email, 'is_active': user.is_active}
+    if not user.is_active:
+        return {'ok': False, 'reason': 'ACCOUNT_DISABLED', 'user_email': user.email}
+    return {'ok': True, 'reason': 'WOULD_SUCCEED', 'user_email': user.email,
+            'requires_2fa': bool(user.totp_enabled and user.totp_secret)}

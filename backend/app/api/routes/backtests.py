@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -129,7 +130,7 @@ async def list_backtests(
     db: AsyncSession = Depends(get_db),
 ):
     import redis as _redis
-    _r = _redis.Redis(host="redis", port=6379, db=0)
+    _r = _redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=False, db=0)
     result = await db.execute(
         select(BacktestRun, Strategy.name)
         .join(Strategy, BacktestRun.strategy_id == Strategy.id)
@@ -329,7 +330,7 @@ async def _run_backtest_task(backtest_run_id: str):
                 await db.commit()
 
                 import redis as _redis
-                _r = _redis.Redis(host="redis", port=6379, db=0)
+                _r = _redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=False, db=0)
                 def _progress_cb(pct):
                     _r.set(f"backtest:{run.id}:progress", str(pct), ex=3600)
                 runner = BacktestRunner(strategy, data_handler, bt_config, progress_callback=_progress_cb)
@@ -400,7 +401,7 @@ async def _run_backtest_task(backtest_run_id: str):
 @router.get("/{backtest_id}/progress")
 async def get_backtest_progress(backtest_id: str):
     import redis as _redis
-    _r = _redis.Redis(host="redis", port=6379, db=0)
+    _r = _redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=False, db=0)
     pct = _r.get(f"backtest:{backtest_id}:progress")
     return {"progress": float(pct) if pct else 0.0}
 
@@ -540,7 +541,7 @@ async def _run_options_backtest(run: "BacktestRun", strategy_model: "Strategy",
     strategy = ICTStrategy(s_cfg, instrument=underlying)
 
     import redis as _redis
-    _r = _redis.Redis(host="redis", port=6379, db=0)
+    _r = _redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=False, db=0)
     def _progress_cb(pct):
         _r.set(f"backtest:{run.id}:progress", str(pct * 100), ex=3600)
 

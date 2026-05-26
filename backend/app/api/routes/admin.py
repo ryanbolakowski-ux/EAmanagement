@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, text
@@ -25,7 +26,7 @@ router = APIRouter()
 import redis as _redis_lib
 from app.core.security import verify_password as _verify_password
 
-_admin_redis = _redis_lib.Redis(host="redis", port=6379, db=0, decode_responses=True)
+_admin_redis = _redis_lib.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True, db=0)
 _ADMIN_PASSCODE_TTL = 8 * 60 * 60  # 8 hours per browser session
 
 

@@ -1,3 +1,4 @@
+import os
 """Pre-market + intraday scanner scheduler.
 
 Mirrors StocksToTrade's behaviour:
@@ -211,8 +212,8 @@ async def _emit_premarket_hit(strategy, user, hit, expires_in: int):
     if not await _claim_session_slot(str(user.id), hit.ticker, sess_label):
         logger.info(f"[Premarket] CAP-HIT {hit.ticker} for {user.email} — already signaled {sess_label} session")
         return
-    if not await _claim_daily_slot(str(user.id), max_per_day=4):
-        logger.info(f"[Premarket] CAP-HIT {hit.ticker} for {user.email} — daily cap (8) reached")
+    if not await _claim_daily_slot(str(user.id), max_per_day=1):
+        logger.info(f"[Premarket] CAP-HIT {hit.ticker} for {user.email} — daily cap (1) reached")
         return
     from app.services.email import send_pending_trade_confirm_email
 
@@ -320,7 +321,7 @@ async def _claim_session_slot(user_id: str, instrument: str, session: str) -> bo
     return bool(res)
 
 
-async def _claim_daily_slot(user_id: str, max_per_day: int = 4) -> bool:
+async def _claim_daily_slot(user_id: str, max_per_day: int = 1) -> bool:
     """Atomic per-user-per-day counter. Returns True if still under cap."""
     from datetime import date as _date
     key = f"emailcap:day:{user_id}:{_date.today().isoformat()}"
@@ -339,7 +340,7 @@ async def _release_daily_slot(user_id: str):
         await _get_email_redis().decr(key)
     except Exception: pass
 
-async def _check_daily_email_cap(user_id: str, max_per_day: int = 4) -> bool:
+async def _check_daily_email_cap(user_id: str, max_per_day: int = 1) -> bool:
     from app.database import async_session_factory as _asf
     from sqlalchemy import text as _t
     async with _asf() as db:
@@ -392,9 +393,9 @@ async def _emit_intraday_hit(strategy, user, hit):
         if not claimed:
             logger.info(f"[Intraday] CAP-HIT {hit.ticker} for {user.email} — already signaled {sess_label} session")
             return
-        under_daily = await _claim_daily_slot(str(user.id), max_per_day=4)
+        under_daily = await _claim_daily_slot(str(user.id), max_per_day=1)
         if not under_daily:
-            logger.info(f"[Intraday] CAP-HIT {hit.ticker} for {user.email} — daily cap (8) reached")
+            logger.info(f"[Intraday] CAP-HIT {hit.ticker} for {user.email} — daily cap (1) reached")
             return
     except Exception as _e:
         logger.warning(f"[Intraday] session-cap check failed (proceeding): {_e}")
@@ -933,7 +934,7 @@ async def _check_and_run_theta_scanner():
         try:
             import redis as _redis_theta
             import os as _os_theta
-            _r = _redis_theta.Redis(host="edge_redis", port=6379, decode_responses=True)
+            _r = _redis_theta.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
             if _r.get(f"theta_fired:{today_key}"):
                 _theta_fired_today = today
                 return  # already fired today
