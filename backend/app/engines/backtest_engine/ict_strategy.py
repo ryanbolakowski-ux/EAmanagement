@@ -33,7 +33,11 @@ class ICTStrategy(BaseStrategy):
         self._etf_mode = False  # will be set when data is loaded
         self._last_signal_bar = -1
         self._bar_counter = 0
-        self._cooldown_bars = 1  # minimum bars between signals
+        # 30-bar cooldown — on a 1m execution timeframe that's 30 minutes,
+        # which is the right cadence for ICT-style setups (1 per session
+        # phase max). Previous value of 1 bar caused signal storms on
+        # noisy pre-market chop with our new FVG Inversion bypass.
+        self._cooldown_bars = 30
 
     def on_bar(self, bars):
 
@@ -74,36 +78,46 @@ class ICTStrategy(BaseStrategy):
             logger.debug(f"[ICT/{self.instrument}] reject: no clear HTF bias")
             return None
 
+        # FVG Inversion Tap is a self-contained pattern — the sweep AND the
+        # reclaim are baked into the inversion detection itself (see
+        # _find_just_inverted_fvg). The bias / displacement / PD-zone /
+        # liquidity-sweep gates below are tuned for trend-following ICT
+        # patterns (IOFED, OTE, Unicorn) and incorrectly block valid
+        # Inversion Tap entries (which by definition fire AGAINST the prior
+        # short-term move). Skip those gates when the strategy name
+        # identifies as an inversion-tap variant.
+        _is_inversion_strategy = "inversion" in (self.config.name or "").lower()
+
         # === STEP 2: Check displacement (institutional momentum) ===
-        if self._block_long_in_quiet_session(primary, bias):
-            self._last_reject_reason = "quiet_session_long_block"
-            return None
+        if not _is_inversion_strategy:
+            if self._block_long_in_quiet_session(primary, bias):
+                self._last_reject_reason = "quiet_session_long_block"
+                return None
         if not self._passes_atr_volatility(primary):
             self._last_reject_reason = "low_volatility"
             return None
-        if not self._check_displacement(primary, bias):
-            self._last_reject_reason = "no_displacement"
-            logger.debug(f"[ICT/{self.instrument}] reject: no displacement in last 10 bars ({bias})")
-            return None
+        if not _is_inversion_strategy:
+            if not self._check_displacement(primary, bias):
+                self._last_reject_reason = "no_displacement"
+                logger.debug(f"[ICT/{self.instrument}] reject: no displacement in last 10 bars ({bias})")
+                return None
 
-        # === STEP 2.4: Premium/Discount (PD Array) zone gate ===
-        # ICT precision setups (IOFED, OTE, Unicorn) only fire from the right
-        # side of the dealing range — longs in DISCOUNT (lower half of recent
-        # swing range), shorts in PREMIUM (upper half). Without this filter,
-        # we keep entering longs at the top of the range and shorts at the
-        # bottom — coin-flip outcomes that drag WR into the 50s.
-        if not self._in_pd_zone(primary, bias, current_price):
-            self._last_reject_reason = "wrong_pd_zone"
-            logger.debug(f"[ICT/{self.instrument}] reject: price not in {bias} PD zone")
-            return None
+            # === STEP 2.4: Premium/Discount (PD Array) zone gate ===
+            # Skipped for Inversion Tap: pattern fires AT the sweep extreme,
+            # which is by definition the WRONG side of the PD range for the
+            # bias — that's the whole point of an inversion.
+            if not self._in_pd_zone(primary, bias, current_price):
+                self._last_reject_reason = "wrong_pd_zone"
+                logger.debug(f"[ICT/{self.instrument}] reject: price not in {bias} PD zone")
+                return None
 
-        # === STEP 2.5: Require a recent liquidity sweep against bias ===
-        # The 70-80% WR ICT setups all require this — entering an FVG without
-        # a preceding stop-hunt is what drags realized WR down to coin-flip.
-        if not self._has_recent_liquidity_sweep(primary, bias):
-            self._last_reject_reason = "no_liquidity_sweep"
-            logger.debug(f"[ICT/{self.instrument}] reject: no recent liquidity sweep against {bias}")
-            return None
+            # === STEP 2.5: Require a recent liquidity sweep against bias ===
+            # Skipped for Inversion Tap: the sweep IS the inversion signature,
+            # checked atomically inside _find_just_inverted_fvg.
+            if not self._has_recent_liquidity_sweep(primary, bias):
+                self._last_reject_reason = "no_liquidity_sweep"
+                logger.debug(f"[ICT/{self.instrument}] reject: no recent liquidity sweep against {bias}")
+                return None
 
         # === STEP 3: Detect FVGs across available timeframes ===
         all_fvgs = []

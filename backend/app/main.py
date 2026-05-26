@@ -5,17 +5,20 @@ from loguru import logger as _lg
 _lg.remove()
 _lg.add(_sys_log.stderr, level=_os_log.environ.get("LOG_LEVEL", "INFO"))
 
-# Disable yfinance's SQLite tz-cache. Every yf.Ticker() opens a connection
-# to /root/.cache/py-yfinance/tkr-tz.db; with 5+ watchers and a backtest
-# running concurrently, the SQLite WAL contention pegs every Python thread
-# in S(sleeping) state and the backtest hangs at whatever % it was at.
+# Yfinance tz-cache: point it at a unique per-process tmpdir instead of the
+# shared /root/.cache/py-yfinance/tkr-tz.db that caused SQLite lock storms
+# (5+ watchers + a backtest all opening the same SQLite WAL pegged every
+# Python thread). Setting it to None crashes yfinance internally
+# (os.stat(None) raises TypeError). A fresh tmpdir per process avoids
+# both problems — no shared lock, no None.
 try:
     import yfinance as _yf_init
+    import tempfile as _yf_tmp
+    _yf_cache_dir = _yf_tmp.mkdtemp(prefix='yf-tz-')
     try:
-        _yf_init.set_tz_cache_location(None)
+        _yf_init.set_tz_cache_location(_yf_cache_dir)
     except Exception:
-        import tempfile as _yf_tmp
-        _os_log.environ['YF_CACHE_DIR'] = _yf_tmp.mkdtemp(prefix='yf-')
+        _os_log.environ['YF_CACHE_DIR'] = _yf_cache_dir
 except Exception:
     pass
 
