@@ -624,3 +624,13 @@ async def admin_kyc_manual(
         pass
     await db.commit()
     return {"status": "ok", "new_status": data.new_status}
+
+
+
+@router.get("/scanner-health")
+async def scanner_health_endpoint(admin: User = Depends(require_admin_with_passcode)):
+    """Admin-only: realtime health of the futures + options scanner pipeline.
+    Hits every component (Redis, yfinance, Resend, Polygon, DB, watchers) and
+    returns JSON. Use this to debug any 'no email fired' incident quickly."""
+    from app.engines.scanner_health import check_health
+    return await check_health()

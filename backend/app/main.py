@@ -5,20 +5,21 @@ from loguru import logger as _lg
 _lg.remove()
 _lg.add(_sys_log.stderr, level=_os_log.environ.get("LOG_LEVEL", "INFO"))
 
-# Yfinance tz-cache: point it at a unique per-process tmpdir instead of the
-# shared /root/.cache/py-yfinance/tkr-tz.db that caused SQLite lock storms
-# (5+ watchers + a backtest all opening the same SQLite WAL pegged every
-# Python thread). Setting it to None crashes yfinance internally
-# (os.stat(None) raises TypeError). A fresh tmpdir per process avoids
-# both problems — no shared lock, no None.
+# Yfinance prep: just ensure the default ~/.cache/py-yfinance/ dir exists and
+# is fresh on each container start. yfinance 1.3.0's set_tz_cache_location()
+# has a regression that breaks subsequent Ticker() calls with TypeError, so
+# we let it use its default location. The SQLite lock storms we hit earlier
+# (5 watchers contending for tkr-tz.db) are now handled by the 60s result
+# cache + global asyncio lock in account_signals/runner.py.
 try:
-    import yfinance as _yf_init
-    import tempfile as _yf_tmp
-    _yf_cache_dir = _yf_tmp.mkdtemp(prefix='yf-tz-')
-    try:
-        _yf_init.set_tz_cache_location(_yf_cache_dir)
-    except Exception:
-        _os_log.environ['YF_CACHE_DIR'] = _yf_cache_dir
+    import pathlib as _pl
+    _yf_cache = _pl.Path.home() / ".cache" / "py-yfinance"
+    _yf_cache.mkdir(parents=True, exist_ok=True)
+    # Wipe the stale SQLite file from last container run if present — fresh
+    # state avoids any "WAL recovery" stalls on first Ticker() call.
+    for f in _yf_cache.glob("tkr-tz.db*"):
+        try: f.unlink()
+        except: pass
 except Exception:
     pass
 

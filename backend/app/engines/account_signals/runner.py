@@ -15,12 +15,9 @@ import yfinance as yf
 # 5 watchers + a backtest worker all hitting it in parallel the SQLite
 # WAL contention pegs every thread in S(sleeping) state — backtests
 # hang at whatever % they were at when the lock storm started.
-try:
-    yf.set_tz_cache_location(None)  # type: ignore[attr-defined]
-except Exception:
-    # Older yfinance: monkey-patch the cache dir to /tmp so each run is fresh
-    import os as _yf_os, tempfile as _yf_tmp
-    _yf_os.environ['YF_CACHE_DIR'] = _yf_tmp.mkdtemp(prefix='yf-')
+# NOTE: tz cache is now configured in app.main (ensure dir exists). Don't
+# call set_tz_cache_location() here — yfinance 1.3.0 has a regression where
+# passing anything (including None) breaks subsequent Ticker() calls.
 
 from app.database import async_session_factory
 from app.models.user import User
