@@ -37,6 +37,7 @@ import PendingTrades from './pages/PendingTrades'
 import PendingTradeConfirm from './pages/PendingTradeConfirm'
 import Options from './pages/Options'
 import DevicePicker from './components/DevicePicker'
+import VersionBanner from './components/VersionBanner'
 
 function AuthenticatedOnly({ children }: { children: React.ReactNode }) {
   // Only render children if user has a JWT in localStorage. Pre-auth pages
@@ -63,6 +64,7 @@ export default function App() {
     <AuthenticatedOnly>
       <DevicePicker />
     </AuthenticatedOnly>
+    <VersionBanner />
     <Routes>
       {/* Public routes */}
       <Route path="/"         element={<Landing />} />

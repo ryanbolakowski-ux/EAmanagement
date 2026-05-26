@@ -307,13 +307,20 @@ async def _run_optimization_task(run_id: str):
             run.total_combinations = len(combos)
             await db.commit()
 
-            all_results = []
+            all_results = [None] * len(combos)  # preserve index order
 
-            for idx, combo in enumerate(combos):
+            # ── Parallel batch runner ───────────────────────────────────────
+            # Each combo is independent (own strategy + data_handler + runner)
+            # so it's safe to run 4 at a time via asyncio.gather. With pandas/
+            # numpy releasing the GIL during heavy work and BacktestRunner.run
+            # already invoked through asyncio.to_thread, this gives ~3-4x
+            # speedup. Was 24-42 min for 48 combos sequentially; should be 6-10 min.
+            BATCH_SIZE = 4
+
+            def _run_one_combo(idx_combo):
+                idx, combo = idx_combo
                 params = dict(zip(param_keys, combo))
-
                 try:
-                    # Build config with overridden parameters
                     config = StrategyConfig(
                         name=strategy_model.name,
                         instruments=strategy_model.instruments or [run.instrument],
@@ -332,54 +339,40 @@ async def _run_optimization_task(run_id: str):
                         use_rsi_filter=bool((strategy_model.rule_tree or {}).get("use_rsi_filter", False)),
                         use_vwap_filter=bool((strategy_model.rule_tree or {}).get("use_vwap_filter", False)),
                     )
-
                     strategy = ICTStrategy(config, instrument=run.instrument)
                     data_handler = DataHandler(instrument=run.instrument, base_timeframe=base_tf)
                     data_handler.load_from_dataframe(df.reset_index())
-
                     all_tfs = list(set([config.primary_timeframe, config.execution_timeframe] + config.higher_timeframes))
-
                     bt_config = BacktestConfig(
-                        instrument=run.instrument,
-                        start_date=run.start_date,
-                        end_date=run.end_date,
-                        primary_timeframe=config.primary_timeframe,
-                        all_timeframes=all_tfs,
-                        initial_capital=100000,
-                        commission_per_side=2.50,
-                        slippage_ticks=1,
+                        instrument=run.instrument, start_date=run.start_date, end_date=run.end_date,
+                        primary_timeframe=config.primary_timeframe, all_timeframes=all_tfs,
+                        initial_capital=100000, commission_per_side=2.50, slippage_ticks=1,
                     )
-
-                    runner = BacktestRunner(strategy, data_handler, bt_config)
-                    metrics = await asyncio.to_thread(runner.run)
-
-                    all_results.append({
+                    metrics = BacktestRunner(strategy, data_handler, bt_config).run()
+                    return idx, {
                         "params": params,
-                        "net_profit": metrics.net_profit,
-                        "profit_factor": metrics.profit_factor,
-                        "win_rate": metrics.win_rate,
-                        "max_drawdown": metrics.max_drawdown_pct,
-                        "total_trades": metrics.total_trades,
-                        "sharpe_ratio": metrics.sharpe_ratio,
-                    })
-
-                    print(f"OPTIMIZER: Combo {idx+1}/{len(combos)} done: {metrics.total_trades} trades, ${metrics.net_profit:.0f} profit")
-
+                        "net_profit": metrics.net_profit, "profit_factor": metrics.profit_factor,
+                        "win_rate": metrics.win_rate, "max_drawdown": metrics.max_drawdown_pct,
+                        "total_trades": metrics.total_trades, "sharpe_ratio": metrics.sharpe_ratio,
+                    }
                 except Exception as e:
-                    import traceback
-                    traceback.print_exc()
+                    import traceback; traceback.print_exc()
                     print(f"OPTIMIZER: Combo {idx+1}/{len(combos)} FAILED: {e}")
-                    all_results.append({
-                        "params": params,
-                        "net_profit": 0,
-                        "profit_factor": 0,
-                        "win_rate": 0,
-                        "max_drawdown": 0,
-                        "total_trades": 0,
-                        "sharpe_ratio": 0,
-                    })
+                    return idx, {
+                        "params": params, "net_profit": 0, "profit_factor": 0, "win_rate": 0,
+                        "max_drawdown": 0, "total_trades": 0, "sharpe_ratio": 0,
+                    }
 
-                run.completed_combinations = idx + 1
+            for batch_start in range(0, len(combos), BATCH_SIZE):
+                batch = list(enumerate(combos))[batch_start:batch_start + BATCH_SIZE]
+                # Run BATCH_SIZE combos concurrently via threads
+                results = await asyncio.gather(
+                    *(asyncio.to_thread(_run_one_combo, ic) for ic in batch)
+                )
+                for idx, res in results:
+                    all_results[idx] = res
+                    print(f"OPTIMIZER: Combo {idx+1}/{len(combos)} done: {res['total_trades']} trades, ${res['net_profit']:.0f} profit")
+                run.completed_combinations = batch_start + len(batch)
                 await db.commit()
 
             # Sort by optimization metric
