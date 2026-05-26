@@ -95,24 +95,57 @@ def _fetch_bars_sync(instrument: str, timeframe: str, count: int = 50):
     except Exception as e:
         logger.warning(f"[Signals] candle_cache read failed for {sym}: {e}")
 
-    # Fallback: yfinance
+    # Fallback: yfinance, with an in-process 60s result cache + a global lock
+    # so simultaneous watchers don't all hammer Yahoo in parallel and trigger
+    # rate-limiting (which previously cratered the whole pipeline).
     fb_sym = YAHOO_SYMBOLS.get(instrument.upper(), instrument + "=F")
     period_map = {"1m": "5d", "5m": "5d", "15m": "10d", "30m": "10d", "1h": "30d", "1d": "60d"}
     period = period_map.get(timeframe, "5d")
-    try:
-        df = yf.Ticker(fb_sym).history(period=period, interval=timeframe)
-        if df is None or df.empty:
+    return _yfinance_cached(fb_sym, period, timeframe, count)
+
+
+# ── yfinance throttle: 60s result cache + single in-process lock ─────────
+import threading as _threading_yf
+import time as _time_yf
+_YF_LOCK = _threading_yf.Lock()
+_YF_CACHE: dict[tuple[str, str, str], tuple[float, list]] = {}
+_YF_TTL = 60.0  # seconds; matches the watcher's poll cadence
+
+
+def _yfinance_cached(fb_sym: str, period: str, timeframe: str, count: int):
+    key = (fb_sym, period, timeframe)
+    now = _time_yf.time()
+    # Quick read of cache (no lock needed — Python dict reads are atomic)
+    hit = _YF_CACHE.get(key)
+    if hit and (now - hit[0]) < _YF_TTL:
+        return hit[1][-count:] if hit[1] else []
+    # Serialize all yfinance calls — at most one at a time across the whole
+    # process. Combined with the cache, the steady-state rate is at most
+    # 1 call per (symbol, period, tf) per 60s.
+    with _YF_LOCK:
+        # Re-check after acquiring lock (another thread may have populated)
+        hit = _YF_CACHE.get(key)
+        if hit and (_time_yf.time() - hit[0]) < _YF_TTL:
+            return hit[1][-count:] if hit[1] else []
+        try:
+            df = yf.Ticker(fb_sym).history(period=period, interval=timeframe)
+            if df is None or df.empty:
+                _YF_CACHE[key] = (_time_yf.time(), [])
+                return []
+            bars = [{
+                "timestamp": ts.to_pydatetime(),
+                "open": float(r["Open"]), "high": float(r["High"]),
+                "low":  float(r["Low"]),  "close": float(r["Close"]),
+                "volume": int(r["Volume"]),
+            } for ts, r in df.iterrows()]
+            _YF_CACHE[key] = (_time_yf.time(), bars)
+            return bars[-count:]
+        except Exception as e:
+            # On error, cache an empty result for HALF the TTL so we back off
+            # gracefully without retrying every tick.
+            _YF_CACHE[key] = (_time_yf.time() - _YF_TTL/2, [])
+            logger.error(f"[Signals] yfinance fallback failed for {fb_sym}: {e}")
             return []
-        df = df.tail(count)
-        return [{
-            "timestamp": ts.to_pydatetime(),
-            "open": float(r["Open"]), "high": float(r["High"]),
-            "low":  float(r["Low"]),  "close": float(r["Close"]),
-            "volume": int(r["Volume"]),
-        } for ts, r in df.iterrows()]
-    except Exception as e:
-        logger.error(f"[Signals] yfinance fallback failed: {e}")
-        return []
 
 
 async def _run_watcher(watcher_id, strategy_id, user_id, instruments, account_label, channels, session_filter="all"):
