@@ -794,6 +794,45 @@ async def get_portfolio_summary(
     month_pnl = await _pnl_since(month_start)
     ytd_pnl   = await _pnl_since(ytd_start)
 
+    # Unrealized P&L across ALL open positions (not just today's). Includes
+    # both trades.status='open' rows AND open_positions_watch entries (the
+    # latter covers tradier_sync positions that don't have trades rows).
+    total_unrealized_pnl = 0.0
+    try:
+        import os as _osU, requests as _rqU
+        kU = _osU.environ.get("POLYGON_API_KEY", "")
+        # Union: open trades + watch table, deduped by ticker
+        positions = (await db.execute(_t("""
+            WITH a AS (
+              SELECT instrument AS ticker, entry_price, contracts AS qty
+                FROM trades
+               WHERE user_id = :uid AND mode='live' AND status='open'
+            ), b AS (
+              SELECT ticker, entry_price, qty
+                FROM open_positions_watch
+               WHERE user_id = :uid
+            )
+            SELECT ticker, entry_price, qty FROM a
+            UNION
+            SELECT ticker, entry_price, qty FROM b
+        """), {"uid": str(current_user.id)})).fetchall()
+        for p in positions:
+            try:
+                uU = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{p.ticker}"
+                rspU = _rqU.get(uU, params={"apiKey": kU}, timeout=3)
+                if rspU.status_code != 200: continue
+                tU = (rspU.json() or {}).get("ticker") or {}
+                live = None
+                for fld, sub in (("lastTrade","p"),("min","c"),("day","c"),("prevDay","c")):
+                    v = (tU.get(fld) or {}).get(sub)
+                    if v and float(v) > 0: live = float(v); break
+                if live and p.entry_price and p.qty:
+                    total_unrealized_pnl += (live - float(p.entry_price)) * int(p.qty)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # Open positions count (status='open' or 'pending')
     op_row = await db.execute(_t(
         "SELECT COUNT(*) FROM trades WHERE user_id = :uid AND mode = 'live' AND status IN ('open', 'pending')"
@@ -816,9 +855,11 @@ async def get_portfolio_summary(
         "total_cash":          total_cash,
         "today_pnl":           today_pnl,
         "today_unrealized_pnl": round(today_unrealized_pnl, 2),
+        "total_unrealized_pnl": round(total_unrealized_pnl, 2),
         "week_pnl":            week_pnl,
         "month_pnl":           month_pnl,
         "ytd_pnl":             ytd_pnl,
+        "ytd_total_pnl":       round(ytd_pnl + total_unrealized_pnl, 2),
         "open_positions_count": open_positions_count,
         "accounts_count":      len(rows),
         "healthy_accounts":    healthy,

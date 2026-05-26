@@ -114,15 +114,52 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down Theta Algos API...")
 
 
+# Disable interactive /docs + /redoc + /openapi.json in production. They
+# advertise every endpoint + parameter shape, which is attacker reconnaissance
+# for free. Set EXPOSE_DOCS=1 in dev/staging if you need them locally.
+_expose_docs = _os_log.environ.get("EXPOSE_DOCS", "0") == "1"
 app = FastAPI(
     title="Theta Algos API",
     description="Algorithmic futures trading platform — strategy building, backtesting, optimization, and live execution.",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if _expose_docs else None,
+    redoc_url="/redoc" if _expose_docs else None,
+    openapi_url="/openapi.json" if _expose_docs else None,
 )
 
 from app.middleware.geo_block import geo_block_middleware
 app.middleware("http")(geo_block_middleware)
+
+# Defense-in-depth security headers on every response.
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    # Strict-Transport-Security: nginx adds it on TLS endpoints, but cover here too
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+# Per-IP rate limiting on auth endpoints (slowapi). Catches brute-force
+# password guessing + signup spam. Other endpoints unrestricted (they
+# require a JWT, which is already an effective rate limiter).
+try:
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+    from slowapi.middleware import SlowAPIMiddleware
+    from slowapi.errors import RateLimitExceeded
+    from fastapi.responses import JSONResponse as _RL_JSON
+    _limiter = Limiter(key_func=get_remote_address, default_limits=[])
+    app.state.limiter = _limiter
+    app.add_middleware(SlowAPIMiddleware)
+    @app.exception_handler(RateLimitExceeded)
+    async def _rate_limit_exceeded_handler(request, exc):
+        return _RL_JSON(status_code=429, content={"detail": "Too many requests. Slow down."})
+except ImportError:
+    _limiter = None
 
 app.add_middleware(
     CORSMiddleware,

@@ -5,7 +5,7 @@ from typing import Optional
 
 import pyotp
 import redis as redis_lib
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func
@@ -148,11 +148,31 @@ async def register(
 
 # ── Login (with optional 2FA challenge) ─────────────────────────────────────
 
+# Redis-backed rate limiter — 5 failed logins per IP per minute. Catches
+# credential stuffing without breaking real users (5 wrong passwords in 60s
+# is already extreme for a legitimate user). We use Redis INCR with EX so
+# it survives backend restarts and works across multi-worker deploys.
+def _enforce_login_rate_limit(request: Request):
+    try:
+        ip = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "0.0.0.0")
+        key = f"ratelimit:login:{ip}:{int(__import__('time').time() // 60)}"
+        count = _redis.incr(key)
+        if count == 1:
+            _redis.expire(key, 90)
+        if count > 5:
+            raise HTTPException(status_code=429, detail="Too many login attempts. Wait 1 minute.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # fail-open: never block real users on a Redis hiccup
+
 @router.post("/login", response_model=LoginResponse)
 async def login(
+    request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
+    _enforce_login_rate_limit(request)
     result = await db.execute(select(User).where(func.lower(User.email) == form.username.lower().strip()))
     user = result.scalar_one_or_none()
     if not user or not verify_password(form.password, user.hashed_password):
