@@ -703,6 +703,26 @@ async def _scan_one_strategy(strategy, user, *, is_premarket: bool):
 
 
 async def _run_scan_cycle(*, is_premarket: bool):
+    # Yield to user backtests + optimizations. The scanner's pandas-heavy
+    # cycles can starve concurrent CPU-bound work (backtest hangs at ~44%
+    # because the GIL is held by .dropna / __contains__ on big universe
+    # frames). Skip the intraday tick if anything is actively running.
+    # Pre-market 09:00 batch always runs — it's time-critical for emails.
+    if not is_premarket:
+        try:
+            from sqlalchemy import text as _t_busy
+            from app.database import async_session_factory as _busy_sf
+            async with _busy_sf() as _busy_db:
+                busy = (await _busy_db.execute(_t_busy(
+                    "SELECT 1 FROM backtest_runs WHERE status='RUNNING' "
+                    "UNION SELECT 1 FROM optimization_runs WHERE status='RUNNING' LIMIT 1"
+                ))).first()
+            if busy:
+                logger.info("[Scanner] skipping intraday tick — user backtest/optimization in progress")
+                return
+        except Exception:
+            pass  # if the check itself fails, fail-open and run the scan
+
     await expire_old_pending()
 
     # News blackout — pause INTRADAY ticks (which auto-execute) but always
