@@ -210,16 +210,36 @@ async def kyc_start(
     except Exception as e:
         logger.error(f"[kyc] Stripe Identity create failed: {e}")
         msg = str(e)
-        # Most common failure: Stripe Identity feature not yet activated on the
-        # account. The fix is in the Stripe dashboard, not in our code.
+        # Specific Stripe error: Identity API not yet approved for this account's
+        # use case (common for KYC on trading platforms — Stripe reviews manually).
+        # Fall back to manual-review mode so onboarding isn't blocked. Record the
+        # user's submitted details + mark as 'manual_review' for admin to approve.
         if "identity_api_invalid_application" in msg or "Stripe Identity supported use-cases" in msg:
-            raise HTTPException(
-                status_code=503,
-                detail=("Identity verification is being set up. Our payments provider (Stripe) "
-                        "needs to approve our use of their ID verification API. This usually "
-                        "takes a few minutes. Please try again shortly — if it still fails, "
-                        "contact support and we'll switch you to manual verification."),
-            )
+            await db.execute(text("""
+                UPDATE users SET
+                  kyc_status = 'manual_review',
+                  kyc_provider = 'manual',
+                  first_name = :fn, last_name = :ln,
+                  date_of_birth = :dob, country_code = :cc
+                WHERE id = :uid
+            """), {
+                "fn": data.first_name, "ln": data.last_name,
+                "dob": data.date_of_birth, "cc": data.country_code.upper(),
+                "uid": str(current_user.id),
+            })
+            await db.commit()
+            await _log_kyc_event(db, user_id=str(current_user.id), user_email=current_user.email,
+                event_type="manual_review_queued", status="manual_review",
+                provider="manual", session_id=None, country=data.country_code.upper())
+            return {
+                "status": "manual_review",
+                "message": ("Your information has been submitted. Our team will review "
+                            "and approve your identity within 1 business day. You can "
+                            "continue using paper-trading and backtests in the meantime; "
+                            "live broker connectivity will unlock after approval."),
+                "redirect_url": None,
+                "client_secret": None,
+            }
         raise HTTPException(status_code=502, detail=f"KYC provider error: {e}")
 
 
