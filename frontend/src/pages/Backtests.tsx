@@ -55,7 +55,7 @@ export default function Backtests() {
   })
 
   const { data: strategies = [] } = useQuery({ queryKey: ['strategies'], queryFn: () => strategiesApi.list().then(r => r.data) })
-  const { data: runs = [] }       = useQuery({ queryKey: ['backtests'], queryFn: () => backtestsApi.list().then(r => r.data), refetchInterval: (q: any) => ((q?.state?.data as any[]) || []).some((r: any) => r?.status === 'running' || r?.status === 'queued') ? 2000 : false })
+  const { data: runs = [] }       = useQuery({ queryKey: ['backtests'], queryFn: () => backtestsApi.list().then(r => r.data), refetchInterval: (q: any) => ((q?.state?.data as any[]) || []).some((r: any) => { const s = (r?.status || '').toLowerCase(); return s === 'running' || s === 'queued' || s === 'pending' }) ? 2000 : false })
   const { data: metrics }: any    = useQuery({
     queryKey: ['backtest-metrics', selected],
     queryFn: () => backtestsApi.getMetrics(selected!).then(r => r.data),
