@@ -916,37 +916,101 @@ async def run_theta_scanner_for_all_users():
 
 
 _theta_fired_today = None  # in-memory cache, backed by Redis
+_theta_last_scan_min = None  # debounce: don't scan more than once per ~5 min
+
+def _min_score_for_et(et) -> float:
+    """Time-tiered score threshold. Earlier = stricter. As we approach 9:25
+    the bar drops so SOMETHING goes out before the open even if it's marginal.
+
+    HLIT today scored 19.25 — would fire at 7:00 ET tier (>=18).
+    The goal: get high-conviction setups out EARLY (before they move).
+    """
+    h, m = et.hour, et.minute
+    t = h * 60 + m  # ET minutes since midnight
+    if t < 6*60:    return 99.0   # before 6am: don't fire yet (pre-market thin)
+    if t < 7*60:   return 20.0   # 6:00-7:00 ET: only exceptional (>=20)
+    if t < 7*60+30: return 18.0   # 7:00-7:30: high conviction
+    if t < 8*60:   return 16.0   # 7:30-8:00
+    if t < 8*60+30: return 14.0   # 8:00-8:30
+    if t < 9*60:   return 12.0   # 8:30-9:00
+    if t < 9*60+25: return 10.0   # 9:00-9:25: anything decent
+    if t <= 9*60+50: return 0.0   # 9:25-9:50: last-chance, whatever's best
+    return 99.0  # outside window
+
 async def _check_and_run_theta_scanner():
-    """Called from main scheduler loop. Fires once per day at 9:25 ET.
-    Uses Redis to persist the 'fired today' flag across backend restarts."""
-    global _theta_fired_today
+    """Tiered premarket scanner — fires on the FIRST qualifying setup found
+    between 6:00 ET and 9:50 ET, with the score threshold dropping as 9:30
+    approaches. The earlier a high-conviction setup fires, the more time
+    users have to act before the move plays out. Today HLIT scored 19.25
+    by ~7am — would have fired at 7:00 ET (~2.5h before our old 9:25 trigger)
+    giving users entire premarket window to position.
+
+    Once-per-day cap via Redis SETNX. If a top-tier setup never appears,
+    the threshold drops every 30 min so the email still goes out by 9:25.
+    """
+    global _theta_fired_today, _theta_last_scan_min
     from datetime import datetime as _dt, date as _date, timezone as _tz
     try:
         import zoneinfo
         et = _dt.now(_tz.utc).astimezone(zoneinfo.ZoneInfo("America/New_York"))
     except Exception:
         return
-    # Widened window 9:25-9:50 ET so restarts during the trigger window still fire
-    if et.hour == 9 and 25 <= et.minute <= 50:
-        today = _date.today()
-        today_key = today.isoformat()
-        # Check Redis first (survives restarts)
-        try:
-            import redis as _redis_theta
-            import os as _os_theta
-            _r = _redis_theta.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
-            if _r.get(f"theta_fired:{today_key}"):
-                _theta_fired_today = today
-                return  # already fired today
-            # Mark fired immediately (race-proof — SETNX) before doing the work
-            if not _r.set(f"theta_fired:{today_key}", "running", ex=36*3600, nx=True):
-                return  # another worker took it
-        except Exception as _e:
-            logger.warning(f"[ThetaScanner] redis flag check failed (falling back to in-mem): {_e}")
-            if _theta_fired_today == today: return
-        _theta_fired_today = today
-        logger.info(f"[ThetaScanner] DAILY 9:25 ET trigger firing")
-        await run_theta_scanner_for_all_users()
+
+    # Skip if outside the entire premarket scan window (6:00 ET - 9:50 ET)
+    et_min = et.hour * 60 + et.minute
+    if et_min < 6*60 or et_min > 9*60+50:
+        return
+
+    # Debounce: scanner is expensive (~30s of API calls). Don't run more
+    # than once per 5 min wall-clock.
+    if _theta_last_scan_min is not None and (et_min - _theta_last_scan_min) < 5:
+        return
+    _theta_last_scan_min = et_min
+
+    today = _date.today()
+    today_key = today.isoformat()
+
+    # Already-fired check (Redis-backed)
+    _r = None
+    try:
+        import redis as _redis_theta
+        _r = _redis_theta.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+        if _r.get(f"theta_fired:{today_key}"):
+            _theta_fired_today = today
+            return
+    except Exception as _e:
+        logger.warning(f"[ThetaScanner] redis check failed: {_e}")
+        if _theta_fired_today == today: return
+
+    # Find the best premarket candidate
+    threshold = _min_score_for_et(et)
+    try:
+        from app.engines.options.theta_scanner import find_best_premarket_pick
+        from app.database import async_session_factory as _asf
+        async with _asf() as db:
+            pick = await find_best_premarket_pick(db)
+    except Exception as e:
+        logger.error(f"[ThetaScanner] find_best_premarket_pick failed: {e}")
+        return
+
+    if not pick:
+        logger.info(f"[ThetaScanner] {et.strftime('%H:%M ET')}: no candidate found yet (threshold={threshold})")
+        return
+
+    pick_score = float(pick.get("score", 0) or 0)
+    if pick_score < threshold:
+        logger.info(f"[ThetaScanner] {et.strftime('%H:%M ET')}: best={pick.get('ticker')} score={pick_score:.1f} < threshold {threshold} — waiting for better setup or lower bar")
+        return
+
+    # Claim the fire-slot atomically — only ONE worker fires per day
+    try:
+        if _r is not None and not _r.set(f"theta_fired:{today_key}", "running", ex=36*3600, nx=True):
+            return  # another worker beat us
+    except Exception:
+        pass
+    _theta_fired_today = today
+    logger.info(f"[ThetaScanner] FIRING {et.strftime('%H:%M ET')}: {pick.get('ticker')} score={pick_score:.1f} (threshold={threshold})")
+    await run_theta_scanner_for_all_users()
 
 
 
