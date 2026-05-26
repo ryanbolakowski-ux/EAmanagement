@@ -12,7 +12,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # DB: localhost only (was public — CRITICAL)
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-edge_user}"]
       interval: 10s
@@ -22,8 +22,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: edge_redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-changeme}"]
+    env_file:
+      - ./backend/.env
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"   # Redis: localhost only (was public, no auth — CRITICAL)
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -38,10 +41,10 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-edge_user}:${POSTGRES_PASSWORD:-edge_pass}@db:5432/${POSTGRES_DB:-edge_db}
       REDIS_URL: redis://redis:6379/0
+      FRONTEND_URL: https://thetaalgos.com
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # backend: nginx proxies, no need for public bind
     volumes:
       - ./backend:/app
     depends_on:
@@ -57,12 +60,12 @@ services:
       dockerfile: Dockerfile
     container_name: edge_frontend
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"   # frontend dev: not used in prod (Vercel serves)
     volumes:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      VITE_API_URL: http://localhost:8000
+      VITE_API_URL: http://178.104.173.85:8000
     depends_on:
       - backend
 
