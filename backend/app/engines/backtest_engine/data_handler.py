@@ -69,16 +69,24 @@ class DataHandler:
     # ─────────────────────────────────────────────────────────────────────────
 
     def build_timeframes(self, timeframes: list[str]):
-        """Resample base data into all requested timeframes."""
+        """Resample base data into all requested timeframes.
+
+        Idempotent: skips timeframes that are already built. Lets us share
+        one DataHandler across many parallel backtest combos (in optimization)
+        without re-doing the expensive resample work 48+ times.
+        """
         if self._base_data is None:
             raise ValueError("No base data loaded. Call load_from_csv or load_from_dataframe first.")
 
-        # Always include base TF
-        self._resampled[self.base_timeframe] = self._base_data.copy()
+        # Base TF — build only if missing
+        if self.base_timeframe not in self._resampled:
+            self._resampled[self.base_timeframe] = self._base_data.copy()
 
         for tf in timeframes:
             if tf == self.base_timeframe:
                 continue
+            if tf in self._resampled:
+                continue  # already built — skip
             alias = TIMEFRAME_ALIASES.get(tf, tf)
             resampled = self._base_data.resample(alias).agg({
                 "open":   "first",
@@ -118,7 +126,14 @@ class DataHandler:
         return df.index[0], df.index[-1]
 
     def filter_date_range(self, start: pd.Timestamp, end: pd.Timestamp):
-        """Trim all loaded data to the given date range."""
+        """Trim all loaded data to the given date range.
+
+        Idempotent: tracks (start,end) on the instance and is a no-op when
+        called again with the same range. Lets parallel backtests share
+        one DataHandler without re-filtering on every run() call.
+        """
+        if getattr(self, "_filter_range", None) == (start, end):
+            return
         if self._base_data is not None:
             self._base_data = self._base_data[
                 (self._base_data.index >= start) & (self._base_data.index <= end)
@@ -127,3 +142,4 @@ class DataHandler:
             self._resampled[tf] = self._resampled[tf][
                 (self._resampled[tf].index >= start) & (self._resampled[tf].index <= end)
             ]
+        self._filter_range = (start, end)

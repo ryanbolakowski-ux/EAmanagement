@@ -309,12 +309,29 @@ async def _run_optimization_task(run_id: str):
 
             all_results = [None] * len(combos)  # preserve index order
 
+            # ── Pre-build a SHARED DataHandler used by every combo ──────────
+            # Loading + resampling 1 year of 1m data is the single most
+            # expensive op per combo (~5-10 sec). Doing it 48× = 4-8 min of
+            # pure waste since every combo has the same base data + the same
+            # date range. Compute the superset of timeframes any combo could
+            # need (primary/execution timeframes vary in the grid; higher
+            # timeframes are fixed by the strategy) and pre-build once.
+            possible_tfs = set([strategy_model.primary_timeframe or "15m",
+                                 strategy_model.execution_timeframe or "1m"])
+            possible_tfs.update(strategy_model.higher_timeframes or [])
+            # also include any TFs that appear as combo parameters
+            for combo in combos:
+                params = dict(zip(param_keys, combo))
+                if "primary_timeframe" in params: possible_tfs.add(params["primary_timeframe"])
+                if "execution_timeframe" in params: possible_tfs.add(params["execution_timeframe"])
+            shared_data_handler = DataHandler(instrument=run.instrument, base_timeframe=base_tf)
+            shared_data_handler.load_from_dataframe(df.reset_index())
+            shared_data_handler.build_timeframes(list(possible_tfs))
+            logger.info(f"OPT: shared DataHandler pre-built {len(possible_tfs)} timeframes — combos will reuse")
+
             # ── Parallel batch runner ───────────────────────────────────────
-            # Each combo is independent (own strategy + data_handler + runner)
-            # so it's safe to run 4 at a time via asyncio.gather. With pandas/
-            # numpy releasing the GIL during heavy work and BacktestRunner.run
-            # already invoked through asyncio.to_thread, this gives ~3-4x
-            # speedup. Was 24-42 min for 48 combos sequentially; should be 6-10 min.
+            # Each combo gets its own strategy + runner but SHARES the
+            # data_handler (read-only — get_bars_up_to is pure-read).
             BATCH_SIZE = 4
 
             def _run_one_combo(idx_combo):
@@ -340,8 +357,9 @@ async def _run_optimization_task(run_id: str):
                         use_vwap_filter=bool((strategy_model.rule_tree or {}).get("use_vwap_filter", False)),
                     )
                     strategy = ICTStrategy(config, instrument=run.instrument)
-                    data_handler = DataHandler(instrument=run.instrument, base_timeframe=base_tf)
-                    data_handler.load_from_dataframe(df.reset_index())
+                    # Use the SHARED handler — build_timeframes/filter_date_range
+                    # are now idempotent so the runner's calls are no-ops.
+                    data_handler = shared_data_handler
                     all_tfs = list(set([config.primary_timeframe, config.execution_timeframe] + config.higher_timeframes))
                     bt_config = BacktestConfig(
                         instrument=run.instrument, start_date=run.start_date, end_date=run.end_date,
