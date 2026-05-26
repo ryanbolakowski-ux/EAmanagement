@@ -16,7 +16,7 @@ from app.config import settings
 # Centralized here so we don't have to patch every emit path individually.
 import redis.asyncio as _redis_async
 import asyncio as _asyncio_lib
-from datetime import datetime as _dt_fw, timezone as _tz_fw
+from datetime import datetime, datetime as _dt_fw, timezone as _tz_fw
 
 _fw_redis = None
 def _fw_get_redis():
@@ -99,7 +99,8 @@ def _send(to: str, subject: str, html: str) -> bool:
         # WHITELIST mode: ONLY transactional + Theta Scanner emails pass.
         # Everything else (position logs, signal alerts, trade receipts) is dropped.
         transactional_keywords = ["Reset your", "Verify your", "Welcome to", "2FA",
-                                   "verification", "Comp ", "tier change", "Daily digest"]
+                                   "verification", "Comp ", "tier change", "Daily digest",
+                                   "[Admin]"]
         is_transactional = any(k in s for k in transactional_keywords)
         is_theta = "Theta Scanner" in s
         if not is_transactional and not is_theta:
@@ -161,6 +162,34 @@ def send_welcome_email(to: str, username: str) -> bool:
     </div>
     """
     return _send(to, subject, html)
+
+
+def send_admin_new_user_notification(new_user_email: str, new_user_username: str,
+                                      signup_ip: str = "", signup_country: str = "") -> bool:
+    """Notify the platform owner (theta.algos@yahoo.com) every time a new
+    account is created. Includes the new user's email/username + signup IP/country
+    so suspicious bursts are easy to spot. Subject is prefixed [Admin] so it
+    passes the email kill-switch whitelist."""
+    admin_to = os.environ.get("ADMIN_NOTIFY_EMAIL", "theta.algos@yahoo.com")
+    subject = f"[Admin] New Theta Algos signup: {new_user_username}"
+    html = f"""
+    <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
+      <h1 style="margin:0 0 10px;font-size:20px;color:#7c3aed;">\U0001F195 New user signed up</h1>
+      <table style="border-collapse:collapse;width:100%;font-size:14px;margin-top:12px;">
+        <tr><td style="padding:6px 12px;color:#64748b;width:120px;">Username</td><td style="padding:6px 12px;font-weight:600;">{new_user_username}</td></tr>
+        <tr style="background:#f8fafc;"><td style="padding:6px 12px;color:#64748b;">Email</td><td style="padding:6px 12px;font-weight:600;">{new_user_email}</td></tr>
+        <tr><td style="padding:6px 12px;color:#64748b;">Signup IP</td><td style="padding:6px 12px;">{signup_ip or 'n/a'}</td></tr>
+        <tr style="background:#f8fafc;"><td style="padding:6px 12px;color:#64748b;">Country</td><td style="padding:6px 12px;">{signup_country or 'n/a'}</td></tr>
+        <tr><td style="padding:6px 12px;color:#64748b;">Time</td><td style="padding:6px 12px;">{datetime.utcnow().isoformat()}Z UTC</td></tr>
+      </table>
+      <p style="margin:18px 0 0;color:#94a3b8;font-size:11px;">
+        Sent automatically on every /api/v1/auth/register success. Disable with ADMIN_NOTIFY_EMAIL=disabled in env.
+      </p>
+    </div>
+    """
+    if admin_to == "disabled":
+        return False
+    return _send(admin_to, subject, html)
 
 
 def send_password_reset_email(to: str, username: str, token: str) -> bool:

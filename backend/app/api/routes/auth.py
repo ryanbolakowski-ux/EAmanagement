@@ -114,6 +114,7 @@ def _build_tokens(user: User) -> TokenResponse:
 async def register(
     data: RegisterRequest,
     background: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     existing = await db.execute(select(User).where(User.email == data.email))
@@ -140,7 +141,20 @@ async def register(
     except Exception as e:
         logger.warning(f'[auth.register] strategy seed failed: {e}')
 
+    # Welcome the new user
     background.add_task(email_service.send_welcome_email, user.email, user.username)
+
+    # Notify the platform owner (theta.algos@yahoo.com) — every signup
+    # triggers a one-line summary email so unusual bursts are spotted fast.
+    signup_ip = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "")
+    signup_country = ""
+    try:
+        from app.middleware.geo_block import _lookup_country
+        signup_country = await _lookup_country(signup_ip) or ""
+    except Exception:
+        pass
+    background.add_task(email_service.send_admin_new_user_notification,
+                       user.email, user.username, signup_ip, signup_country)
 
     tokens = _build_tokens(user)
     return tokens
