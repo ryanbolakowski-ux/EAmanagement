@@ -5,6 +5,20 @@ from loguru import logger as _lg
 _lg.remove()
 _lg.add(_sys_log.stderr, level=_os_log.environ.get("LOG_LEVEL", "INFO"))
 
+# Disable yfinance's SQLite tz-cache. Every yf.Ticker() opens a connection
+# to /root/.cache/py-yfinance/tkr-tz.db; with 5+ watchers and a backtest
+# running concurrently, the SQLite WAL contention pegs every Python thread
+# in S(sleeping) state and the backtest hangs at whatever % it was at.
+try:
+    import yfinance as _yf_init
+    try:
+        _yf_init.set_tz_cache_location(None)
+    except Exception:
+        import tempfile as _yf_tmp
+        _os_log.environ['YF_CACHE_DIR'] = _yf_tmp.mkdtemp(prefix='yf-')
+except Exception:
+    pass
+
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -117,6 +131,11 @@ app.add_middleware(
 
 # Routers
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+from fastapi.responses import FileResponse
+@app.get("/diag-login", include_in_schema=False)
+async def diag_login_page():
+    return FileResponse("/app/app/diag_login.html")
+
 app.include_router(strategies.router, prefix="/api/v1/strategies", tags=["Strategies"])
 app.include_router(backtests.router, prefix="/api/v1/backtests", tags=["Backtests"])
 app.include_router(optimization.router, prefix="/api/v1/optimization", tags=["Optimization"])

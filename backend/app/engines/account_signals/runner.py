@@ -10,6 +10,18 @@ from loguru import logger
 from sqlalchemy import select, text
 import yfinance as yf
 
+# Disable yfinance's SQLite timezone cache. Otherwise every Ticker() call
+# opens/locks the same /root/.cache/py-yfinance/tkr-tz.db file, and with
+# 5 watchers + a backtest worker all hitting it in parallel the SQLite
+# WAL contention pegs every thread in S(sleeping) state — backtests
+# hang at whatever % they were at when the lock storm started.
+try:
+    yf.set_tz_cache_location(None)  # type: ignore[attr-defined]
+except Exception:
+    # Older yfinance: monkey-patch the cache dir to /tmp so each run is fresh
+    import os as _yf_os, tempfile as _yf_tmp
+    _yf_os.environ['YF_CACHE_DIR'] = _yf_tmp.mkdtemp(prefix='yf-')
+
 from app.database import async_session_factory
 from app.models.user import User
 from app.models.strategy import Strategy
