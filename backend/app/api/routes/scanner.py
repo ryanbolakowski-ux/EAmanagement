@@ -154,10 +154,46 @@ async def today_pick(
             "pick": None, "market_status": status,
             "message": f"Scanner paused — {status['event_name']} at {status['event_time_et']}. We don't trade through high-impact news.",
         }
-    # 2. Normal path — return today's pick from Redis
-    raw = await _redis.get(f"theta:lastpick:{date.today().isoformat()}")
+    # 2. Normal path — return today's pick from Redis (fast path)
+    raw = None
+    try:
+        raw = await _redis.get(f"theta:lastpick:{date.today().isoformat()}")
+        if not raw:
+            raw = await _redis.get("theta:lastpick:latest")
+    except Exception as _re:
+        # Redis hiccup (auth, network, restart) — fall through to DB
+        raw = None
+
+    # 3. Fallback: read today's pick from email_signals_history. Bulletproof
+    #    against Redis being unavailable or having stale/missing keys (e.g.
+    #    if the writer process had stale auth when the scanner fired).
     if not raw:
-        raw = await _redis.get("theta:lastpick:latest")
+        try:
+            from sqlalchemy import text as _t
+            row = (await db.execute(_t("""
+                SELECT ticker, asset_type, direction, entry, stop, target,
+                       gap_pct, rel_vol, today_vol, score, catalyst_reason, picked_at
+                  FROM email_signals_history
+                 WHERE picked_at::date = CURRENT_DATE
+                   AND asset_type = 'options'
+                 ORDER BY picked_at DESC LIMIT 1
+            """))).first()
+            if row:
+                m = row._mapping
+                pick_dict = {
+                    "ticker": m["ticker"], "asset_type": m["asset_type"],
+                    "direction": m["direction"], "entry": float(m["entry"]),
+                    "stop": float(m["stop"]), "target": float(m["target"]),
+                    "gap_pct": float(m["gap_pct"]), "rel_vol": float(m["rel_vol"]),
+                    "today_vol": int(m["today_vol"]), "score": float(m["score"]),
+                    "catalyst_reason": m["catalyst_reason"],
+                    "projected_move_pct": 10.0,
+                    "picked_at": m["picked_at"].isoformat(),
+                }
+                raw = json.dumps(pick_dict)
+        except Exception:
+            pass
+
     if not raw:
         return {"pick": None, "market_status": status, "message": "No pick yet today. Scanner runs at 9:25 ET."}
     try:
