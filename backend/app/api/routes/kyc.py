@@ -209,6 +209,17 @@ async def kyc_start(
         }
     except Exception as e:
         logger.error(f"[kyc] Stripe Identity create failed: {e}")
+        msg = str(e)
+        # Most common failure: Stripe Identity feature not yet activated on the
+        # account. The fix is in the Stripe dashboard, not in our code.
+        if "identity_api_invalid_application" in msg or "Stripe Identity supported use-cases" in msg:
+            raise HTTPException(
+                status_code=503,
+                detail=("Identity verification is being set up. Our payments provider (Stripe) "
+                        "needs to approve our use of their ID verification API. This usually "
+                        "takes a few minutes. Please try again shortly — if it still fails, "
+                        "contact support and we'll switch you to manual verification."),
+            )
         raise HTTPException(status_code=502, detail=f"KYC provider error: {e}")
 
 
