@@ -212,9 +212,12 @@ def send_signal_email(
             from loguru import logger as _lg; _lg.info(f"[futures-email] DEAD zone, suppressed {instrument} for {to}")
             return False
         # ONE futures email per session per user — first qualifying setup wins.
-        # Was: per-instrument-family. Now: total cap across ES/NQ/YM.
-        _strat_slug = re.sub(r"[^a-zA-Z0-9_]", "_", strategy_name or "unknown")[:32]
-        _key = f"futures_email:{to}:{_strat_slug}:{_sess}:{_day}"
+        # Cap is intentionally NOT per-strategy and NOT per-instrument — if the
+        # account already got a futures email this session, anything else that
+        # qualifies in the same window is suppressed. This was the source of
+        # the "hella emails" complaint: ES Liquidity Sweep + ES FVG Inversion
+        # Tap fired 10 min apart to the same subscriber.
+        _key = f"futures_email:{to}:{_sess}:{_day}"
         if not _rc.set(_key, "1", ex=4*3600, nx=True):
             from loguru import logger as _lg; _lg.info(f"[futures-email] CAP-HIT {instrument} for {to} session={_sess}")
             return False
