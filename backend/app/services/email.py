@@ -93,7 +93,16 @@ def _ensure_configured() -> bool:
 
 
 def _send(to: str, subject: str, html: str) -> bool:
+    """Send via Resend's REST API with a hard 8s timeout + 1 retry on
+    transient errors (timeout, 429, 5xx). Returns True on success.
+
+    Bypasses the resend SDK (which uses requests with a default-of-no-timeout)
+    so a stuck Resend connection cannot block a watcher thread for 60+s and
+    delay the next signal cycle.
+    """
     import os as _os_es
+    import time as _time_es
+    import httpx as _httpx_es
     if _os_es.environ.get("EMAIL_KILL_SWITCH", "0") == "1":
         s = subject or ""
         # WHITELIST mode: ONLY transactional + Theta Scanner emails pass.
@@ -106,20 +115,62 @@ def _send(to: str, subject: str, html: str) -> bool:
         if not is_transactional and not is_theta:
             logger.info("[killswitch] dropped (non-whitelist) to=" + str(to) + " subj=" + s[:80])
             return False
-    if not _ensure_configured():
+    if not settings.RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set; skipping email send")
         return False
-    try:
-        resp = resend.Emails.send({
-            "from": settings.EMAIL_FROM,
-            "to": [to],
-            "subject": subject,
-            "html": html,
-        })
-        logger.info(f"Email sent to {to}: {subject} (id={resp.get('id', '?')})")
-        return True
-    except Exception as e:
-        logger.error(f"Email send failed to {to} ({subject}): {e}")
-        return False
+    payload = {
+        "from": settings.EMAIL_FROM,
+        "to": [to],
+        "subject": subject,
+        "html": html,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    # 2 attempts total — initial + 1 retry. Total worst case: 8s + 1s sleep + 8s = ~17s.
+    last_err = None
+    for attempt in (1, 2):
+        t0 = _time_es.time()
+        try:
+            r = _httpx_es.post(
+                "https://api.resend.com/emails",
+                json=payload, headers=headers, timeout=8.0,
+            )
+            elapsed_ms = int((_time_es.time() - t0) * 1000)
+            if r.status_code == 200 or r.status_code == 202:
+                try:
+                    rid = r.json().get("id", "?")
+                except Exception:
+                    rid = "?"
+                logger.info(f"Email sent to {to}: {subject} (id={rid}, attempt={attempt}, {elapsed_ms}ms)")
+                # Keep the SDK in sync so resend.Emails.send() elsewhere also works
+                try:
+                    resend.api_key = settings.RESEND_API_KEY
+                except Exception:
+                    pass
+                return True
+            # Retry on 429 (rate-limit) + 5xx, fail-fast on 4xx other.
+            if r.status_code == 429 or r.status_code >= 500:
+                last_err = f"resend status={r.status_code} body={r.text[:160]}"
+                logger.warning(f"Email transient failure (attempt {attempt}/2) to {to}: {last_err}")
+                if attempt == 1:
+                    _time_es.sleep(1.0)
+                    continue
+            else:
+                logger.error(f"Email permanent failure to {to} ({subject}): status={r.status_code} body={r.text[:160]}")
+                return False
+        except (_httpx_es.TimeoutException, _httpx_es.NetworkError, _httpx_es.ConnectError) as e:
+            last_err = f"{type(e).__name__}: {e}"
+            logger.warning(f"Email network issue (attempt {attempt}/2) to {to}: {last_err}")
+            if attempt == 1:
+                _time_es.sleep(1.0)
+                continue
+        except Exception as e:
+            logger.exception(f"Email send unexpected exception to {to} ({subject}): {type(e).__name__}: {e}")
+            return False
+    logger.error(f"Email send failed permanently after retries to {to} ({subject}): {last_err}")
+    return False
 
 
 def _logo_header() -> str:

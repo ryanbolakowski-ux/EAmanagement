@@ -284,6 +284,7 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     the last 10 minutes — prevents email spam if the strategy keeps re-firing."""
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
+    entry_detected_at = now  # captured the instant the strategy confirmed the entry
     direction = signal.signal.value
     entry = round(signal.entry_price, 2)
 
@@ -316,16 +317,29 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         await db.commit()
 
     if "email" in channels:
+        # Sync send is intentional — we want the email out the door right now,
+        # not queued for some later flush. send_signal_email itself returns
+        # quickly because _send() runs the Resend POST with a hard timeout.
         try:
+            t0 = datetime.now(timezone.utc)
             send_signal_email(
                 to=email, username=username, account_label=account_label,
                 strategy_name=strategy_name, instrument=instrument, direction=direction,
                 entry=entry, stop=float(signal.stop_loss), target=float(signal.take_profit),
                 bias=(signal.metadata or {}).get("bias"),
                 fired_at=now.strftime("%a, %b %-d %-I:%M %p ET"),
+                signal_id=sid,
+                entry_detected_at=entry_detected_at,
             )
+            elapsed_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
+            if elapsed_ms > 3000:
+                logger.warning(f"[Signals] slow email send signal_id={sid} took {elapsed_ms}ms")
         except Exception as e:
-            logger.error(f"[Signals] email send failed: {e}")
+            logger.exception(
+                f"[Signals] email send EXCEPTION signal_id={sid} symbol={instrument} "
+                f"strategy={strategy_name} entry_detected_at={entry_detected_at.isoformat()} "
+                f"attempted_at={datetime.now(timezone.utc).isoformat()} err={type(e).__name__}: {e}"
+            )
 
     if "push" in channels:
         try:

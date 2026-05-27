@@ -181,23 +181,49 @@ def send_signal_email(
     to: str, username: str, account_label: str,
     strategy_name: str, instrument: str, direction: str,
     entry: float, stop: float, target: float, bias: Optional[str], fired_at: str,
+    signal_id: Optional[str] = None,
+    entry_detected_at: Optional["datetime"] = None,
 ) -> bool:
+    """Send a futures entry-signal email.
+
+    signal_id (recommended): used to build an idempotency key in Redis so the
+    same DB signal row can never trigger a duplicate email even if the watcher
+    is restarted mid-flight. If omitted, falls back to (to, inst, dir, entry,
+    minute) which is also stable per minute.
+
+    entry_detected_at (recommended): UTC timestamp from the moment the strategy
+    confirmed the entry. Logged in the [signal-email-timing] line so the gap
+    between detection and send is queryable.
+    """
+    from loguru import logger as _lg
+    from datetime import datetime as _dt_fs, date as _date_fs, timezone as _tz_fs
     side_color = "#16a34a" if direction == "long" else "#dc2626"
     side_word = "LONG" if direction == "long" else "SHORT"
-    # Subject framed as a log entry, not a directive — "position update", not
-    # "place this order". Same for the body. The footer carries a formal
-    # CFTC-style disclosure so the email cannot be characterised as a
-    # solicitation, recommendation, or financial advice.
-    # 🎯 Theta Scanner (Futures) — rebranded so it passes the whitelist firewall.
-    # Redis cap: 1 email per (user, instrument-family, session) to kill multi-strategy spam.
+
+    # Capture detection + attempt timestamps up front so they are emitted on
+    # every path — success, cap-hit, DEAD-zone, exception.
+    _now_utc = _dt_fs.now(_tz_fs.utc)
+    if entry_detected_at is None:
+        entry_detected_at = _now_utc
+    _detected_iso = entry_detected_at.astimezone(_tz_fs.utc).isoformat()
+    _attempt_iso  = _now_utc.isoformat()
+    _sid = signal_id or f"{to}|{instrument}|{direction}|{entry:.2f}|{_now_utc.strftime('%Y%m%d%H%M')}"
+
+    _sess = "UNKNOWN"
+    _day = _date_fs.today().isoformat()
+
+    # --- Cap / DEAD-zone gate -------------------------------------------------
     try:
-        import redis as _r_sync, os as _os_fs
-        from datetime import datetime as _dt_fs, date as _date_fs
+        import redis as _r_sync
+        # Clean timezone-aware ET conversion. The prior version did
+        # utcnow().replace(tzinfo=now().astimezone().tzinfo) which mixes naive
+        # UTC with the system TZ; coincidentally OK in a UTC container, but
+        # produces wrong session labels anywhere else.
         try:
             import zoneinfo as _zi_fs
-            _et = _dt_fs.utcnow().replace(tzinfo=_dt_fs.now().astimezone().tzinfo).astimezone(_zi_fs.ZoneInfo("America/New_York"))
+            _et = _now_utc.astimezone(_zi_fs.ZoneInfo("America/New_York"))
         except Exception:
-            _et = _dt_fs.utcnow()
+            _et = _now_utc
         _t_min = _et.hour * 60 + _et.minute
         if _t_min >= 18*60 or _t_min < 3*60:        _sess = "ASIA"
         elif 3*60 <= _t_min < 9*60:                 _sess = "LONDON"
@@ -205,24 +231,45 @@ def send_signal_email(
         elif 14*60+30 <= _t_min < 16*60+30:         _sess = "NY_PM"
         else:                                        _sess = "DEAD"
         _rc = _r_sync.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
-        _MICRO = {"MES":"ES","MNQ":"NQ","MYM":"YM","M2K":"RTY"}
-        _inst_fam = _MICRO.get(instrument.upper(), instrument.upper())
-        _day = _date_fs.today().isoformat()
-        if _sess == "DEAD":
-            from loguru import logger as _lg; _lg.info(f"[futures-email] DEAD zone, suppressed {instrument} for {to}")
+
+        # Layer 0 — per-signal idempotency. If we have already attempted this
+        # exact signal row (same DB id) we MUST NOT send again even if the
+        # caller fires twice (process restart, retry on partial commit, etc).
+        _idemp_key = f"signal_email:idemp:{_sid}"
+        if not _rc.set(_idemp_key, _attempt_iso, ex=86400, nx=True):
+            _lg.info(
+                f"[signal-email-timing] DUPLICATE signal_id={_sid} symbol={instrument} "
+                f"strategy={strategy_name} entry_detected_at={_detected_iso} "
+                f"sent_attempt_at={_attempt_iso} outcome=duplicate-suppressed"
+            )
             return False
-        # ONE futures email per session per user — first qualifying setup wins.
-        # Cap is intentionally NOT per-strategy and NOT per-instrument — if the
-        # account already got a futures email this session, anything else that
-        # qualifies in the same window is suppressed. This was the source of
-        # the "hella emails" complaint: ES Liquidity Sweep + ES FVG Inversion
-        # Tap fired 10 min apart to the same subscriber.
+
+        if _sess == "DEAD":
+            _lg.info(
+                f"[signal-email-timing] DEAD-ZONE signal_id={_sid} symbol={instrument} "
+                f"strategy={strategy_name} to={to} entry_detected_at={_detected_iso} "
+                f"sent_attempt_at={_attempt_iso} outcome=dead-zone-suppressed"
+            )
+            return False
+
+        # Layer 1 — one futures email per (user, session, day). First wins.
         _key = f"futures_email:{to}:{_sess}:{_day}"
         if not _rc.set(_key, "1", ex=4*3600, nx=True):
-            from loguru import logger as _lg; _lg.info(f"[futures-email] CAP-HIT {instrument} for {to} session={_sess}")
+            _lg.info(
+                f"[signal-email-timing] CAP-HIT signal_id={_sid} symbol={instrument} "
+                f"strategy={strategy_name} to={to} session={_sess} "
+                f"entry_detected_at={_detected_iso} sent_attempt_at={_attempt_iso} "
+                f"outcome=session-cap"
+            )
             return False
-    except Exception as _e:
-        pass  # fail-open
+    except Exception as _cap_err:
+        # Fail-open is correct — we would rather send than not — but we MUST
+        # log it so a Redis outage doesn't go unnoticed. Was: bare pass.
+        _lg.warning(
+            f"[signal-email-timing] CAP-CHECK-ERROR signal_id={_sid} symbol={instrument} "
+            f"strategy={strategy_name} to={to} err={type(_cap_err).__name__}: {str(_cap_err)[:120]} "
+            f"-- proceeding with send (fail-open)"
+        )
     subject = f"🎯 Theta Scanner (Futures): {side_word} {instrument} @ {entry:.2f} · {strategy_name}"
     html = f"""
     <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
@@ -254,7 +301,16 @@ def send_signal_email(
       </p>
     </div>
     """
-    return _send(to, subject, html)
+    _ok = _send(to, subject, html)
+    _sent_iso = _dt_fs.now(_tz_fs.utc).isoformat()
+    _latency_ms = int((_dt_fs.now(_tz_fs.utc) - entry_detected_at).total_seconds() * 1000) if entry_detected_at else 0
+    _lg.info(
+        f"[signal-email-timing] signal_id={_sid} symbol={instrument} "
+        f"strategy={strategy_name} direction={direction} entry={entry:.2f} to={to} "
+        f"session={_sess} entry_detected_at={_detected_iso} email_sent_at={_sent_iso} "
+        f"latency_ms={_latency_ms} outcome={('sent' if _ok else 'send-failed')}"
+    )
+    return _ok
 """Patch — add device-registration + push helpers. Append to account_signals.py."""
 
 

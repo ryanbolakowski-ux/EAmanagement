@@ -139,6 +139,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to start scanner health monitor: {e}")
 
+    # Intraday candle_cache refresher — keeps ES/NQ/RTY/YM 1m bars fresh every
+    # 60s during US market hours so the futures watchers never fall through to
+    # rate-limited yfinance and go blind. Root cause of late/missing signal emails.
+    intraday_refresh_task = None
+    try:
+        from app.scripts.intraday_data_refresh import run_intraday_refresh_loop
+        intraday_refresh_task = asyncio.create_task(run_intraday_refresh_loop())
+    except Exception as e:
+        logger.warning(f"Failed to start intraday data refresher: {e}")
+
     try:
         yield
     finally:
@@ -149,6 +159,8 @@ async def lifespan(app: FastAPI):
             premarket_task.cancel()
         if health_monitor_task:
             health_monitor_task.cancel()
+        if intraday_refresh_task:
+            intraday_refresh_task.cancel()
         logger.info("Shutting down Theta Algos API...")
 
 
