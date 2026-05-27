@@ -114,16 +114,20 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
             <select value={strategyId} onChange={e => setStrategyId(e.target.value)}
               className="w-full border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-slate-800">
               <option value="">Select an options strategy...</option>
+              {/* Built-in Theta Scanner option — uses the same daily morning pick
+                  the live Theta Scanner emails. Always available, no setup needed. */}
+              <option value="theta_scanner">🎯 Theta Scanner (daily pick)</option>
+              {optStrats.length > 0 && <option disabled>──── your strategies ────</option>}
               {optStrats.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
             {optStrats.length === 0 && (
-              <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">No options strategies — create one on Strategies.</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Theta Scanner uses the same morning pick the live scanner sends. To add your own strategies, create them on the Strategies page.</p>
             )}
           </div>
           <div className="rounded-lg bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-900 p-3">
             <div className="text-[10px] uppercase tracking-wider text-violet-700 dark:text-violet-300 font-bold mb-1">Watchlist</div>
             <p className="text-[11px] text-slate-700 dark:text-slate-200 leading-snug">
-              Scans <strong>20+ liquid optionable tickers</strong> (SPY, QQQ, IWM, NVDA, AAPL, MSFT, TSLA, AMD, META, AMZN, GOOGL, JPM, BAC, KO, DIS, NFLX, COIN, PLTR, UBER + your strategy universe). Picks the best setup per minute. No underlying selection needed.
+              Scans the <strong>full Theta Algos universe</strong> (Mag 7, sector ETFs, Russell 2000 momentum names with options, recent IPOs, plus your strategy universe — 460+ tickers and growing). Picks the best setup per minute. No underlying selection needed.
             </p>
           </div>
         </div>

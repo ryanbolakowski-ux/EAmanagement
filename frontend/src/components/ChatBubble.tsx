@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import { MessageCircle, X, Send, Sparkles } from 'lucide-react'
+import { X, Send, Sparkles } from 'lucide-react'
 import api from '../api/client'
+import ThetaLogo from './ThetaLogo'
 
 /**
  * ChatBubble — AI assistant powered by Claude.
@@ -131,24 +132,24 @@ export default function ChatBubble() {
 
   return (
     <>
-      {/* Bubble button */}
+      {/* Bubble button — Theta logo, deep purple gradient */}
       {!open && (
         <button
           onClick={() => setOpen(true)}
-          aria-label="Open chat assistant"
-          className="fixed bottom-5 right-5 z-[150] bg-gradient-to-br from-violet-600 to-indigo-700 hover:from-violet-500 hover:to-indigo-600 text-white rounded-full w-14 h-14 flex items-center justify-center shadow-xl shadow-violet-900/40 transition-transform hover:scale-105"
+          aria-label="Open Theta Assistant"
+          className="fixed bottom-5 right-5 z-[150] bg-gradient-to-br from-purple-700 via-violet-700 to-indigo-800 hover:from-purple-600 hover:via-violet-600 hover:to-indigo-700 rounded-full w-14 h-14 flex items-center justify-center shadow-xl shadow-purple-900/50 transition-transform hover:scale-105 ring-2 ring-white/10"
         >
-          <MessageCircle size={24} />
+          <ThetaLogo size={28} />
         </button>
       )}
 
       {/* Chat panel */}
       {open && (
         <div className="fixed bottom-5 right-5 z-[150] w-[380px] max-w-[95vw] h-[560px] max-h-[80vh] flex flex-col bg-white dark:bg-slate-900 rounded-2xl shadow-2xl shadow-violet-900/30 border border-slate-200 dark:border-slate-700 overflow-hidden">
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-violet-600 to-indigo-700 text-white">
-            <div className="flex items-center gap-2">
-              <Sparkles size={18} />
+          {/* Header — deep purple gradient with Theta logo */}
+          <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-purple-700 via-violet-700 to-indigo-800 text-white">
+            <div className="flex items-center gap-2.5">
+              <ThetaLogo size={22} />
               <div>
                 <div className="font-bold text-sm">Theta Assistant</div>
                 <div className="text-[10px] opacity-80">Trained on every Theta Algos feature</div>
