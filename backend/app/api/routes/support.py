@@ -185,7 +185,7 @@ class SuggestionRequest(BaseModel):
 
 @router.post("/suggestion", status_code=201)
 async def suggestion(data: SuggestionRequest, request: Request,
-                      current_user: "User" = Depends(get_current_user)):
+                      current_user: _U = Depends(_gcu)):
     """Send a feature suggestion / feedback from a logged-in user to
     theta.algos@yahoo.com. Rate-limited (10/hour per user) so a frustrated
     user can't bury the inbox."""
