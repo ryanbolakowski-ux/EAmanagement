@@ -88,3 +88,91 @@ async def contact_support(data: ContactRequest, request: Request):
                              detail="Could not send right now — try emailing support@thetaalgos.com directly.")
     logger.info(f"[Support] message from {data.from_email} (IP {ip}) — forwarded to {SUPPORT_INBOX}")
     return {"status": "sent", "support_email": SUPPORT_INBOX}
+
+
+# ─── AI chat endpoint (Mira-style assistant) ──────────────────────────────────
+# Replaces the keyword-matched ChatBubble KB with a real LLM. Streams Claude
+# responses. Cost: ~$0.0008 per round trip with claude-haiku.
+import json as _chat_json
+import os as _chat_os
+from typing import AsyncIterator as _Iter
+from fastapi.responses import StreamingResponse as _Stream
+from app.core.auth import get_current_user as _gcu
+from app.models.user import User as _U
+
+_CHAT_SYSTEM_PROMPT = '''You are the in-app support assistant for Theta Algos (thetaalgos.com), an algorithmic trading SaaS platform.
+
+You are warm, professional, concise — like a senior fintech support engineer who is also a knowledgeable trader. Use first person naturally. Direct and specific. Real numbers, exact menu paths, real ticker examples. Encouraging when learning, but never sugarcoats risk.
+
+HARD RULES:
+- NEVER give specific financial advice. You can explain HOW the platform works, what setups ARE, what the bot would do — but never tell the user what to do with their money.
+- Always remind that trading involves risk.
+- NEVER fabricate platform features. If unsure, escalate to support@thetaalgos.com.
+- Refuse: market manipulation, insider trading, evading prop-firm rules, account sharing, anything illegal.
+
+PLATFORM:
+- Pricing tiers: Tier 1 Free Trial (30 days, no card), Tier 2 Futures Signals ($49/mo), Tier 3 Options Scanner ($99/mo), Tier 4 Options Live ($199/mo - most popular), Tier 5 Fully Automated ($399/mo).
+- Theta Scanner: morning options pick, fires once/day between 6-9:50 AM ET. Earlier time requires higher score (6am=score 20, 9am=10, 9:25=any). Sends entry, stop -3%, target +10%, gap%, rel vol, score, catalyst.
+- 5 scanner strategies: Pre-Market Gap Runner, Low-Float Squeeze (Sykes-style), 52-Week High Breakout, Oracle 5-Min Opening Candle (STT clone), Momentum Gappers.
+- ICT futures strategies: FVG Inversion Tap (1m FVG sweep + reclaim), ICT Silver Bullet (10-11am ET kill zone), Liquidity Sweep + FVG. 1 email per user per strategy per session (LONDON/NY_AM/NY_PM/ASIA).
+- Brokers: Tradier (stocks+options, free sandbox at developer.tradier.com), Tradovate (futures), prop firms via signal emails (Apex/TPT/Topstep ban algos). Webull/IBKR/TradeStation coming.
+- Daily heartbeat email at 9:25 ET confirming scanner is online.
+- News blackouts pause scanner ±30 min around FOMC/CPI/PPI/NFP/Core PCE/Retail Sales/GDP (72 events hardcoded for 2026).
+- KYC via Stripe Identity (currently in manual-review fallback while Stripe approves API access).
+- Pages: /app (home), /app/strategies, /app/backtests, /app/optimization, /app/live-trading, /app/options, /app/account-signals, /app/profile.
+
+TRADING DOMAIN:
+- Options Greeks (delta/theta/gamma/vega), strike selection, DTE, IV
+- ICT: FVGs, liquidity sweeps, displacement, kill zones (London/NY AM/PM/Asia), PD arrays
+- Futures: tick sizes (ES $50/pt, NQ $20/pt, MES $5, MNQ $2), micros vs minis
+- Prop firm rules: daily loss limit, trailing drawdown, consistency, news ban
+- Pre-market: 4 AM-9:30 AM ET, thin liquidity
+- Catalysts: 8-K, earnings, FDA, contracts
+
+STYLE:
+- Markdown sparingly. Bold for emphasis, numbered lists for steps. No code blocks unless asked.
+- Don't use emoji unless user does.
+- Answer the question, offer to go deeper if useful.
+- Operational questions (how do I connect Tradier): exact click path.
+- Conceptual (whats an FVG"): plain English for beginners, technical for pros.
+- Keep responses tight: 1-3 short paragraphs. Long only when asked.
+- Off-topic (lunch, weather): redirect — "Im built to help with Theta Algos and trading questions.
+- NO greeting, NO signoff, NO let me know if... filler. Just the answer.'''
+
+
+class _ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class _ChatRequest(BaseModel):
+    messages: list[_ChatMessage]
+
+
+@router.post('/chat')
+async def chat(data: _ChatRequest, request: Request, current_user: _U = Depends(_gcu)):
+    api_key = _chat_os.environ.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        raise HTTPException(status_code=503, detail='Chat assistant is being configured. Please email support@thetaalgos.com directly.')
+    msgs = [m for m in data.messages if m.content.strip()]
+    if not msgs:
+        raise HTTPException(status_code=400, detail='Empty conversation.')
+    if msgs[-1].role != 'user':
+        raise HTTPException(status_code=400, detail='Last message must be from user.')
+    api_msgs = [{'role': m.role, 'content': m.content} for m in msgs[-20:]]
+    system = _CHAT_SYSTEM_PROMPT + f'\n\nThe user you are talking to: {current_user.username or current_user.email} (tier: {current_user.subscription_tier}).'
+    model = _chat_os.environ.get('CHAT_MODEL', 'claude-haiku-4-5')
+
+    async def event_stream():
+        try:
+            from anthropic import AsyncAnthropic
+            client = AsyncAnthropic(api_key=api_key)
+            async with client.messages.stream(model=model, max_tokens=1024, system=system, messages=api_msgs) as stream:
+                async for text in stream.text_stream:
+                    yield f"data: {_chat_json.dumps({'delta': text})}\n\n".encode()
+                yield b'data: {"done": true}\n\n'
+        except Exception as e:
+            logger.error(f'[support.chat] {type(e).__name__}: {e}')
+            yield f"data: {_chat_json.dumps({'error': str(e)[:200]})}\n\n".encode()
+
+    return _Stream(event_stream(), media_type='text/event-stream')
