@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, CartesianGrid, Tooltip } from 'recharts'
-import { Play, Trash2, FlaskConical, X } from 'lucide-react'
+import { Play, Trash2, FlaskConical, X, Sparkles } from 'lucide-react'
 import { strategiesApi, backtestsApi } from '../api/endpoints'
+import api from '../api/client'
 
 const STATUS_COLORS: Record<string, string> = {
   completed: 'badge-green',
@@ -10,6 +12,176 @@ const STATUS_COLORS: Record<string, string> = {
   failed: 'badge-red',
   queued: 'badge-grey',
   cancelled: 'bg-slate-100 text-slate-500'}
+
+/**
+ * OptimizePrompt — appears below the metrics of a just-completed backtest.
+ * Asks "Optimize for better results?" — Yes spins up a parameter grid using
+ * the same strategy/instrument/date_range as the baseline backtest, runs it,
+ * then shows the best result vs the baseline side-by-side.
+ */
+function OptimizePrompt({ selectedRun, baselineMetrics }: { selectedRun: any; baselineMetrics: any }) {
+  const [phase, setPhase] = useState<'idle' | 'starting' | 'running' | 'done' | 'error'>('idle')
+  const [optRunId, setOptRunId] = useState<string | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  // Poll the optimization status when running
+  const { data: optRun }: any = useQuery({
+    queryKey: ['opt-run', optRunId],
+    queryFn: () => api.get(`/api/v1/optimization/${optRunId}`).then((r: any) => r.data),
+    enabled: !!optRunId && phase === 'running',
+    refetchInterval: 2000,
+  })
+  const { data: optResults }: any = useQuery({
+    queryKey: ['opt-results', optRunId],
+    queryFn: () => api.get(`/api/v1/optimization/${optRunId}/results`).then((r: any) => r.data),
+    enabled: !!optRunId && phase === 'done',
+  })
+
+  // Transition phase to 'done' when the optimization completes
+  if (phase === 'running' && optRun?.status && (optRun.status === 'COMPLETED' || optRun.status === 'completed')) {
+    setPhase('done')
+  }
+  if (phase === 'running' && optRun?.status && (optRun.status === 'FAILED' || optRun.status === 'failed')) {
+    setErrorMsg(optRun.error_message || 'Optimization failed')
+    setPhase('error')
+  }
+
+  async function start() {
+    setPhase('starting'); setErrorMsg(null)
+    try {
+      // Build a reasonable default parameter grid for the same strategy
+      const param_grid: Record<string, any[]> = {
+        risk_reward_ratio: [1.5, 2.0, 2.5, 3.0],
+        stop_loss_ticks: [4, 6, 8, 10, 12],
+        fvg_min_size_ticks: [2, 4, 6, 8],
+      }
+      const body = {
+        strategy_id: selectedRun.strategy_id,
+        instrument: selectedRun.instrument,
+        start_date: selectedRun.start_date,
+        end_date: selectedRun.end_date,
+        timeframe: selectedRun.timeframe || '15m',
+        parameter_grid: param_grid,
+        optimization_metric: 'profit_factor',
+      }
+      const r = await api.post('/api/v1/optimization/', body)
+      setOptRunId((r as any).data.id)
+      setPhase('running')
+    } catch (e: any) {
+      setErrorMsg(e?.response?.data?.detail || e?.message || 'Failed to start optimization')
+      setPhase('error')
+    }
+  }
+
+  if (phase === 'idle') {
+    return (
+      <div className="rounded-2xl border-2 border-dashed border-violet-300 dark:border-violet-700 bg-violet-50/40 dark:bg-violet-950/20 p-5">
+        <div className="flex items-start gap-3">
+          <Sparkles className="text-violet-600 flex-shrink-0 mt-1" size={20} />
+          <div className="flex-1">
+            <div className="font-bold text-slate-900 dark:text-slate-100 mb-1">Optimize for better results?</div>
+            <div className="text-xs text-slate-600 dark:text-slate-400 mb-3">
+              I'll run ~80 parameter combinations on this exact strategy + instrument + date range, then show you the top performer vs your current result.
+              <br/>Expected: <strong>3–6 minutes</strong>.
+            </div>
+            <div className="flex gap-2">
+              <button onClick={start} className="bg-violet-600 hover:bg-violet-500 text-white font-bold text-xs px-4 py-2 rounded-lg flex items-center gap-1.5">
+                <Sparkles size={14}/> Yes — optimize
+              </button>
+              <Link to="/app/optimization" className="bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs px-4 py-2 rounded-lg">
+                Advanced grid →
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (phase === 'starting' || phase === 'running') {
+    const prog = optRun?.progress ?? 0
+    return (
+      <div className="rounded-2xl border border-violet-300 dark:border-violet-700 bg-violet-50 dark:bg-violet-950/30 p-5">
+        <div className="flex items-center gap-3 mb-2">
+          <div className="inline-block w-5 h-5 border-2 border-violet-600 border-r-transparent rounded-full animate-spin"/>
+          <div className="font-bold text-slate-900 dark:text-slate-100">Optimizing... {prog.toFixed(0)}%</div>
+        </div>
+        <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden mb-2">
+          <div className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${Math.max(2, prog)}%` }}/>
+        </div>
+        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+          {optRun?.completed_combinations || 0} of {optRun?.total_combinations || '~80'} combos done. Running 4 in parallel — feel free to leave this tab open.
+        </div>
+      </div>
+    )
+  }
+
+  if (phase === 'error') {
+    return (
+      <div className="rounded-2xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-5">
+        <div className="font-bold text-red-800 dark:text-red-200 mb-1">Optimization failed</div>
+        <div className="text-xs text-red-700 dark:text-red-300 mb-3">{errorMsg}</div>
+        <button onClick={() => { setPhase('idle'); setErrorMsg(null) }} className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg">Try again</button>
+      </div>
+    )
+  }
+
+  // phase === 'done'
+  const top = (optResults?.results || [])[0]
+  if (!top) return <div className="text-sm text-slate-500">Loading top result...</div>
+  const baseline = baselineMetrics
+  const diffPct = (b: number, t: number) => (b === 0 ? (t > 0 ? '+inf' : '0') : `${((t - b) / Math.abs(b) * 100).toFixed(1)}%`)
+  const arrow = (b: number, t: number) => (t > b ? '↗' : t < b ? '↘' : '→')
+  const better = (b: number, t: number) => (t > b ? 'text-green-600' : t < b ? 'text-red-500' : 'text-slate-500')
+
+  return (
+    <div className="rounded-2xl border border-green-300 dark:border-green-800 bg-green-50/60 dark:bg-green-950/30 p-5">
+      <div className="flex items-center gap-2 mb-3">
+        <Sparkles className="text-green-600" size={18}/>
+        <div className="font-bold text-slate-900 dark:text-slate-100">Optimization complete — top result vs your backtest</div>
+      </div>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="text-xs">
+          <div className="font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Original</div>
+          <div className="space-y-1">
+            <div>WR: <b>{(baseline.win_rate * 100).toFixed(1)}%</b></div>
+            <div>PF: <b>{baseline.profit_factor.toFixed(2)}</b></div>
+            <div>Net: <b>${baseline.net_profit.toLocaleString()}</b></div>
+            <div>DD: <b>{baseline.max_drawdown_pct.toFixed(1)}%</b></div>
+            <div>Trades: <b>{baseline.total_trades}</b></div>
+          </div>
+        </div>
+        <div className="text-xs">
+          <div className="font-bold text-green-700 dark:text-green-400 uppercase tracking-wider mb-2">Optimized</div>
+          <div className="space-y-1">
+            <div>WR: <b>{(top.win_rate * 100).toFixed(1)}%</b></div>
+            <div>PF: <b>{top.profit_factor.toFixed(2)}</b></div>
+            <div>Net: <b>${top.net_profit.toLocaleString()}</b></div>
+            <div>DD: <b>{top.max_drawdown.toFixed(1)}%</b></div>
+            <div>Trades: <b>{top.total_trades}</b></div>
+          </div>
+        </div>
+        <div className="text-xs">
+          <div className="font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Change</div>
+          <div className="space-y-1">
+            <div className={better(baseline.win_rate, top.win_rate)}>{arrow(baseline.win_rate, top.win_rate)} {diffPct(baseline.win_rate, top.win_rate)}</div>
+            <div className={better(baseline.profit_factor, top.profit_factor)}>{arrow(baseline.profit_factor, top.profit_factor)} {diffPct(baseline.profit_factor, top.profit_factor)}</div>
+            <div className={better(baseline.net_profit, top.net_profit)}>{arrow(baseline.net_profit, top.net_profit)} {diffPct(baseline.net_profit, top.net_profit)}</div>
+            <div className={better(top.max_drawdown, baseline.max_drawdown_pct)}>{top.max_drawdown < baseline.max_drawdown_pct ? '↘ smaller' : '↗ bigger'}</div>
+            <div className="text-slate-500">{top.total_trades - baseline.total_trades > 0 ? '+' : ''}{top.total_trades - baseline.total_trades}</div>
+          </div>
+        </div>
+      </div>
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-3 text-xs">
+        <div className="font-bold text-slate-700 dark:text-slate-200 mb-1">Best parameters</div>
+        <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300">{JSON.stringify(top.parameters, null, 2)}</div>
+      </div>
+      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-3">
+        Apply these to the strategy on the <Link to="/app/optimization" className="text-violet-600 underline">Optimization page</Link> (full results + Apply button).
+      </div>
+    </div>
+  )
+}
 
 function MetricCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
@@ -56,10 +228,18 @@ export default function Backtests() {
 
   const { data: strategies = [] } = useQuery({ queryKey: ['strategies'], queryFn: () => strategiesApi.list().then(r => r.data) })
   const { data: runs = [] }       = useQuery({ queryKey: ['backtests'], queryFn: () => backtestsApi.list().then(r => r.data), refetchInterval: (q: any) => ((q?.state?.data as any[]) || []).some((r: any) => { const s = (r?.status || '').toLowerCase(); return s === 'running' || s === 'queued' || s === 'pending' }) ? 2000 : false })
-  const { data: metrics }: any    = useQuery({
+  const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics }: any = useQuery({
     queryKey: ['backtest-metrics', selected],
     queryFn: () => backtestsApi.getMetrics(selected!).then(r => r.data),
     enabled: !!selected,
+    // Bug #6 fix: if the run JUST completed, metrics row may not be written
+    // yet — refetch every 2 sec while no metrics, stop once we have them.
+    refetchInterval: (q: any) => (q?.state?.data ? false : 2000),
+    // Force refetch on click — even if cached, the row may have moved from
+    // RUNNING to COMPLETED since last fetch.
+    refetchOnMount: 'always',
+    retry: 3,
+    retryDelay: 1500,
   })
 
   const runMutation = useMutation({
@@ -205,6 +385,21 @@ export default function Backtests() {
                 )}
               </div>
 
+              {/* Loading + error states so the user knows something's happening */}
+              {!metrics && metricsLoading && (selectedRun.status||'').toLowerCase() === 'completed' && (
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 text-center">
+                  <div className="inline-block w-6 h-6 border-2 border-blue-500 border-r-transparent rounded-full animate-spin mb-2"/>
+                  <div className="text-sm text-slate-600 dark:text-slate-300">Loading results...</div>
+                </div>
+              )}
+              {!metrics && metricsError && (selectedRun.status||'').toLowerCase() === 'completed' && (
+                <div className="rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-5">
+                  <div className="font-bold text-amber-800 dark:text-amber-200 mb-1">Metrics not ready yet</div>
+                  <div className="text-xs text-amber-700 dark:text-amber-300 mb-3">The run finished but the metrics row wasn't written. This is rare — usually means the backtest had no trades or crashed at the very end.</div>
+                  <button onClick={() => refetchMetrics()} className="bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg">Retry</button>
+                </div>
+              )}
+
               {metrics && (
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                   <MetricCard
@@ -242,6 +437,11 @@ export default function Backtests() {
                     <MetricCard label="Sharpe Ratio" value={metrics.sharpe_ratio.toFixed(2)} color={metrics.sharpe_ratio >= 1 ? 'text-green-600' : 'text-slate-500'}/>
                   )}
                 </div>
+              )}
+
+              {/* "Optimize for better results?" — only shows on completed backtests */}
+              {metrics && (selectedRun.status||'').toLowerCase() === 'completed' && (
+                <OptimizePrompt selectedRun={selectedRun} baselineMetrics={metrics}/>
               )}
 
               {metrics?.equity_curve?.length > 0 && (

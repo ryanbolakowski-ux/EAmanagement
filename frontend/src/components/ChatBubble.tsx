@@ -71,7 +71,7 @@ export default function ChatBubble() {
           const copy = [...m]
           copy[copy.length - 1] = {
             role: 'assistant',
-            content: errBody.detail || `I'm having trouble right now (HTTP ${r.status}). Email support@thetaalgos.com and a human will help.`,
+            content: errBody.detail || `I'm having trouble right now (HTTP ${r.status}). Email theta.algos@yahoo.com and a human will help.`,
           }
           return copy
         })
@@ -102,7 +102,7 @@ export default function ChatBubble() {
                 return copy
               })
             } else if (payload.error) {
-              assistantText = `Sorry — ${payload.error}. Try again, or email support@thetaalgos.com.`
+              assistantText = `Sorry — ${payload.error}. Try again, or email theta.algos@yahoo.com.`
               setMsgs(m => {
                 const copy = [...m]
                 copy[copy.length - 1] = { role: 'assistant', content: assistantText }
@@ -117,7 +117,7 @@ export default function ChatBubble() {
         const copy = [...m]
         copy[copy.length - 1] = {
           role: 'assistant',
-          content: `Connection failed (${e?.message || 'unknown'}). Email support@thetaalgos.com.`,
+          content: `Connection failed (${e?.message || 'unknown'}). Email theta.algos@yahoo.com.`,
         }
         return copy
       })
@@ -223,7 +223,7 @@ export default function ChatBubble() {
               </button>
             </div>
             <div className="text-[9px] text-slate-400 mt-1.5 text-center">
-              AI can make mistakes. For account-specific issues, email support@thetaalgos.com.
+              AI can make mistakes. For account-specific issues, email theta.algos@yahoo.com.
             </div>
           </div>
         </div>

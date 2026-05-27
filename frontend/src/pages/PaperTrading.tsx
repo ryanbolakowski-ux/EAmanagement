@@ -127,7 +127,7 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
           <div className="rounded-lg bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-900 p-3">
             <div className="text-[10px] uppercase tracking-wider text-violet-700 dark:text-violet-300 font-bold mb-1">Watchlist</div>
             <p className="text-[11px] text-slate-700 dark:text-slate-200 leading-snug">
-              Scans the <strong>full Theta Algos universe</strong> (Mag 7, sector ETFs, Russell 2000 momentum names with options, recent IPOs, plus your strategy universe — 460+ tickers and growing). Picks the best setup per minute. No underlying selection needed.
+              Scans <strong>500+ liquid optionable tickers</strong> — the Mag 7, sector ETFs, Russell 2000 small-cap momentum names, recent IPOs, plus your strategy universe. Picks the best setup per minute. No underlying selection needed.
             </p>
           </div>
         </div>

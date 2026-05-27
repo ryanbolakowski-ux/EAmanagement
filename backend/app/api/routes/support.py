@@ -176,3 +176,59 @@ async def chat(data: _ChatRequest, request: Request, current_user: _U = Depends(
             yield f"data: {_chat_json.dumps({'error': str(e)[:200]})}\n\n".encode()
 
     return _Stream(event_stream(), media_type='text/event-stream')
+
+# ─── Feature suggestion endpoint ────────────────────────────────────────────
+class SuggestionRequest(BaseModel):
+    message: str
+    category: Optional[str] = None  # 'feature' | 'bug' | 'ux' | 'other'
+
+
+@router.post("/suggestion", status_code=201)
+async def suggestion(data: SuggestionRequest, request: Request,
+                      current_user: "User" = Depends(get_current_user)):
+    """Send a feature suggestion / feedback from a logged-in user to
+    theta.algos@yahoo.com. Rate-limited (10/hour per user) so a frustrated
+    user can't bury the inbox."""
+    msg = (data.message or "").strip()
+    if len(msg) < 5:
+        raise HTTPException(status_code=400, detail="Please write at least a few words.")
+    if len(msg) > 5000:
+        raise HTTPException(status_code=400, detail="That's a long one — keep it under 5000 chars.")
+
+    # Per-user rate limit (10/hour)
+    ip = request.client.host if request.client else "unknown"
+    bucket_key = f"sugg:{current_user.id}"
+    _SUGG_RATE = globals().setdefault("_SUGG_RATE", defaultdict(list))
+    now = time.time()
+    _SUGG_RATE[bucket_key] = [t for t in _SUGG_RATE[bucket_key] if (now - t) < 3600]
+    if len(_SUGG_RATE[bucket_key]) >= 10:
+        raise HTTPException(status_code=429, detail="You've sent 10 suggestions in the last hour. Slow down — we'll read them all.")
+    _SUGG_RATE[bucket_key].append(now)
+
+    cat = (data.category or "general").strip()
+    cat_emoji = {"feature": "\U0001F4A1", "bug": "\U0001F41B", "ux": "\U0001F3A8", "other": "\U0001F4DD"}.get(cat, "\U0001F4DD")
+    subject = f"[Admin] Theta Algos suggestion ({cat}) from {current_user.username or current_user.email}"
+    html = f"""
+    <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
+      <h1 style="color:#7c3aed;margin:0 0 6px;">{cat_emoji} New suggestion — {cat}</h1>
+      <p style="color:#64748b;font-size:13px;margin:0 0 18px;">From {current_user.username or '(no username)'} &lt;{current_user.email}&gt; · IP {ip} · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</p>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:18px;margin-bottom:14px;">
+        <pre style="white-space:pre-wrap;font-family:-apple-system,Segoe UI,sans-serif;font-size:14px;line-height:1.6;color:#0f172a;margin:0;">{msg}</pre>
+      </div>
+      <p style="color:#94a3b8;font-size:11px;margin-top:18px;">Reply directly to {current_user.email} to follow up with them.</p>
+    </div>"""
+
+    admin_to = _chat_os.environ.get("ADMIN_NOTIFY_EMAIL", "theta.algos@yahoo.com")
+    if admin_to == "disabled":
+        admin_to = "theta.algos@yahoo.com"
+    try:
+        from app.services.email import _send as _send_em
+        ok = _send_em(admin_to, subject, html)
+        if not ok:
+            raise HTTPException(status_code=502, detail="Failed to send — please try again later.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[suggestion] send failed: {e}")
+        raise HTTPException(status_code=502, detail="Failed to send. We'll fix it.")
+    return {"status": "sent", "message": "Got it — thanks for the suggestion. We read every one."}
