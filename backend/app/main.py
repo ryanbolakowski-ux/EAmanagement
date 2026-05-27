@@ -130,6 +130,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to start premarket scheduler: {e}")
 
+    # Scanner health heartbeat — guarantees a 9:25 ET status email even on
+    # quiet days so silent-failure of the morning pick can never recur.
+    health_monitor_task = None
+    try:
+        from app.engines.scanner_health import run_health_monitor_loop
+        health_monitor_task = asyncio.create_task(run_health_monitor_loop())
+    except Exception as e:
+        logger.warning(f"Failed to start scanner health monitor: {e}")
+
     try:
         yield
     finally:
@@ -138,6 +147,8 @@ async def lifespan(app: FastAPI):
         digest_task.cancel()
         if premarket_task:
             premarket_task.cancel()
+        if health_monitor_task:
+            health_monitor_task.cancel()
         logger.info("Shutting down Theta Algos API...")
 
 
