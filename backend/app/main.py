@@ -41,6 +41,33 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Theta Algos API...")
     await init_db()
     logger.info("Database initialized.")
+
+    # Auto-recover orphaned backtests + optimizations from previous run.
+    # When the backend restarts mid-run, the worker process dies but the
+    # DB row says RUNNING forever — the UI shows perpetual "40%". Mark
+    # them FAILED on startup so the user can re-run cleanly.
+    try:
+        from app.database import async_session_factory as _asf_z
+        from sqlalchemy import text as _t_z
+        async with _asf_z() as _db_z:
+            r1 = await _db_z.execute(_t_z(
+                "UPDATE backtest_runs SET status='FAILED', "
+                "error_message='Worker died during backend restart (auto-recovered on startup)' "
+                "WHERE status IN ('RUNNING','PENDING') RETURNING id"
+            ))
+            n1 = len(r1.fetchall())
+            r2 = await _db_z.execute(_t_z(
+                "UPDATE optimization_runs SET status='FAILED', "
+                "error_message='Worker died during backend restart (auto-recovered on startup)' "
+                "WHERE status IN ('RUNNING','PENDING') RETURNING id"
+            ))
+            n2 = len(r2.fetchall())
+            await _db_z.commit()
+            if n1 or n2:
+                logger.info(f"Startup recovery: marked {n1} stuck backtests + {n2} stuck optimizations FAILED")
+    except Exception as e:
+        logger.warning(f"Startup zombie cleanup failed: {e}")
+
     # Resume active paper trading sessions
     try:
         from app.database import async_session_factory
