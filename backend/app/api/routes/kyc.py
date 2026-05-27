@@ -132,6 +132,14 @@ async def kyc_start(
     age = _age_from_dob(data.date_of_birth)
     if age is None:
         raise HTTPException(status_code=400, detail="Invalid date of birth. Use YYYY-MM-DD.")
+
+    # Parse DOB to a real date for asyncpg — string params fail with
+    # 'str' object has no attribute 'toordinal' on PG date columns.
+    from datetime import date as _kyc_date
+    try:
+        _dob_date = _kyc_date.fromisoformat(data.date_of_birth)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
     if age < MIN_AGE:
         # Log the rejection so admins can see under-age attempts
         try:
@@ -158,7 +166,7 @@ async def kyc_start(
             WHERE id = :uid
         """), {
             "fn": data.first_name, "ln": data.last_name,
-            "dob": data.date_of_birth, "cc": data.country_code.upper(),
+            "dob": _dob_date, "cc": data.country_code.upper(),
             "uid": str(current_user.id),
         })
         await db.commit()
@@ -194,7 +202,7 @@ async def kyc_start(
         """), {
             "sid": session.id,
             "fn": data.first_name, "ln": data.last_name,
-            "dob": data.date_of_birth, "cc": data.country_code.upper(),
+            "dob": _dob_date, "cc": data.country_code.upper(),
             "uid": str(current_user.id),
         })
         await db.commit()
@@ -224,7 +232,7 @@ async def kyc_start(
                 WHERE id = :uid
             """), {
                 "fn": data.first_name, "ln": data.last_name,
-                "dob": data.date_of_birth, "cc": data.country_code.upper(),
+                "dob": _dob_date, "cc": data.country_code.upper(),
                 "uid": str(current_user.id),
             })
             await db.commit()
