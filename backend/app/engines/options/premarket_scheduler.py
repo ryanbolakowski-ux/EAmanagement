@@ -862,6 +862,16 @@ async def start_premarket_scheduler():
                 # Auto-execute pass at 08:30 + auto_execute_delay_min (default 15)
                 asyncio.create_task(_delayed_auto_execute(int(getattr(__import__("app.config", fromlist=["settings"]).settings, "PREMARKET_AUTO_EXECUTE_DELAY_SEC", 15 * 60))))
 
+            # Theta Scanner morning pick (tiered threshold 6:00-9:50 ET).
+            # This was previously ONLY invoked from the except block — bug.
+            # In the happy path it never ran, so the morning options email
+            # silently stopped firing. Now called every loop iteration; the
+            # function itself debounces (5 min) + once-per-day Redis SETNX.
+            try:
+                await _check_and_run_theta_scanner()
+            except Exception as _tse:
+                logger.warning(f"[ThetaScanner] check failed: {_tse}")
+
             # Intraday cadence — every 5 min within window
             await _run_scan_cycle(is_premarket=False)
             await asyncio.sleep(INTRADAY_PERIOD_SEC)
