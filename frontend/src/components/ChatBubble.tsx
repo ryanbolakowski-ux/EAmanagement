@@ -132,14 +132,20 @@ export default function ChatBubble() {
 
   return (
     <>
-      {/* Bubble button — Theta logo, deep purple gradient */}
+      {/* Bubble button — Theta logo stays purple. Background flips white in
+          light mode / near-black in dark mode. Always glows purple. Logo
+          stays visible regardless of theme. */}
       {!open && (
         <button
           onClick={() => setOpen(true)}
           aria-label="Open Theta Assistant"
-          className="fixed bottom-5 right-5 z-[150] bg-gradient-to-br from-purple-700 via-violet-700 to-indigo-800 hover:from-purple-600 hover:via-violet-600 hover:to-indigo-700 rounded-full w-14 h-14 flex items-center justify-center shadow-xl shadow-purple-900/50 transition-transform hover:scale-105 ring-2 ring-white/10"
+          className="fixed bottom-5 right-5 z-[150] bg-white dark:bg-slate-950 hover:bg-violet-50 dark:hover:bg-slate-900 rounded-full w-14 h-14 flex items-center justify-center transition-transform hover:scale-105 ring-1 ring-violet-300 dark:ring-violet-700"
+          style={{
+            // Always-on purple underglow, stronger in dark mode
+            boxShadow: '0 0 20px rgba(124, 58, 237, 0.45), 0 0 40px rgba(124, 58, 237, 0.20), 0 4px 12px rgba(0, 0, 0, 0.15)',
+          }}
         >
-          <ThetaLogo size={28} />
+          <ThetaLogo size={32} />
         </button>
       )}
 

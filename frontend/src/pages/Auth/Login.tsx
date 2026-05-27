@@ -36,7 +36,7 @@ export default function Login() {
         setError('Unexpected login response.')
       }
     } catch (err: any) {
-      if (!err.response) { setError('Cannot reach API server. Try a hard refresh (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows). If that fails, clear site data for thetaalgos.vercel.app and reload.') } else if (err.response.status === 401) { setError('Wrong email or password.') } else { setError(err.response?.data?.detail || 'Login failed (HTTP ' + err.response.status + ').') }
+      if (!err.response) { setError('Cannot reach API server. Try a hard refresh (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows). If that fails, clear site data for thetaalgos.com and reload.') } else if (err.response.status === 401) { setError('Wrong email or password.') } else { setError(err.response?.data?.detail || 'Login failed (HTTP ' + err.response.status + ').') }
     } finally { setLoading(false) }
   }
 

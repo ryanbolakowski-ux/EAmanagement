@@ -81,8 +81,13 @@ class BacktestConfig:
     # huge size on tight stops.
     max_contracts_cap: int = 100
     # Move stop to entry once price reaches this fraction of risk in our favor.
-    # 1.0 = move to BE at 1R. Set to 0 to disable break-even.
-    breakeven_at_r: float = 0.5
+    # 1.0 = move to BE at 1R. 0 = disable (default).
+    # NOTE: enabling this can dramatically reduce effective WR — trades that
+    # would have hit TP get stopped at BE on retracements. The user's earlier
+    # backtests (91% WR / 85% effective) were run with this OFF; the 0.5
+    # default added in ecba592 caused regression to 86% / 68%. Default
+    # restored to OFF; opt-in by setting on the run config.
+    breakeven_at_r: float = 0.0
     # Apex-style trailing drawdown ($ from the equity peak). When the
     # current drawdown from peak crosses `half_size_drawdown_pct` of this
     # threshold, the runner halves the next trade's contract size. Set
