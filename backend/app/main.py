@@ -51,13 +51,13 @@ async def lifespan(app: FastAPI):
         from sqlalchemy import text as _t_z
         async with _asf_z() as _db_z:
             r1 = await _db_z.execute(_t_z(
-                "UPDATE backtest_runs SET status='FAILED', "
+                "UPDATE backtest_runs SET status='FAILED', completed_at=NOW(), "
                 "error_message='Worker died during backend restart (auto-recovered on startup)' "
                 "WHERE status IN ('RUNNING','PENDING') RETURNING id"
             ))
             n1 = len(r1.fetchall())
             r2 = await _db_z.execute(_t_z(
-                "UPDATE optimization_runs SET status='FAILED', "
+                "UPDATE optimization_runs SET status='FAILED', completed_at=NOW(), "
                 "error_message='Worker died during backend restart (auto-recovered on startup)' "
                 "WHERE status IN ('RUNNING','PENDING') RETURNING id"
             ))
