@@ -328,7 +328,7 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     if not geo["valid"]:
         logger.warning(
             f"[Signals] REJECTED invalid geometry watcher={watcher_id} {instrument} "
-            f"{direction} entry={entry} stop={stop} tp={tp}: {geo[error]}"
+            f"{direction} entry={entry} stop={stop} tp={tp}: {geo['error']}"
         )
         return
     for _w in geo["warnings"]:

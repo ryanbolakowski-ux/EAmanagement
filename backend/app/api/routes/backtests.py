@@ -27,6 +27,34 @@ def _safe_float(v):
 def _iso_or_none(dt):
     return dt.isoformat() if dt is not None else None
 
+
+from sqlalchemy import text as _sql_text
+
+
+def _assess_quality(pf, win_rate, max_dd_pct, total_trades, expectancy):
+    """Bug 11 guardrail: a strategy is only 'good' when it clears ALL of
+    profit_factor, win_rate, max_drawdown, trade count and expectancy. Tiny
+    samples are never 'good' regardless of headline numbers."""
+    reasons = []
+    MIN_TRADES = 30
+    if (total_trades or 0) < MIN_TRADES:
+        reasons.append("sample too small (" + str(total_trades or 0) + " trades, need >= " + str(MIN_TRADES) + ")")
+    if (pf or 0) < 1.3:
+        reasons.append("profit factor low (" + format(pf or 0, ".2f") + " < 1.3)")
+    if (win_rate or 0) < 0.40:
+        reasons.append("win rate low (" + format((win_rate or 0) * 100, ".0f") + "% < 40%)")
+    if abs(max_dd_pct or 0) > 25:
+        reasons.append("max drawdown high (" + format(abs(max_dd_pct or 0), ".0f") + "% > 25%)")
+    if (expectancy or 0) <= 0:
+        reasons.append("expectancy not positive")
+    return {
+        "is_good": len(reasons) == 0,
+        "small_sample": (total_trades or 0) < MIN_TRADES,
+        "reasons": reasons,
+    }
+
+
+
 router = APIRouter()
 
 
@@ -207,7 +235,6 @@ async def get_backtest_metrics(
         avg_win=safe_float(getattr(m, "avg_win", 0.0)), avg_loss=safe_float(getattr(m, "avg_loss", 0.0)),
         equity_curve=m.equity_curve or [], monthly_returns=m.monthly_returns or {},
     )
-
 
 
 @router.delete("/{backtest_id}", status_code=204)
@@ -413,7 +440,6 @@ async def _run_backtest_task(backtest_run_id: str):
     except Exception as e:
         import traceback
         traceback.print_exc()
-
 
 
 
@@ -634,3 +660,54 @@ async def _run_options_backtest(run: "BacktestRun", strategy_model: "Strategy",
     run.completed_at = datetime.utcnow()
     await db.commit()
 
+
+@router.get("/ranking")
+async def get_strategy_ranking(
+    sort_by: str = "profit_factor",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bug 9: per-strategy ranking from each strategy's most recent COMPLETED
+    backtest. Returns PF, win rate, drawdown, trade count, expectancy + a
+    quality verdict (Bug 11) so the UI never presents a tiny-sample 95% as
+    reliable. sort_by: profit_factor|win_rate|max_drawdown|total_trades|expectancy|net_profit."""
+    rows = (await db.execute(_sql_text("""
+        SELECT DISTINCT ON (s.id)
+               s.id AS sid, s.name AS name, s.status::text AS status,
+               m.profit_factor, m.win_rate, m.max_drawdown_pct,
+               m.total_trades, m.net_profit
+          FROM strategies s
+          JOIN backtest_runs br ON br.strategy_id = s.id AND UPPER(br.status::text) = 'COMPLETED'
+          JOIN backtest_metrics m ON m.backtest_run_id = br.id
+         WHERE s.user_id = :uid
+         ORDER BY s.id, br.completed_at DESC NULLS LAST
+    """), {"uid": str(current_user.id)})).fetchall()
+
+    out = []
+    for r in rows:
+        tt = int(r.total_trades or 0)
+        expectancy = round((_safe_float(r.net_profit) / tt), 2) if tt > 0 else 0.0
+        q = _assess_quality(_safe_float(r.profit_factor), _safe_float(r.win_rate),
+                            _safe_float(r.max_drawdown_pct), tt, expectancy)
+        out.append({
+            "strategy_id": str(r.sid), "name": r.name, "status": (r.status or "").lower(),
+            "profit_factor": round(_safe_float(r.profit_factor), 2),
+            "win_rate": round(_safe_float(r.win_rate), 4),
+            "max_drawdown_pct": round(_safe_float(r.max_drawdown_pct), 2),
+            "total_trades": tt,
+            "net_profit": round(_safe_float(r.net_profit), 2),
+            "expectancy": expectancy,
+            "quality": q,
+        })
+
+    key_map = {
+        "profit_factor": "profit_factor", "win_rate": "win_rate",
+        "max_drawdown": "max_drawdown_pct", "total_trades": "total_trades",
+        "expectancy": "expectancy", "net_profit": "net_profit",
+    }
+    k = key_map.get(sort_by, "profit_factor")
+    reverse = (k != "max_drawdown_pct")  # lower drawdown is better
+    out.sort(key=lambda x: x.get(k, 0) or 0, reverse=reverse)
+    for i, item in enumerate(out, 1):
+        item["rank"] = i
+    return out

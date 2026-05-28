@@ -1,4 +1,5 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { useEffect } from 'react'
 import { useAuthStore } from './stores/authStore'
 import Layout from './components/Layout/Layout'
 import Landing from './pages/Landing'
@@ -59,6 +60,51 @@ function AdminAwareIndex() {
   return <Dashboard />
 }
 
+const _TITLES: Record<string, string> = {
+  "/": "Theta Algos - Algorithmic Trading",
+  "/pricing": "Pricing - Theta Algos",
+  "/login": "Sign In - Theta Algos",
+  "/register": "Create Account - Theta Algos",
+  "/forgot-password": "Reset Password - Theta Algos",
+  "/privacy": "Privacy Policy - Theta Algos",
+  "/terms": "Terms of Service - Theta Algos",
+  "/disclosures": "Disclosures - Theta Algos",
+  "/cookies": "Cookie Policy - Theta Algos",
+  "/app": "Dashboard - Theta Algos",
+  "/app/strategies": "Strategy Builder - Theta Algos",
+  "/app/plain-english": "Plain-English Builder - Theta Algos",
+  "/app/how-to-trade": "How To Trade - Theta Algos",
+  "/app/backtests": "Backtests - Theta Algos",
+  "/app/optimization": "Optimization - Theta Algos",
+  "/app/paper": "Paper Trading - Theta Algos",
+  "/app/live": "Live Trading - Theta Algos",
+  "/app/email-signals": "Email Signals - Theta Algos",
+  "/app/account-signals": "Email Signals - Theta Algos",
+  "/app/options": "Options - Theta Algos",
+  "/app/bias": "Daily Bias - Theta Algos",
+  "/app/profile": "Profile - Theta Algos",
+  "/app/kyc": "Identity Verification - Theta Algos",
+  "/app/prop-firms": "Prop Firms - Theta Algos",
+  "/app/admin": "Admin - Theta Algos",
+}
+
+function RouteTitle() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    // exact match, else longest known prefix, else brand default
+    let title = _TITLES[pathname]
+    if (!title) {
+      const hit = Object.keys(_TITLES)
+        .filter((k) => k !== "/" && pathname.startsWith(k))
+        .sort((a, b) => b.length - a.length)[0]
+      title = hit ? _TITLES[hit] : "Theta Algos - Algorithmic Trading"
+    }
+    document.title = title
+  }, [pathname])
+  return null
+}
+
+
 export default function App() {
   return (
     <>
@@ -66,6 +112,7 @@ export default function App() {
       <DevicePicker />
     </AuthenticatedOnly>
     <VersionBanner />
+    <RouteTitle />
     <AuthenticatedOnly>
       <SuggestionForm />
     </AuthenticatedOnly>
