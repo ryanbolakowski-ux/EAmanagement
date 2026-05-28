@@ -708,6 +708,12 @@ async def _run_scan_cycle(*, is_premarket: bool):
     # because the GIL is held by .dropna / __contains__ on big universe
     # frames). Skip the intraday tick if anything is actively running.
     # Pre-market 09:00 batch always runs — it's time-critical for emails.
+    # NOTE: we intentionally do NOT skip the scan when a backtest/optimization
+    # is RUNNING. Doing so previously SUPPRESSED real intraday signal emails for
+    # ALL users whenever a simulation ran on ANY account (a simulation must
+    # never block real email delivery). GIL contention from the scan is now
+    # mitigated by the shared bar cache + thread-offloaded fetches. If a sim is
+    # running we just log it for observability and proceed with the scan/email.
     if not is_premarket:
         try:
             from sqlalchemy import text as _t_busy
@@ -718,10 +724,9 @@ async def _run_scan_cycle(*, is_premarket: bool):
                     "UNION SELECT 1 FROM optimization_runs WHERE status='RUNNING' LIMIT 1"
                 ))).first()
             if busy:
-                logger.info("[Scanner] skipping intraday tick — user backtest/optimization in progress")
-                return
+                logger.info("[Scanner] sim (backtest/optimization) running — proceeding with scan anyway (emails are never suppressed by simulations)")
         except Exception:
-            pass  # if the check itself fails, fail-open and run the scan
+            pass
 
     await expire_old_pending()
 
