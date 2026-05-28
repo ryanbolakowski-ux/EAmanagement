@@ -92,6 +92,15 @@ export const backtestsApi = {
 // Optimization
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Single source of truth for the default optimization grid. Both the
+// standalone Optimization page and the backtest "Optimize" button use this
+// so they test identical parameter combinations on the same engine.
+export const DEFAULT_OPT_GRID: Record<string, number[]> = {
+  risk_reward_ratio: [1.5, 2.0, 2.5, 3.0],
+  stop_loss_ticks: [8, 10, 12, 16],
+  fvg_min_size_ticks: [2, 4, 6],
+}
+
 export const optimizationApi = {
   list: () => api.get('/api/v1/optimization/'),
   start: (data: {

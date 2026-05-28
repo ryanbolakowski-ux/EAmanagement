@@ -333,6 +333,12 @@ async def _run_optimization_task(run_id: str):
             run.status = OptimizationStatus.RUNNING
             run.started_at = datetime.now(timezone.utc)
             await db.commit()
+            logger.info(
+                f"[OPT START] run={run.id} strategy={run.strategy_id} instrument={run.instrument} "
+                f"grid={run.parameter_grid} metric={run.optimization_metric} "
+                f"-- SIMULATION MODE: writes only to optimization_runs/optimization_results; "
+                f"never to email/pick/notification/account tables"
+            )
 
             # Load strategy
             strat_result = await db.execute(
@@ -510,6 +516,13 @@ async def _run_optimization_task(run_id: str):
                 reverse = False
 
             all_results.sort(key=lambda x: x.get(metric_key, 0) or 0, reverse=reverse)
+            _best = all_results[0] if all_results else None
+            if _best:
+                logger.info(
+                    f"[OPT BEST] run={run.id} metric={metric_key} best_params={_best.get('params')} "
+                    f"best_{metric_key}={_best.get(metric_key)} net_profit={_best.get('net_profit')} "
+                    f"trades={_best.get('total_trades')}"
+                )
 
             # Store top 20 results
             for rank, r in enumerate(all_results[:20], 1):
@@ -602,6 +615,7 @@ async def apply_optimization_result(
     if "stop_loss_type" in params:
         strategy.stop_loss_type = params["stop_loss_type"]
     await db.commit()
+    logger.info(f"[OPT APPLY] run={run_id} rank={rank} applied params to strategy {run.strategy_id}: {params}")
     return {"message": f"Applied rank {rank} parameters to strategy", "parameters": params}
 
 

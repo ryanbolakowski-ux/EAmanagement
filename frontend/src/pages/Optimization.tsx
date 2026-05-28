@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { optimizationApi, strategiesApi } from '../api/endpoints'
+import { optimizationApi, strategiesApi, DEFAULT_OPT_GRID } from '../api/endpoints'
 import { Sliders, X, Trophy, TrendingUp, Trash2 } from 'lucide-react'
 
 export default function Optimization() {
@@ -35,11 +35,7 @@ export default function Optimization() {
   const runMutation = useMutation({
     mutationFn: () => optimizationApi.start({
       ...{strategy_id: form.strategy_id, instrument: form.instrument, optimization_metric: form.optimization_metric, start_date: new Date(Date.now() - parseInt(form.lookback) * 30 * 24 * 60 * 60 * 1000).toISOString(), end_date: new Date().toISOString()},
-      parameter_grid: {
-        risk_reward_ratio: [1.5, 2.0, 2.5, 3.0],
-        stop_loss_ticks: [8, 10, 12, 16],
-        fvg_min_size_ticks: [2, 4, 6],
-      },
+      parameter_grid: DEFAULT_OPT_GRID,
     }),
     onSuccess: (res: any) => { setRunId(res.data.id); setShowForm(false); setPolling(true) },
   })

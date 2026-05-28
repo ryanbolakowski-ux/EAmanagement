@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, CartesianGrid, Tooltip } from 'recharts'
 import { Play, Trash2, FlaskConical, X, Sparkles } from 'lucide-react'
-import { strategiesApi, backtestsApi } from '../api/endpoints'
+import { strategiesApi, backtestsApi, DEFAULT_OPT_GRID } from '../api/endpoints'
 import api from '../api/client'
 
 const STATUS_COLORS: Record<string, string> = {
@@ -49,12 +49,8 @@ function OptimizePrompt({ selectedRun, baselineMetrics }: { selectedRun: any; ba
   async function start() {
     setPhase('starting'); setErrorMsg(null)
     try {
-      // Build a reasonable default parameter grid for the same strategy
-      const param_grid: Record<string, any[]> = {
-        risk_reward_ratio: [1.5, 2.0, 2.5, 3.0],
-        stop_loss_ticks: [4, 6, 8, 10, 12],
-        fvg_min_size_ticks: [2, 4, 6, 8],
-      }
+      // Same default grid as the standalone Optimization page (shared constant).
+      const param_grid = DEFAULT_OPT_GRID
       const body = {
         strategy_id: selectedRun.strategy_id,
         instrument: selectedRun.instrument,
