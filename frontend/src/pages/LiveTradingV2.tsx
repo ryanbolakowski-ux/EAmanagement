@@ -95,10 +95,11 @@ function PendingOrdersCard() {
 
 function OpenPositionsCard() {
   const qc = useQueryClient()
-  const { data } = useQuery({
+  const { data, isError, isLoading } = useQuery({
     queryKey: ['scanner-open-positions'],
     queryFn: () => api.get('/api/v1/scanner/open-positions').then((r: any) => r.data),
     refetchInterval: 30_000,
+    retry: 1,
   })
   const closeAll = useMutation({
     mutationFn: () => api.post('/api/v1/scanner/close-all'),
@@ -111,7 +112,16 @@ function OpenPositionsCard() {
       alert(`Force-closed ${r.data?.count || 0} positions at Tradier.`)
     },
   })
-  if (!data) return null
+  if (isError) {
+    return (
+      <div className="rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-4 text-sm text-amber-800 dark:text-amber-200">
+        Couldn't load open positions right now — we'll retry automatically. This does not mean you have no positions; check your broker if unsure.
+      </div>
+    )
+  }
+  if (!data) return isLoading ? (
+    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 text-xs text-slate-400 animate-pulse">Loading open positions…</div>
+  ) : null
   // No open positions but maybe realized P&L from earlier today
   if (data.count === 0) {
     const realized = data.realized_today || 0

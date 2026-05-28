@@ -55,10 +55,23 @@ def auth():
     return {"user_id": uid, "token": token}
 
 
+class _RetryingClient(httpx.Client):
+    """httpx.Client that retries idempotent-ish calls once on transient
+    ReadTimeout/ConnectError (the prod backend is CPU-contended by live
+    watchers). Never retries on HTTP status — only on transport stalls."""
+    def request(self, *args, **kwargs):
+        try:
+            return super().request(*args, **kwargs)
+        except (httpx.ReadTimeout, httpx.ConnectError, httpx.NetworkError):
+            import time as _t
+            _t.sleep(2)
+            return super().request(*args, **kwargs)
+
+
 @pytest.fixture(scope="session")
 def client(auth):
     headers = {"Authorization": f"Bearer {auth['token']}"}
-    with httpx.Client(base_url=BASE, headers=headers, timeout=60.0) as c:
+    with _RetryingClient(base_url=BASE, headers=headers, timeout=120.0) as c:
         yield c
 
 

@@ -107,9 +107,11 @@ export default function Dashboard() {
     queryKey: ['dashboard'],
     queryFn: () => dashboardApi.summary().then(r => r.data),
     refetchInterval: 60000,
+    refetchOnMount: 'always',
+    staleTime: 0,
   })
 
-  const { data: biasData } = useQuery({
+  const { data: biasData, isLoading: biasLoading, isError: biasError } = useQuery({
     queryKey: ['daily-bias'],
     queryFn: () => dashboardApi.bias().then(r => r.data),
     refetchInterval: 5 * 60 * 1000,
@@ -239,7 +241,7 @@ export default function Dashboard() {
               <div key={t} className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-extrabold text-slate-900 dark:text-slate-100">{t}</span>
-                  <span className="text-[11px] text-slate-400 dark:text-slate-500">loading...</span>
+                  <span className="text-[11px] text-slate-400 dark:text-slate-500">{biasLoading ? 'loading…' : (biasError ? 'unavailable' : 'no data yet')}</span>
                 </div>
                 <div className="h-1.5 bg-slate-100 dark:bg-slate-800 rounded-full animate-pulse"/>
                 <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded mt-3 animate-pulse"/>

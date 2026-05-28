@@ -310,6 +310,11 @@ export default function PaperTrading() {
           {periodTrades.length > 0 && (
             <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{wins}W / {periodTrades.length - wins}L</div>
           )}
+          {periodTrades.length > 0 && periodTrades.length < 30 && (
+            <div className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 mt-1" title="Win rate from fewer than 30 trades is statistically unreliable.">
+              ⚠ small sample ({periodTrades.length} trades) — not yet reliable
+            </div>
+          )}
         </div>
         <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700">
           <div className="text-xs text-slate-400 uppercase tracking-wider font-medium mb-1.5 dark:text-slate-500">Net P&L</div>

@@ -108,3 +108,71 @@ def test_known_params_accepted_and_terminal(client):
             assert terminal["completed_combinations"] >= 1
     finally:
         client.delete(f"/api/v1/strategies/{sid}")
+
+
+def _psy():
+    import os, psycopg2
+    url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    return psycopg2.connect(url, connect_timeout=5)
+
+
+def test_apply_best_result_updates_strategy(client):
+    """Bug 8: applying a ranked result writes its params onto the strategy.
+
+    Seeds a completed run + rank-1 result with sync psycopg2 (no asyncio), then
+    exercises POST /optimization/{id}/apply and verifies the strategy params."""
+    import uuid as _uuid
+    import json as _json
+
+    s = client.post("/api/v1/strategies/", json={
+        "name": f"opt-apply-{_uuid.uuid4().hex[:6]}",
+        "instruments": ["ES"], "risk_reward_ratio": 2.0,
+        "stop_loss_type": "ticks", "stop_loss_ticks": 8,
+        "fvg_min_size_ticks": 4, "status": "active",
+    })
+    assert s.status_code == 201, s.text
+    sid = s.json()["id"]
+    run_id = str(_uuid.uuid4())
+
+    cn = _psy()
+    try:
+        with cn, cn.cursor() as cur:
+            cur.execute("SELECT user_id FROM strategies WHERE id = %s", (sid,))
+            uid = cur.fetchone()[0]
+            cur.execute("""
+                INSERT INTO optimization_runs
+                    (id, strategy_id, user_id, instrument, start_date, end_date,
+                     parameter_grid, optimization_metric, total_combinations,
+                     completed_combinations, status, created_at)
+                VALUES (%s, %s, %s, 'ES', NOW() - INTERVAL '30 days', NOW(),
+                        %s, 'profit_factor', 1, 1, 'COMPLETED', NOW())
+            """, (run_id, sid, str(uid), _json.dumps({"risk_reward_ratio": [3.0]})))
+            cur.execute("""
+                INSERT INTO optimization_results
+                    (id, optimization_run_id, parameters, rank, net_profit,
+                     profit_factor, win_rate, max_drawdown, total_trades, sharpe_ratio)
+                VALUES (%s, %s, %s, 1, 1000, 2.5, 0.6, 5, 40, 1.2)
+            """, (str(_uuid.uuid4()), run_id,
+                  _json.dumps({"risk_reward_ratio": 3.0, "stop_loss_ticks": 16, "fvg_min_size_ticks": 6})))
+    finally:
+        cn.close()
+
+    try:
+        g = client.get(f"/api/v1/optimization/{run_id}")
+        assert g.status_code == 200, g.text
+        assert g.json()["status"] == "completed"
+
+        a = client.post(f"/api/v1/optimization/{run_id}/apply", params={"rank": 1})
+        assert a.status_code == 200, a.text
+
+        st = client.get(f"/api/v1/strategies/{sid}").json()
+        assert abs(st["risk_reward_ratio"] - 3.0) < 1e-6, st
+    finally:
+        cn = _psy()
+        try:
+            with cn, cn.cursor() as cur:
+                cur.execute("DELETE FROM optimization_results WHERE optimization_run_id = %s", (run_id,))
+                cur.execute("DELETE FROM optimization_runs WHERE id = %s", (run_id,))
+        finally:
+            cn.close()
+        client.delete(f"/api/v1/strategies/{sid}")
