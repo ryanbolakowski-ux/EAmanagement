@@ -105,6 +105,7 @@ export const optimizationApi = {
   getResults: (runId: string) => api.get(`/api/v1/optimization/${runId}/results`),
   delete: (runId: string) => api.delete(`/api/v1/optimization/${runId}`),
   apply: (runId: string, rank: number = 1) => api.post(`/api/v1/optimization/${runId}/apply?rank=${rank}`),
+  retry: (runId: string) => api.post(`/api/v1/optimization/${runId}/retry`),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
