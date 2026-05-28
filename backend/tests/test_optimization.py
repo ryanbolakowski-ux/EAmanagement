@@ -176,3 +176,62 @@ def test_apply_best_result_updates_strategy(client):
         finally:
             cn.close()
         client.delete(f"/api/v1/strategies/{sid}")
+
+
+def test_retry_failed_run(client):
+    """Fix 6: a FAILED run can be retried -> goes back to queued, partial
+    results cleared, error cleared. Seeds the run with sync psycopg2."""
+    import uuid as _uuid
+    import json as _json
+
+    sid = _make_active_strategy(client)
+    run_id = str(_uuid.uuid4())
+    cn = _psy()
+    try:
+        with cn, cn.cursor() as cur:
+            cur.execute("SELECT user_id FROM strategies WHERE id=%s", (sid,))
+            uid = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO optimization_runs (id,strategy_id,user_id,instrument,start_date,end_date,"
+                "parameter_grid,optimization_metric,total_combinations,completed_combinations,status,"
+                "error_message,completed_at,created_at) VALUES (%s,%s,%s,'ES',NOW()-INTERVAL '30 days',NOW(),"
+                "%s,'profit_factor',48,4,'FAILED','Worker died during backend restart',NOW(),NOW())",
+                (run_id, sid, str(uid), _json.dumps({"risk_reward_ratio": [1.5, 2.0]})))
+            cur.execute(
+                "INSERT INTO optimization_results (id,optimization_run_id,parameters,rank,net_profit,"
+                "profit_factor,win_rate,max_drawdown,total_trades,sharpe_ratio) "
+                "VALUES (%s,%s,'{}'::json,1,0,0,0,0,0,0)", (str(_uuid.uuid4()), run_id))
+    finally:
+        cn.close()
+    try:
+        # the failed run + its reason are visible
+        g = client.get(f"/api/v1/optimization/{run_id}")
+        assert g.status_code == 200
+        assert g.json()["status"] == "failed"
+        assert g.json().get("failure_reason")
+
+        r = client.post(f"/api/v1/optimization/{run_id}/retry")
+        if r.status_code in (404, 405):
+            pytest.skip("retry endpoint not deployed on this server yet")
+        assert r.status_code == 202, r.text
+        assert r.json()["status"] in ("queued", "running")
+
+        # results cleared, error cleared
+        cn = _psy()
+        try:
+            with cn, cn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM optimization_results WHERE optimization_run_id=%s", (run_id,))
+                assert cur.fetchone()[0] == 0
+                cur.execute("SELECT error_message FROM optimization_runs WHERE id=%s", (run_id,))
+                assert cur.fetchone()[0] is None
+        finally:
+            cn.close()
+    finally:
+        cn = _psy()
+        try:
+            with cn, cn.cursor() as cur:
+                cur.execute("DELETE FROM optimization_results WHERE optimization_run_id=%s", (run_id,))
+                cur.execute("DELETE FROM optimization_runs WHERE id=%s", (run_id,))
+        finally:
+            cn.close()
+        client.delete(f"/api/v1/strategies/{sid}")

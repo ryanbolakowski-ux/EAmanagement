@@ -179,7 +179,13 @@ export default function AIStrategyBuilder() {
       }
       const sorted = allTfs.sort((a, b) => tfRank(a) - tfRank(b))
       const exec = sorted[0] || '1m'
-      const primary = sorted.find(t => tfRank(t) >= 5 && tfRank(t) <= 60) || '15m'
+      // Setup/primary timeframe must be INTRADAY and strictly below 60m. The
+      // old rule allowed 1h (rank 60) as the setup TF, which made the strategy
+      // detect setups on the hourly chart -> ~9 trades/yr. Pick the largest
+      // mentioned setup TF in [5m, 60m); fall back to 15m (manual builder
+      // default). Timeframes >= 60m are bias-only (higher_timeframes).
+      const setupCandidates = sorted.filter(t => tfRank(t) >= 5 && tfRank(t) < 60)
+      const primary = setupCandidates.length ? setupCandidates[setupCandidates.length - 1] : '15m'
       const htfs = sorted.filter(t => tfRank(t) >= 60).slice(0, 2)
       const fullDescription = steps.filter(s => s.body.trim()).map(s => `${s.title}\n${s.body}`).join('\n\n---\n\n')
       return strategiesApi.create({
@@ -189,7 +195,7 @@ export default function AIStrategyBuilder() {
         primary_timeframe: primary,
         execution_timeframe: exec,
         higher_timeframes: htfs.length > 0 ? htfs : ['1H'],
-        risk_reward_ratio: 3,
+        risk_reward_ratio: 2.5,
         stop_loss_type: 'structure',
         max_contracts: 10,
         session_filters: [],

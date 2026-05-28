@@ -14,7 +14,7 @@ export default function Optimization() {
     optimization_metric: 'profit_factor',
   })
 
-  const { data: strategies = [] } = useQuery({ queryKey: ['strategies'], queryFn: () => strategiesApi.list().then(r => r.data) })
+  const { data: strategies = [], isLoading: stratsLoading, isError: stratsError } = useQuery({ queryKey: ['strategies'], queryFn: () => strategiesApi.list().then(r => r.data) })
   const { data: runs = [] } = useQuery({
     queryKey: ['opt-runs'],
     queryFn: () => optimizationApi.list().then(r => r.data),
@@ -45,6 +45,17 @@ export default function Optimization() {
     onSuccess: () => { alert('Strategy updated with optimized parameters!'); qc.invalidateQueries({ queryKey: ['strategies'] }); },
     onError: (e: any) => alert(e?.response?.data?.detail || 'Failed to apply'),
   })
+
+  const retryMutation = useMutation({
+    mutationFn: (id: string) => optimizationApi.retry(id),
+    onSuccess: (res: any) => { setRunId(res.data.id); setPolling(true); qc.invalidateQueries({ queryKey: ['opt-runs'] }) },
+    onError: (e: any) => alert(e?.response?.data?.detail || 'Retry failed'),
+  })
+
+  const selectedRun: any = runs.find((r: any) => r.id === runId) || null
+  const activeStrategies = strategies.filter((s: any) => (s.status || 'active') === 'active')
+  const draftStrategies = strategies.filter((s: any) => s.status === 'draft')
+  const selectedStrategyActive = activeStrategies.some((s: any) => s.id === form.strategy_id)
 
   const METRICS = [
     { value: 'profit_factor', label: 'Profit Factor' },
@@ -103,9 +114,16 @@ export default function Optimization() {
                     <div className="text-sm font-semibold text-slate-900 truncate dark:text-slate-100">{r.strategy_name || 'Strategy'}</div>
                     <div className="text-[11px] text-slate-500 mt-0.5 dark:text-slate-400">{r.instrument} · {r.total_combinations} combos</div>
                     <div className="text-xs text-slate-400 mt-0.5 dark:text-slate-500">{new Date(r.created_at).toLocaleString()} · {r.status}</div>
+                    {r.status === 'failed' && (r.failure_reason || r.error_message) && (
+                      <div className="text-[11px] text-red-500 mt-0.5 truncate max-w-xs" title={r.failure_reason || r.error_message}>⚠ {r.failure_reason || r.error_message}</div>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
+                  {r.status === 'failed' && (
+                    <button onClick={(e) => { e.stopPropagation(); retryMutation.mutate(r.id); }} disabled={retryMutation.isPending}
+                      className="text-xs font-semibold text-blue-600 hover:underline disabled:opacity-50">Retry</button>
+                  )}
                   <div className="text-right">
                     <div className="text-sm font-medium text-slate-700 dark:text-slate-200">{r.completed_combinations}/{r.total_combinations}</div>
                     <div className="text-xs text-slate-400 dark:text-slate-500">completed</div>
@@ -121,7 +139,32 @@ export default function Optimization() {
         </div>
       )}
 
-      {results.length > 0 ? (
+      {runs.length === 0 ? (
+        <div className="bg-slate-50 rounded-2xl border border-dashed border-slate-200 p-16 text-center dark:bg-slate-900 dark:border-slate-700">
+          <div className="w-14 h-14 bg-blue-50 dark:bg-blue-900/20 rounded-2xl flex items-center justify-center mx-auto mb-5">
+            <Sliders size={24} className="text-blue-500"/>
+          </div>
+          <p className="font-semibold text-slate-700 mb-1 dark:text-slate-200">No optimization runs yet</p>
+          <p className="text-sm text-slate-400 mb-5 dark:text-slate-500">Run an optimization to find the best parameter combinations for your strategy</p>
+          <button onClick={() => setShowForm(true)} className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors">
+            <Sliders size={14}/> Start Optimization
+          </button>
+        </div>
+      ) : selectedRun && selectedRun.status === 'failed' ? (
+        <div className="bg-red-50 dark:bg-red-900/20 rounded-2xl border border-red-200 dark:border-red-800 p-8 text-center">
+          <p className="font-semibold text-red-700 dark:text-red-300 mb-1">This optimization run failed</p>
+          <p className="text-sm text-red-600 dark:text-red-400 mb-1">{selectedRun.failure_reason || selectedRun.error_message || 'Unknown error'}</p>
+          <p className="text-xs text-slate-500 mb-4">{selectedRun.completed_combinations}/{selectedRun.total_combinations} combinations completed before failure. Partial results are not available.</p>
+          <button onClick={() => retryMutation.mutate(selectedRun.id)} disabled={retryMutation.isPending}
+            className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-sm font-semibold">
+            {retryMutation.isPending ? 'Retrying…' : 'Retry run'}</button>
+        </div>
+      ) : selectedRun && (selectedRun.status === 'running' || selectedRun.status === 'queued') ? (
+        <div className="bg-amber-50 dark:bg-amber-900/20 rounded-2xl border border-amber-200 dark:border-amber-800 p-8 text-center">
+          <p className="font-semibold text-amber-700 dark:text-amber-300 mb-1">Optimization {selectedRun.status}…</p>
+          <p className="text-sm text-amber-600 dark:text-amber-400">{selectedRun.completed_combinations}/{selectedRun.total_combinations} combinations · {Math.round(selectedRun.progress || 0)}%</p>
+        </div>
+      ) : results.length > 0 ? (
         <div>
           <div className="flex items-center gap-2 mb-4">
             <Trophy size={16} className="text-amber-500"/>
@@ -169,16 +212,8 @@ export default function Optimization() {
           </div>
         </div>
       ) : (
-        <div className="bg-slate-50 rounded-2xl border border-dashed border-slate-200 p-16 text-center dark:bg-slate-900 dark:border-slate-700">
-          <div className="w-14 h-14 bg-blue-50 dark:bg-blue-900/20 rounded-2xl flex items-center justify-center mx-auto mb-5">
-            <Sliders size={24} className="text-blue-500"/>
-          </div>
-          <p className="font-semibold text-slate-700 mb-1 dark:text-slate-200">No optimization runs yet</p>
-          <p className="text-sm text-slate-400 mb-5 dark:text-slate-500">Run an optimization to find the best parameter combinations for your strategy</p>
-          <button onClick={() => setShowForm(true)}
-            className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors">
-            <Sliders size={14}/> Start Optimization
-          </button>
+        <div className="bg-slate-50 rounded-2xl border border-dashed border-slate-200 p-12 text-center dark:bg-slate-900 dark:border-slate-700">
+          <p className="text-sm text-slate-500 dark:text-slate-400">Select a run above to view its results.</p>
         </div>
       )}
 
@@ -196,8 +231,13 @@ export default function Optimization() {
                 <select value={form.strategy_id} onChange={e => setForm({...form, strategy_id: e.target.value})}
                   className="w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700">
                   <option value="">Select a strategy...</option>
-                  {strategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {activeStrategies.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {draftStrategies.map((s: any) => <option key={s.id} value={s.id} disabled>{s.name} (draft — activate first)</option>)}
                 </select>
+                {stratsLoading && <p className="text-xs text-slate-400 mt-1">Loading strategies…</p>}
+                {stratsError && <p className="text-xs text-red-500 mt-1">Could not load strategies. Try again.</p>}
+                {!stratsLoading && !stratsError && strategies.length === 0 && <p className="text-xs text-slate-400 mt-1">No strategies yet — create one first.</p>}
+                {!stratsLoading && !stratsError && strategies.length > 0 && activeStrategies.length === 0 && <p className="text-xs text-amber-600 mt-1">Draft strategies must be activated before optimization.</p>}
               </div>
               <div>
                 <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-1.5 dark:text-slate-300">Optimize For</label>
@@ -228,9 +268,10 @@ export default function Optimization() {
             </div>
             <div className="flex gap-3 px-6 py-4 border-t border-slate-100 dark:border-slate-800">
               <button onClick={() => setShowForm(false)} className="flex-1 border border-slate-200 text-slate-600 py-2.5 rounded-xl text-sm font-medium dark:text-slate-300 dark:border-slate-700">Cancel</button>
-              <button onClick={() => runMutation.mutate()} disabled={!form.strategy_id || runMutation.isPending}
+              <button onClick={() => runMutation.mutate()} disabled={!selectedStrategyActive || runMutation.isPending}
+                title={!form.strategy_id ? 'Select a strategy first' : !selectedStrategyActive ? 'Activate this strategy before optimizing' : ''}
                 className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white py-2.5 rounded-xl text-sm font-semibold transition-colors">
-                Start Optimization
+                {runMutation.isPending ? 'Starting…' : 'Start Optimization'}
               </button>
             </div>
           </div>

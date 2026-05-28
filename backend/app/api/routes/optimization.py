@@ -619,6 +619,55 @@ async def apply_optimization_result(
     return {"message": f"Applied rank {rank} parameters to strategy", "parameters": params}
 
 
+@router.post("/{run_id}/retry", response_model=OptimizationRunResponse, status_code=status.HTTP_202_ACCEPTED)
+async def retry_optimization(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_tier(*live_tiers)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-queue a FAILED optimization run (e.g. one killed by a backend restart).
+    Clears partial results + error, resets counters, and relaunches the worker.
+    Only FAILED runs can be retried."""
+    result = await db.execute(
+        select(OptimizationRun, Strategy.name)
+        .join(Strategy, OptimizationRun.strategy_id == Strategy.id, isouter=True)
+        .where(OptimizationRun.id == run_id, OptimizationRun.user_id == current_user.id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Optimization run not found.")
+    run, strategy_name = row
+    cur_status = run.status.value if hasattr(run.status, "value") else str(run.status)
+    if cur_status != "failed":
+        raise HTTPException(status_code=409, detail=f"Only failed runs can be retried (this one is {cur_status}).")
+    if run.strategy_id is None:
+        raise HTTPException(status_code=409, detail="The strategy for this run was deleted; cannot retry.")
+
+    # Clear any partial results + reset the run to QUEUED.
+    await db.execute(delete(OptimizationResult).where(OptimizationResult.optimization_run_id == run.id))
+    run.status = OptimizationStatus.QUEUED
+    run.completed_combinations = 0
+    run.error_message = None
+    run.started_at = None
+    run.completed_at = None
+    await db.commit()
+
+    background_tasks.add_task(_run_optimization_wrapper, str(run.id))
+    logger.info(f"OPT retry: re-queued run {run_id}")
+
+    return OptimizationRunResponse(
+        id=str(run.id), strategy_id=str(run.strategy_id) if run.strategy_id else "",
+        strategy_name=strategy_name or "(deleted strategy)",
+        instrument=run.instrument,
+        status=run.status.value, total_combinations=run.total_combinations,
+        completed_combinations=run.completed_combinations, created_at=run.created_at.isoformat(),
+        error_message=None, failure_reason=None,
+        progress=_opt_progress(run),
+        started_at=None, completed_at=None,
+    )
+
+
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_optimization(
     run_id: str,
