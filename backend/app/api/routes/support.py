@@ -149,10 +149,21 @@ class _ChatRequest(BaseModel):
     messages: list[_ChatMessage]
 
 
+@router.get('/chat/status')
+async def chat_status(current_user: _U = Depends(_gcu)):
+    """Lets the widget decide whether to enable the input. configured=False
+    means the assistant has no provider key set, so the UI should show a clear
+    'being set up' state instead of letting users type questions that fail."""
+    configured = bool(_chat_os.environ.get('ANTHROPIC_API_KEY', ''))
+    return {"configured": configured}
+
+
 @router.post('/chat')
 async def chat(data: _ChatRequest, request: Request, current_user: _U = Depends(_gcu)):
     api_key = _chat_os.environ.get('ANTHROPIC_API_KEY', '')
+    logger.info(f"[support.chat] request user={getattr(current_user, 'email', '?')} turns={len(data.messages)} configured={bool(api_key)}")
     if not api_key:
+        logger.warning("[support.chat] NOT CONFIGURED — ANTHROPIC_API_KEY missing; returning setup message (set the key + restart to enable chat)")
         raise HTTPException(status_code=503, detail='Chat assistant is being configured. Please email support@thetaalgos.com directly.')
     msgs = [m for m in data.messages if m.content.strip()]
     if not msgs:
@@ -166,6 +177,7 @@ async def chat(data: _ChatRequest, request: Request, current_user: _U = Depends(
     async def event_stream():
         try:
             from anthropic import AsyncAnthropic
+            logger.info(f"[support.chat] streaming via {model} for user={getattr(current_user, 'email', '?')}")
             client = AsyncAnthropic(api_key=api_key)
             async with client.messages.stream(model=model, max_tokens=1024, system=system, messages=api_msgs) as stream:
                 async for text in stream.text_stream:
