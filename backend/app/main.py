@@ -250,6 +250,9 @@ app.include_router(legal.router, prefix="/api/v1/legal", tags=["legal"])
 app.include_router(options_routes.router, prefix="/api/v1/options", tags=["options"])
 app.include_router(support_routes.router, prefix="/api/v1/support", tags=["support"])
 app.include_router(account_signals.router, prefix="/api/v1/account-signals", tags=["account-signals"])
+# Alias: the UI brands this feature "Email Signals". Mount the SAME router
+# under /api/v1/email-signals so either path resolves (no hidden 404s).
+app.include_router(account_signals.router, prefix="/api/v1/email-signals", tags=["account-signals"])
 app.include_router(scanner.router, prefix="/api/v1/scanner", tags=["scanner"])
 
 

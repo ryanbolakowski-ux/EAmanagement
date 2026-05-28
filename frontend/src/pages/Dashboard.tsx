@@ -260,7 +260,7 @@ export default function Dashboard() {
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
           <QuickActionCard to="/app/plain-english" icon={Sparkles}     label="AI Builder"    desc="Describe a strategy in plain English; we build it" accent="amber"/>
-          <QuickActionCard to="/app/account-signals" icon={Activity}   label="Account Signals" desc="Email/push alerts for prop-firm accounts" accent="blue"/>
+          <QuickActionCard to="/app/email-signals" icon={Activity}   label="Email Signals" desc="Email/push alerts for prop-firm accounts" accent="blue"/>
           <QuickActionCard to="/app/options"     icon={Target}         label="Options"       desc="Options scanner, chain explorer, premarket picks" accent="violet"/>
           <QuickActionCard to="/app/how-to-trade" icon={BookOpen}      label="How To Trade"  desc="Playbook for every strategy in your library" accent="emerald"/>
         </div>

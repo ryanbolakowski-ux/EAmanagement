@@ -133,19 +133,37 @@ async def get_open_positions(
     db: AsyncSession = Depends(get_db),
 ):
     from app.engines.paper_trading.runner import get_open_positions as _get_open
-    from sqlalchemy import text
-    
+    from sqlalchemy import text, bindparam
+    import uuid as _uuid
+
     positions = _get_open()
-    
-    # Filter to only this user's sessions
     if not positions:
         return []
-    
-    session_ids = [p["session_id"] for p in positions]
-    placeholders = ",".join([f"'{s}'" for s in session_ids])
-    result = await db.execute(
-        text(f"SELECT id FROM trade_sessions WHERE user_id = '{current_user.id}' AND id IN ({placeholders})")
-    )
+
+    # The paper runner keys traders as "<session_uuid>:<instrument>", so each
+    # p["session_id"] is a COMPOSITE string, not a bare UUID. Feeding it raw into
+    # a uuid column crashed asyncpg (invalid input syntax for type uuid:
+    # "<uuid>:ES"). Extract the real session UUID, drop anything malformed, and
+    # use a parameterized, expanding IN clause (the old f-string was also a SQL
+    # injection foot-gun).
+    def _clean_sid(raw):
+        return str(raw).split(":", 1)[0]
+
+    clean_ids = []
+    for pos in positions:
+        cid = _clean_sid(pos.get("session_id"))
+        try:
+            _uuid.UUID(cid)
+        except (ValueError, TypeError, AttributeError):
+            continue
+        clean_ids.append(cid)
+    if not clean_ids:
+        return []
+
+    stmt = text(
+        "SELECT id FROM trade_sessions WHERE user_id = :uid AND id IN :ids"
+    ).bindparams(bindparam("ids", expanding=True))
+    result = await db.execute(stmt, {"uid": str(current_user.id), "ids": clean_ids})
     user_sessions = {str(r[0]) for r in result.fetchall()}
-    
-    return [p for p in positions if p["session_id"] in user_sessions]
+
+    return [p for p in positions if _clean_sid(p.get("session_id")) in user_sessions]

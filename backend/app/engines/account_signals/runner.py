@@ -68,14 +68,28 @@ def _fetch_bars_sync(instrument: str, timeframe: str, count: int = 50):
         url = os.environ.get("DATABASE_URL", "")
         # asyncpg url → psycopg2 url
         psy_url = url.replace("postgresql+asyncpg://", "postgresql://")
-        with psycopg2.connect(psy_url) as cn, cn.cursor() as cur:
-            cur.execute(
-                "SELECT timestamp, open, high, low, close, volume "
-                "FROM candle_cache WHERE symbol = %s "
-                "ORDER BY timestamp DESC LIMIT %s",
-                (sym, need),
-            )
-            rows = cur.fetchall()
+        # CONNECTION-LEAK FIX: psycopg2 with-connect only manages the
+        # TRANSACTION on __exit__ — it does NOT close the connection. Called from
+        # every watcher poll (6 watchers x instruments x timeframes / 60s) this
+        # leaked ~70 sockets and exhausted Postgres max_connections (100), which
+        # in turn starved the optimization worker. Close explicitly in finally.
+        cn = None
+        try:
+            cn = psycopg2.connect(psy_url, connect_timeout=5)
+            with cn.cursor() as cur:
+                cur.execute(
+                    "SELECT timestamp, open, high, low, close, volume "
+                    "FROM candle_cache WHERE symbol = %s "
+                    "ORDER BY timestamp DESC LIMIT %s",
+                    (sym, need),
+                )
+                rows = cur.fetchall()
+        finally:
+            if cn is not None:
+                try:
+                    cn.close()
+                except Exception:
+                    pass
         if rows:
             rows.reverse()
             df = _pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])

@@ -24,6 +24,10 @@ require_paid_user = require_tier(
 class StrategyCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    # User-created strategies default to ACTIVE so they immediately show up in
+    # dropdowns / optimization / paper / signals. A client may still submit
+    # "draft" / "paused" / "archived" explicitly and it is respected.
+    status: str = "active"
     instruments: list[str] = ["ES"]
     primary_timeframe: str = "15m"
     execution_timeframe: str = "1m"
@@ -87,9 +91,20 @@ async def create_strategy(
     current_user: User = Depends(require_paid_user),
     db: AsyncSession = Depends(get_db),
 ):
+    payload = data.model_dump()
+    _status_raw = (payload.pop("status", None) or "active")
+    try:
+        _status_enum = StrategyStatus(_status_raw)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status {_status_raw!r}. Must be one of: "
+                   + ", ".join(s.value for s in StrategyStatus),
+        )
     strategy = Strategy(
         user_id=current_user.id,
-        **data.model_dump(),
+        status=_status_enum,
+        **payload,
     )
     db.add(strategy)
     await db.flush()
@@ -141,8 +156,19 @@ async def update_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found.")
 
-    for key, value in data.model_dump().items():
+    payload = data.model_dump()
+    _status_raw = payload.pop("status", None)
+    for key, value in payload.items():
         setattr(strategy, key, value)
+    if _status_raw is not None:
+        try:
+            strategy.status = StrategyStatus(_status_raw)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid status {_status_raw!r}. Must be one of: "
+                       + ", ".join(s.value for s in StrategyStatus),
+            )
     await db.flush()
     return StrategyResponse(
         id=str(strategy.id), name=strategy.name, description=strategy.description,

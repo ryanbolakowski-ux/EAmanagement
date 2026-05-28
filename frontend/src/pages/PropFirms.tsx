@@ -192,7 +192,7 @@ export default function PropFirms() {
         <div className="flex items-start gap-3">
           <AlertTriangle size={18} className="text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5"/>
           <div className="text-blue-900 dark:text-blue-200">
-            <strong>If your firm is on the banned list:</strong> use <Link to="/app/account-signals" className="font-bold underline">Account Signals</Link> instead. The bot watches the same strategies and emails/texts you a setup the moment it forms — you place the order yourself in the broker's interface. Stays compliant with every prop firm's "manual trading only" rule because <em>you</em> are the one trading.
+            <strong>If your firm is on the banned list:</strong> use <Link to="/app/email-signals" className="font-bold underline">Email Signals</Link> instead. The bot watches the same strategies and emails/texts you a setup the moment it forms — you place the order yourself in the broker's interface. Stays compliant with every prop firm's "manual trading only" rule because <em>you</em> are the one trading.
           </div>
         </div>
       </div>

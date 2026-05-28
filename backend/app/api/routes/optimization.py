@@ -10,6 +10,7 @@ from app.models.user import User, SubscriptionTier
 from app.models.strategy import Strategy
 from app.models.optimization import OptimizationRun, OptimizationStatus, OptimizationResult
 from app.core.auth import get_current_user, require_tier
+from loguru import logger
 
 router = APIRouter()
 
@@ -34,6 +35,11 @@ class OptimizationRunResponse(BaseModel):
     total_combinations: int
     completed_combinations: int
     created_at: str
+    # failure_reason surfaces the persisted error_message so the UI can show
+    # *why* a run failed instead of a silent red dot. Alias kept as both names
+    # for frontend convenience.
+    error_message: Optional[str] = None
+    failure_reason: Optional[str] = None
 
 
 class OptimizationResultResponse(BaseModel):
@@ -123,6 +129,7 @@ async def list_optimizations(
             instrument=r.instrument,
             status=r.status.value, total_combinations=r.total_combinations,
             completed_combinations=r.completed_combinations, created_at=r.created_at.isoformat(),
+            error_message=r.error_message, failure_reason=r.error_message,
         )
         for r, strategy_name in result.all()
     ]
@@ -145,12 +152,52 @@ async def start_optimization(
     # Validate date range - max 3 years
     from datetime import timedelta
     max_range = timedelta(days=365 * 3)
+    if data.end_date <= data.start_date:
+        raise HTTPException(status_code=400, detail="end_date must be after start_date.")
     if data.end_date - data.start_date > max_range:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 3 years.")
 
+    # ── Validate the parameter grid BEFORE queueing so the user gets a clear
+    #    error synchronously instead of a silent worker failure. ──
+    grid = data.parameter_grid or {}
+    if not isinstance(grid, dict) or not grid:
+        raise HTTPException(status_code=400, detail="parameter_grid must be a non-empty object.")
+    # Known optimizable parameters understood by the backtest engine
+    # (see _run_one_combo in _run_optimization_task).
+    KNOWN_PARAMS = {
+        "risk_reward_ratio", "stop_loss_ticks", "fvg_min_size_ticks",
+        "primary_timeframe", "execution_timeframe", "stop_loss_type",
+    }
+    unknown = [k for k in grid.keys() if k not in KNOWN_PARAMS]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unknown optimization parameter(s): {sorted(unknown)}. "
+                    f"Supported: {sorted(KNOWN_PARAMS)}."),
+        )
+    for k, v in grid.items():
+        if not isinstance(v, (list, tuple)) or len(v) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"parameter_grid[{k}] must be a non-empty list of values to test.",
+            )
+    # Custom strategies must carry the base fields the engine reads. A brand-new
+    # draft with an empty rule_tree is fine (ICT defaults apply), but the core
+    # numeric fields must be present/sane or every combo silently zeroes out.
+    if strategy.risk_reward_ratio is None or float(strategy.risk_reward_ratio) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Strategy is missing a valid risk_reward_ratio. Open it in the builder and save before optimizing.",
+        )
+
     from itertools import product
-    combos = list(product(*data.parameter_grid.values()))
+    combos = list(product(*grid.values()))
     total  = len(combos)
+    if total == 0 or total > 2000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"parameter_grid expands to {total} combinations (must be 1-2000).",
+        )
 
     run = OptimizationRun(
         strategy_id=strategy.id,
@@ -175,6 +222,33 @@ async def start_optimization(
         instrument=run.instrument,
         status=run.status.value, total_combinations=run.total_combinations,
         completed_combinations=run.completed_combinations, created_at=run.created_at.isoformat(),
+    )
+
+
+@router.get("/{run_id}", response_model=OptimizationRunResponse)
+async def get_optimization_run(
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Single optimization run incl. status + failure_reason. Previously absent,
+    so a bare GET /optimization/{id} matched the DELETE path and returned 405."""
+    result = await db.execute(
+        select(OptimizationRun, Strategy.name)
+        .join(Strategy, OptimizationRun.strategy_id == Strategy.id, isouter=True)
+        .where(OptimizationRun.id == run_id, OptimizationRun.user_id == current_user.id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Optimization run not found.")
+    run, strategy_name = row
+    return OptimizationRunResponse(
+        id=str(run.id), strategy_id=str(run.strategy_id) if run.strategy_id else "",
+        strategy_name=strategy_name or "(deleted strategy)",
+        instrument=run.instrument,
+        status=run.status.value, total_combinations=run.total_combinations,
+        completed_combinations=run.completed_combinations, created_at=run.created_at.isoformat(),
+        error_message=run.error_message, failure_reason=run.error_message,
     )
 
 
@@ -375,10 +449,11 @@ async def _run_optimization_task(run_id: str):
                     }
                 except Exception as e:
                     import traceback; traceback.print_exc()
-                    print(f"OPTIMIZER: Combo {idx+1}/{len(combos)} FAILED: {e}")
+                    logger.error(f"OPTIMIZER: combo {idx+1}/{len(combos)} failed: {type(e).__name__}: {e}")
                     return idx, {
                         "params": params, "net_profit": 0, "profit_factor": 0, "win_rate": 0,
                         "max_drawdown": 0, "total_trades": 0, "sharpe_ratio": 0,
+                        "_error": f"{type(e).__name__}: {e}",
                     }
 
             for batch_start in range(0, len(combos), BATCH_SIZE):
@@ -392,6 +467,20 @@ async def _run_optimization_task(run_id: str):
                     print(f"OPTIMIZER: Combo {idx+1}/{len(combos)} done: {res['total_trades']} trades, ${res['net_profit']:.0f} profit")
                 run.completed_combinations = batch_start + len(batch)
                 await db.commit()
+
+            # If EVERY combo errored, the run is a real failure — surface it
+            # instead of "completing" with a grid of zeroes.
+            errored = [r for r in all_results if r and r.get("_error")]
+            if all_results and len(errored) == len(all_results):
+                run.status = OptimizationStatus.FAILED
+                run.error_message = (
+                    f"All {len(all_results)} parameter combinations failed. "
+                    f"First error: {errored[0][_error]}"
+                )[:480]
+                run.completed_at = datetime.now(timezone.utc)
+                await db.commit()
+                logger.error(f"OPT run {run_id}: all combos failed — {run.error_message}")
+                return
 
             # Sort by optimization metric
             metric_key = run.optimization_metric or "profit_factor"
