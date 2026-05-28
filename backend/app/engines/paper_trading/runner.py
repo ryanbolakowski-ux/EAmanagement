@@ -20,6 +20,33 @@ from app.engines.strategy_engine.base_strategy import StrategyConfig
 
 YAHOO_SYMBOLS = {"ES": "ES=F", "NQ": "NQ=F", "RTY": "RTY=F", "YM": "YM=F"}
 
+# ── Shared bar cache ────────────────────────────────────────────────────
+# N paper sessions each pull the same (instrument, timeframe, count) from
+# Yahoo every cycle (each call fetches multi-day 1m data + parses it in a
+# thread). Memoize for 30s so concurrent identical fetches share ONE pull.
+# Bars are read-only downstream (fed to trader.on_bar), so a shallow copy of
+# the cached list is safe.
+import threading as _threading_pr
+import time as _time_pr
+_PR_BAR_CACHE: dict = {}
+_PR_BAR_LOCK = _threading_pr.Lock()
+_PR_BAR_TTL = 30.0
+
+
+def _fetch_bars_sync(instrument, timeframe="1m", count=3):
+    key = (str(instrument).upper(), timeframe, count)
+    now = _time_pr.time()
+    hit = _PR_BAR_CACHE.get(key)
+    if hit and (now - hit[0]) < _PR_BAR_TTL:
+        return list(hit[1])
+    with _PR_BAR_LOCK:
+        hit = _PR_BAR_CACHE.get(key)
+        if hit and (_time_pr.time() - hit[0]) < _PR_BAR_TTL:
+            return list(hit[1])
+        bars = _fetch_bars_uncached(instrument, timeframe, count)
+        _PR_BAR_CACHE[key] = (_time_pr.time(), bars or [])
+        return list(bars or [])
+
 # A session may run on multiple instruments concurrently; each (session, instrument)
 # gets its own asyncio task and PaperTrader. They're tracked together under the
 # session_id so stop_paper_session can cancel them all.
@@ -60,7 +87,7 @@ async def stop_paper_session(session_id: str):
     logger.info(f"[PaperRunner] Stopped session {session_id} ({len(tasks)} task(s))")
 
 
-def _fetch_bars_sync(instrument, timeframe="1m", count=3):
+def _fetch_bars_uncached(instrument, timeframe="1m", count=3):
     """Fetch latest bars from Yahoo Finance (minimal call)."""
     symbol = YAHOO_SYMBOLS.get(instrument.upper(), instrument + "=F")
     # Multi-day period avoids gaps around the daily Globex break (5–6pm ET)
