@@ -52,7 +52,7 @@ async def stop_watcher(watcher_id: str):
             pass
 
 
-def _fetch_bars_sync(instrument: str, timeframe: str, count: int = 50):
+def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     """Bug #27 fix: read from candle_cache (populated nightly by our own
     Polygon/Databento fetchers) instead of relying on yfinance bulk pulls
     that rate-limit to ~5% of the universe per cycle. Fall back to yfinance
@@ -169,6 +169,33 @@ def _yfinance_cached(fb_sym: str, period: str, timeframe: str, count: int):
             _YF_CACHE[key] = (_time_yf.time() - _YF_TTL/2, [])
             logger.error(f"[Signals] yfinance fallback failed for {fb_sym}: {e}")
             return []
+
+
+# ── Shared bar cache ────────────────────────────────────────────────────
+# Dedupe identical (instrument, timeframe, count) fetches across ALL watchers
+# within a short TTL. Without this, N watchers each re-read candle_cache +
+# re-resample the same ES/NQ bars every poll cycle, bursting CPU. The bars are
+# read-only downstream (the watcher appends them to its own buffer and builds a
+# DataFrame; it never mutates the bar dicts), so handing out a shallow copy of
+# the cached list is safe. Effect: ~N fetches/min -> ~2/min per (inst, tf).
+_BAR_CACHE: dict = {}
+_BAR_CACHE_LOCK = _threading_yf.Lock()
+_BAR_CACHE_TTL = 30.0  # seconds; well under the 60s watcher poll cadence
+
+
+def _fetch_bars_sync(instrument: str, timeframe: str, count: int = 50):
+    key = (instrument.upper(), timeframe, count)
+    now = _time_yf.time()
+    hit = _BAR_CACHE.get(key)
+    if hit and (now - hit[0]) < _BAR_CACHE_TTL:
+        return list(hit[1])  # shallow copy — read-only dicts shared, list owned by caller
+    with _BAR_CACHE_LOCK:
+        hit = _BAR_CACHE.get(key)
+        if hit and (_time_yf.time() - hit[0]) < _BAR_CACHE_TTL:
+            return list(hit[1])
+        bars = _fetch_bars_uncached(instrument, timeframe, count)
+        _BAR_CACHE[key] = (_time_yf.time(), bars or [])
+        return list(bars or [])
 
 
 async def _run_watcher(watcher_id, strategy_id, user_id, instruments, account_label, channels, session_filter="all"):
