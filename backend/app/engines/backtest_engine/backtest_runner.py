@@ -77,6 +77,13 @@ class BacktestConfig:
     # Fraction of *current* account equity risked on each trade. Without this,
     # contract count is fixed and every account size produces identical P&L.
     risk_per_trade_pct: float = 1.0
+    # Position sizing base. When False (default) every trade is sized off the
+    # INITIAL capital, so contract count scales linearly with account size and
+    # all ratio metrics (win rate, drawdown %, avg R, PF, monthly shape) are
+    # identical across account sizes — only dollar P&L scales. When True, sizing
+    # compounds off current equity (opt-in; intentionally makes results
+    # account-size-path-dependent).
+    compounding: bool = False
     # Hard cap on contracts regardless of equity — protects against
     # huge size on tight stops.
     max_contracts_cap: int = 100
@@ -202,7 +209,14 @@ class BacktestRunner:
                         entry_time=timestamp.to_pydatetime(),
                         conditions_snapshot=signal.metadata,
                     )
-                    logger.debug(f"  ENTRY {signal.signal.value.upper()} @ {entry:.2f} | SL={signal.stop_loss:.2f} | TP={signal.take_profit:.2f} | size={contracts} | equity=${self._equity:,.0f}")
+                    _risk_dollars = abs(entry - signal.stop_loss) / traded_tick_size * traded_tick_value * contracts
+                    _risk_pct = (_risk_dollars / self._equity * 100.0) if self._equity > 0 else 0.0
+                    logger.debug(
+                        f"  ENTRY {signal.signal.value.upper()} {traded_inst} @ {entry:.2f} | "
+                        f"SL={signal.stop_loss:.2f} TP={signal.take_profit:.2f} | "
+                        f"size={contracts} | risk=${_risk_dollars:,.0f} ({_risk_pct:.2f}%) | "
+                        f"balance=${self._equity:,.0f}"
+                    )
 
         # Close any trade still open at end of data
         if self._open_trade:
@@ -247,16 +261,25 @@ class BacktestRunner:
         must skip the trade."""
         stop_dist_ticks = abs(entry - stop) / tick_size
         if stop_dist_ticks <= 0:
-            return 0
+            return 0  # invalid geometry — skip regardless of account size
         # Per-contract worst-case loss = stop distance + round-trip commission
         loss_per_contract = stop_dist_ticks * tick_value + (self.config.commission_per_side * 2)
         if loss_per_contract <= 0:
             return 0
-        risk_dollars = self._equity * (self.config.risk_per_trade_pct / 100.0)
+        # Size off a FIXED base (initial capital) by default so contract count
+        # scales linearly with account size and the trade set / R-multiples are
+        # identical across sizes. Compounding (off current equity) is opt-in.
+        sizing_base = self._equity if self.config.compounding else self.config.initial_capital
+        risk_dollars = sizing_base * (self.config.risk_per_trade_pct / 100.0)
         if risk_dollars <= 0:
             return 0
-        raw = int(risk_dollars // loss_per_contract)
-        contracts = max(0, min(raw, strategy_cap, self.config.max_contracts_cap))
+        # round (not floor) avoids the systematic under-risk bias that pinned
+        # small accounts at 1 contract; floor of 1 means every valid signal is
+        # taken (eligibility never depends on account size).
+        raw = round(risk_dollars / loss_per_contract)
+        contracts = max(1, raw)
+        contracts = min(contracts, strategy_cap, self.config.max_contracts_cap)
+        contracts = max(1, contracts)  # caps never zero out a valid trade
 
         # Apex-style trailing-drawdown half-size rule. Once we've consumed
         # `half_size_drawdown_pct` of the trailing-drawdown buffer (drawdown
@@ -379,7 +402,13 @@ class BacktestRunner:
         if self._equity > self._equity_peak:
             self._equity_peak = self._equity  # track high-water for trailing DD
         self._open_trade = None
-        logger.debug(f"  EXIT {reason.value} @ {exit_price:.2f} | Net P&L=${t.net_pnl:,.2f} | equity=${self._equity:,.0f}")
+        _dd = self._equity_peak - self._equity
+        _dd_pct = (_dd / self._equity_peak * 100.0) if self._equity_peak > 0 else 0.0
+        logger.debug(
+            f"  EXIT {reason.value} @ {exit_price:.2f} | size={t.contracts} | "
+            f"Net P&L=${t.net_pnl:,.2f} | balance=${self._equity:,.0f} | "
+            f"peak=${self._equity_peak:,.0f} | drawdown=${_dd:,.0f} ({_dd_pct:.2f}%)"
+        )
 
     def _force_close_trade(self, exit_price: float, exit_time: datetime, tick_size: float, tick_value: float):
         self._close_trade(exit_price, exit_time, tick_size, tick_value, ExitReason.SESSION_END)
