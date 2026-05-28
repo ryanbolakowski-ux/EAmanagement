@@ -260,3 +260,47 @@ app.include_router(scanner.router, prefix="/api/v1/scanner", tags=["scanner"])
 async def health_check():
     return {"status": "ok", "service": "edge-asset-management"}
 
+
+@app.get("/health/full", tags=["Health"])
+async def health_full():
+    """Dependency health for monitoring/alerting: database, queue (redis),
+    email provider, auth token round-trip, and worker liveness (no runs stuck
+    RUNNING > 30 min). 200 when all critical deps are up, else 503."""
+    from fastapi.responses import JSONResponse
+    components: dict = {}
+
+    # Reuse the scanner health checks (db / redis / resend / polygon).
+    try:
+        from app.engines.scanner_health import check_health as _ch
+        base = await _ch()
+        components.update(base.get("components", {}))
+    except Exception as e:
+        components["scanner_health"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    # Auth: mint + decode a token round-trip (no user creds involved).
+    try:
+        from app.core.security import create_access_token, decode_token
+        _t = create_access_token({"sub": "healthcheck"})
+        components["auth"] = {"ok": decode_token(_t).get("sub") == "healthcheck"}
+    except Exception as e:
+        components["auth"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    # Worker: nothing stuck RUNNING for more than 30 minutes.
+    try:
+        from app.database import async_session_factory as _asf
+        from sqlalchemy import text as _t2
+        async with _asf() as _db:
+            stuck = (await _db.execute(_t2(
+                "SELECT count(*) FROM optimization_runs "
+                "WHERE status='RUNNING' AND started_at < NOW() - INTERVAL '30 minutes'"
+            ))).scalar()
+        components["worker"] = {"ok": (stuck or 0) == 0, "stuck_runs": int(stuck or 0)}
+    except Exception as e:
+        components["worker"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    # Critical deps that gate overall health (email/polygon flakiness is not fatal).
+    critical = ["database", "redis", "auth", "worker"]
+    ok = all(components.get(k, {}).get("ok", False) for k in critical if k in components)
+    body = {"status": "ok" if ok else "degraded", "components": components}
+    return JSONResponse(body, status_code=200 if ok else 503)
+
