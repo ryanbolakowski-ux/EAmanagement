@@ -151,6 +151,21 @@ async def fetch_polygon_data(
             end_ts = pd.Timestamp(end_date, tz="UTC")
             df = df[(df.index >= start_ts) & (df.index <= end_ts)]
 
+            # If we fell back to the ETF proxy (e.g. QQQ for NQ), scale its
+            # price LEVEL to the future via the live ratio. Without this the
+            # caller gets raw ETF prices (~41x too small for NQ).
+            etf_proxy = ETF_PROXY_TICKERS.get(instrument.upper())
+            if etf_proxy and ticker == etf_proxy:
+                from app.engines.data_feeds.proxy_scale import get_proxy_scale
+                scale = get_proxy_scale(instrument)
+                if scale and scale != 1.0:
+                    for _c in ("open", "high", "low", "close"):
+                        df[_c] = df[_c] * scale
+                    logger.info(f"[price-source] {instrument}: polygon ETF-proxy {ticker} scaled x{scale}")
+                else:
+                    logger.info(f"[price-source] {instrument}: polygon ETF-proxy {ticker} (scale={scale})")
+            else:
+                logger.info(f"[price-source] {instrument}: polygon ticker {ticker} (real, no scaling)")
             logger.info(f"Polygon.io: {len(df)} bars for {instrument} ({ticker}) @ {multiplier}{timespan}")
             return df
 
