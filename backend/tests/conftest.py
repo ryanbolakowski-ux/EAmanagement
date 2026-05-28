@@ -17,34 +17,31 @@ TEST_USERNAME = "pytest_fixture_user"
 
 
 def _provision_user_and_token():
-    from sqlalchemy import select
-    from app.database import async_session_factory
-    from app.models.user import User, SubscriptionTier
+    """Provision the test user with SYNC psycopg2 so we never bind the shared
+    async engine to a throwaway loop (that previously poisoned later tests)."""
+    import os
+    import uuid as _uuid
+    import psycopg2
     from app.core.security import create_access_token
 
-    async def go():
-        async with async_session_factory() as db:
-            res = await db.execute(select(User).where(User.email == TEST_EMAIL))
-            u = res.scalar_one_or_none()
-            if u is None:
-                u = User(
-                    email=TEST_EMAIL,
-                    username=TEST_USERNAME,
-                    hashed_password="!login-disabled-test-fixture!",
-                    is_active=True,
-                    subscription_tier=SubscriptionTier.TIER_5.value,
+    url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    cn = psycopg2.connect(url, connect_timeout=5)
+    try:
+        with cn, cn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (TEST_EMAIL,))
+            row = cur.fetchone()
+            if row is None:
+                uid = str(_uuid.uuid4())
+                cur.execute(
+                    "INSERT INTO users (id, email, username, hashed_password, is_active, subscription_tier) "
+                    "VALUES (%s, %s, %s, %s, TRUE, %s)",
+                    (uid, TEST_EMAIL, TEST_USERNAME, "!login-disabled-test-fixture!", "tier_5"),
                 )
-                db.add(u)
-                await db.commit()
-                await db.refresh(u)
             else:
-                # Make sure the tier is high enough even if a prior run left it lower
-                if u.subscription_tier != SubscriptionTier.TIER_5.value:
-                    u.subscription_tier = SubscriptionTier.TIER_5.value
-                    await db.commit()
-            return str(u.id)
-
-    uid = asyncio.run(go())
+                uid = str(row[0])
+                cur.execute("UPDATE users SET subscription_tier='tier_5' WHERE id=%s", (uid,))
+    finally:
+        cn.close()
     token = create_access_token({"sub": uid})
     return uid, token
 
@@ -71,7 +68,7 @@ class _RetryingClient(httpx.Client):
 @pytest.fixture(scope="session")
 def client(auth):
     headers = {"Authorization": f"Bearer {auth['token']}"}
-    with _RetryingClient(base_url=BASE, headers=headers, timeout=120.0) as c:
+    with _RetryingClient(base_url=BASE, headers=headers, timeout=45.0) as c:
         yield c
 
 
