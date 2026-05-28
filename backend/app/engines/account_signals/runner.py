@@ -243,12 +243,24 @@ async def _run_watcher(watcher_id, strategy_id, user_id, instruments, account_la
         while True:
             # Confirm watcher is still active
             async with async_session_factory() as db:
-                r = await db.execute(text("SELECT is_active FROM account_signal_watchers WHERE id = :id"),
-                                     {"id": watcher_id})
+                r = await db.execute(text("""
+                    SELECT w.is_active, s.status
+                      FROM account_signal_watchers w
+                      LEFT JOIN strategies s ON s.id = w.strategy_id
+                     WHERE w.id = :id
+                """), {"id": watcher_id})
                 row = r.fetchone()
                 if not row or not row[0]:
                     logger.info(f"[Signals] watcher {watcher_id} deactivated")
                     return
+                # Bug 2: never emit for a DRAFT strategy even if a watcher exists
+                # (handles legacy rows created before the create-time guard).
+                _sstat = row[1]
+                _sstat = _sstat.value if hasattr(_sstat, "value") else str(_sstat or "")
+                if _sstat.lower() == "draft":
+                    logger.info(f"[Signals] watcher {watcher_id} paused — strategy is draft; skipping cycle")
+                    await asyncio.sleep(60)
+                    continue
 
             for inst in instruments:
                 # Fetch fresh bars per timeframe
@@ -294,66 +306,127 @@ async def _run_watcher(watcher_id, strategy_id, user_id, instruments, account_la
 
 async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels,
                        strategy_name, instrument, signal, email, username):
-    """De-dupe signals by (watcher, instrument, direction, entry rounded) within
-    the last 10 minutes — prevents email spam if the strategy keeps re-firing."""
+    """Validate geometry, dedupe by a content idempotency key within a cooldown
+    window, persist with delivery-tracking columns, then send. Replaces the old
+    entry-rounded/10-min heuristic, which let genuine duplicates through and
+    blocked nothing reliably."""
+    import os as _os
+    from app.engines.account_signals.signal_guard import validate_geometry, make_idempotency_key
+
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-    entry_detected_at = now  # captured the instant the strategy confirmed the entry
+    detected_at = now
     direction = signal.signal.value
     entry = round(signal.entry_price, 2)
+    stop = round(float(signal.stop_loss), 2)
+    tp = round(float(signal.take_profit), 2)
+    bar_ts = getattr(signal, "timestamp", None) or now
+    bias = (signal.metadata or {}).get("bias")
+
+    # ── Bug 6: geometry validation BEFORE persisting or sending ──
+    geo = validate_geometry(direction, entry, stop, tp, instrument)
+    if not geo["valid"]:
+        logger.warning(
+            f"[Signals] REJECTED invalid geometry watcher={watcher_id} {instrument} "
+            f"{direction} entry={entry} stop={stop} tp={tp}: {geo[error]}"
+        )
+        return
+    for _w in geo["warnings"]:
+        logger.warning(f"[Signals] geometry warning watcher={watcher_id} {instrument} {direction}: {_w}")
+
+    # ── Bug 4: content idempotency key + cooldown-window suppression ──
+    idem = make_idempotency_key(watcher_id, strategy_id, instrument, direction, bar_ts, entry, stop, tp)
+    cooldown_min = int(_os.environ.get("SIGNAL_DUP_COOLDOWN_MIN", "15"))
 
     async with async_session_factory() as db:
-        # De-dupe check
-        r = await db.execute(text("""
-            SELECT 1 FROM account_signals
-             WHERE watcher_id = :wid AND instrument = :inst AND direction = :dir
-               AND ABS(entry_price - :entry) < 0.5
-               AND fired_at > NOW() - INTERVAL '10 minutes'
-             LIMIT 1
-        """), {"wid": watcher_id, "inst": instrument, "dir": direction, "entry": entry})
-        if r.fetchone():
+        dup = (await db.execute(text("""
+            SELECT id FROM account_signals
+             WHERE idempotency_key = :k
+               AND fired_at > NOW() - make_interval(mins => :cool)
+             ORDER BY fired_at DESC LIMIT 1
+        """), {"k": idem, "cool": cooldown_min})).fetchone()
+        if dup:
+            await db.execute(text("""
+                UPDATE account_signals
+                   SET duplicate_suppressed_at = :now,
+                       duplicate_suppressed_count = duplicate_suppressed_count + 1
+                 WHERE id = :id
+            """), {"now": now, "id": dup[0]})
+            await db.commit()
+            logger.info(
+                f"[Signals] DUPLICATE suppressed idem={idem[:12]} watcher={watcher_id} "
+                f"{instrument} {direction} @ {entry} (cooldown {cooldown_min}m)"
+            )
             return
 
         await db.execute(text("""
             INSERT INTO account_signals
                 (id, watcher_id, user_id, strategy_id, instrument, direction,
-                 entry_price, stop_loss, take_profit, bias, fired_at, status)
+                 entry_price, stop_loss, take_profit, bias, fired_at, status,
+                 idempotency_key, detected_at, duplicate_suppressed_count)
             VALUES (:id, :wid, :uid, :sid, :inst, :dir,
-                    :entry, :sl, :tp, :bias, :now, 'sent')
+                    :entry, :sl, :tp, :bias, :now, :status,
+                    :idem, :detected, 0)
         """), {
             "id": sid, "wid": watcher_id, "uid": user_id, "sid": strategy_id,
             "inst": instrument, "dir": direction,
-            "entry": entry,
-            "sl": float(signal.stop_loss), "tp": float(signal.take_profit),
-            "bias": (signal.metadata or {}).get("bias"),
-            "now": now,
+            "entry": entry, "sl": stop, "tp": tp, "bias": bias,
+            "now": now, "status": "pending", "idem": idem, "detected": detected_at,
         })
         await db.commit()
 
+    # ── Bug 5: email delivery tracking lifecycle ──
     if "email" in channels:
-        # Sync send is intentional — we want the email out the door right now,
-        # not queued for some later flush. send_signal_email itself returns
-        # quickly because _send() runs the Resend POST with a hard timeout.
+        queued_at = datetime.now(timezone.utc)
+        async with async_session_factory() as db:
+            await db.execute(text("UPDATE account_signals SET queued_at = :q WHERE id = :id"),
+                             {"q": queued_at, "id": sid})
+            await db.commit()
         try:
-            t0 = datetime.now(timezone.utc)
-            send_signal_email(
+            result = send_signal_email(
                 to=email, username=username, account_label=account_label,
                 strategy_name=strategy_name, instrument=instrument, direction=direction,
-                entry=entry, stop=float(signal.stop_loss), target=float(signal.take_profit),
-                bias=(signal.metadata or {}).get("bias"),
+                entry=entry, stop=stop, target=tp, bias=bias,
                 fired_at=now.strftime("%a, %b %-d %-I:%M %p ET"),
-                signal_id=sid,
-                entry_detected_at=entry_detected_at,
+                signal_id=sid, entry_detected_at=detected_at,
             )
-            elapsed_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
-            if elapsed_ms > 3000:
-                logger.warning(f"[Signals] slow email send signal_id={sid} took {elapsed_ms}ms")
         except Exception as e:
+            result = {"sent": False, "provider_status": "exception", "error": f"{type(e).__name__}: {e}",
+                      "provider_message_id": None, "suppressed": False}
             logger.exception(
                 f"[Signals] email send EXCEPTION signal_id={sid} symbol={instrument} "
-                f"strategy={strategy_name} entry_detected_at={entry_detected_at.isoformat()} "
+                f"strategy={strategy_name} detected_at={detected_at.isoformat()} "
                 f"attempted_at={datetime.now(timezone.utc).isoformat()} err={type(e).__name__}: {e}"
             )
+        if not isinstance(result, dict):  # defensive: legacy bool
+            result = {"sent": bool(result), "provider_status": "sent" if result else "failed",
+                      "provider_message_id": None, "error": None, "suppressed": False}
+        sent = bool(result.get("sent"))
+        suppressed = bool(result.get("suppressed"))
+        provider_sent_at = datetime.now(timezone.utc) if sent else None
+        latency = (provider_sent_at - detected_at).total_seconds() if provider_sent_at else None
+        final_status = "sent" if sent else ("suppressed" if suppressed else "failed")
+        async with async_session_factory() as db:
+            await db.execute(text("""
+                UPDATE account_signals
+                   SET status = :st,
+                       provider_sent_at = :psa,
+                       delivered_at = :psa,
+                       provider_message_id = :pid,
+                       provider_status = :pstatus,
+                       latency_seconds = :lat,
+                       error_message = :err
+                 WHERE id = :id
+            """), {
+                "st": final_status, "psa": provider_sent_at,
+                "pid": result.get("provider_message_id"),
+                "pstatus": result.get("provider_status"),
+                "lat": latency, "err": result.get("error"), "id": sid,
+            })
+            await db.commit()
+        elapsed_ms = int((datetime.now(timezone.utc) - queued_at).total_seconds() * 1000)
+        if elapsed_ms > 3000:
+            logger.warning(f"[Signals] slow email send signal_id={sid} took {elapsed_ms}ms")
 
     if "push" in channels:
         try:

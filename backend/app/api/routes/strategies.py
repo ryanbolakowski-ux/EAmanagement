@@ -205,6 +205,53 @@ async def delete_strategy(
     await db.commit()
 
 
+def _strategy_to_response(s) -> "StrategyResponse":
+    return StrategyResponse(
+        id=str(s.id), name=s.name, description=s.description,
+        status=s.status.value, instruments=s.instruments,
+        primary_timeframe=s.primary_timeframe, execution_timeframe=s.execution_timeframe,
+        higher_timeframes=s.higher_timeframes or [],
+        risk_reward_ratio=s.risk_reward_ratio, stop_loss_type=s.stop_loss_type,
+        session_filters=s.session_filters, starred=getattr(s, "starred", False),
+        created_at=s.created_at.isoformat(),
+    )
+
+
+async def _set_status(strategy_id, current_user, db, new_status: StrategyStatus):
+    result = await db.execute(
+        select(Strategy).where(Strategy.id == strategy_id, Strategy.user_id == current_user.id)
+    )
+    strategy = result.scalar_one_or_none()
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found.")
+    strategy.status = new_status
+    await db.commit()
+    await db.refresh(strategy)
+    return _strategy_to_response(strategy)
+
+
+@router.post("/{strategy_id}/activate", response_model=StrategyResponse)
+async def activate_strategy(
+    strategy_id: str,
+    current_user: User = Depends(require_paid_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Publish/activate a strategy. Explicit, unambiguous flow used by the UI's
+    Activate button (the generic PUT also honors status, but this endpoint makes
+    the intent and any failure obvious)."""
+    return await _set_status(strategy_id, current_user, db, StrategyStatus.ACTIVE)
+
+
+@router.post("/{strategy_id}/deactivate", response_model=StrategyResponse)
+async def deactivate_strategy(
+    strategy_id: str,
+    current_user: User = Depends(require_paid_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Move a strategy back to draft (unpublish)."""
+    return await _set_status(strategy_id, current_user, db, StrategyStatus.DRAFT)
+
+
 class StarToggle(BaseModel):
     starred: bool
 

@@ -14,6 +14,19 @@ from app.models.strategy import Strategy
 from app.models.backtest import BacktestRun, BacktestStatus, BacktestMetrics, BacktestTrade
 from app.core.auth import get_current_user
 
+
+def _safe_float(v):
+    """Coerce DB floats to JSON-safe values (None/inf/nan -> 0.0)."""
+    if v is None:
+        return 0.0
+    if isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
+        return 0.0
+    return v
+
+
+def _iso_or_none(dt):
+    return dt.isoformat() if dt is not None else None
+
 router = APIRouter()
 
 
@@ -55,6 +68,9 @@ class MetricsResponse(BaseModel):
     max_drawdown_pct: float
     sharpe_ratio: Optional[float]
     avg_rr: float
+    expectancy: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
     equity_curve: list
     monthly_returns: dict
 
@@ -175,10 +191,11 @@ async def get_backtest_metrics(
     if not m:
         raise HTTPException(status_code=404, detail="Metrics not yet calculated.")
 
-    def safe_float(v):
-        if v is None: return 0.0
-        if isinstance(v, float) and (math.isinf(v) or math.isnan(v)): return 0.0
-        return v
+    safe_float = _safe_float
+    # Expectancy = average net P&L per trade. Computed from net_profit/total
+    # (unambiguous) instead of left null. Surfaced so the UI stops showing blank.
+    _tt = m.total_trades or 0
+    _expectancy = (_safe_float(m.net_profit) / _tt) if _tt > 0 else 0.0
 
     return MetricsResponse(
         total_trades=m.total_trades, win_rate=safe_float(m.win_rate), net_profit=safe_float(m.net_profit),
@@ -186,6 +203,8 @@ async def get_backtest_metrics(
         sharpe_ratio=safe_float(m.sharpe_ratio), avg_rr=safe_float(m.avg_rr),
         breakeven_trades=int(getattr(m, "breakeven_trades", 0) or 0),
         effective_win_rate=safe_float(getattr(m, "effective_win_rate", 0.0)),
+        expectancy=round(_expectancy, 2),
+        avg_win=safe_float(getattr(m, "avg_win", 0.0)), avg_loss=safe_float(getattr(m, "avg_loss", 0.0)),
         equity_curve=m.equity_curve or [], monthly_returns=m.monthly_returns or {},
     )
 
@@ -431,15 +450,16 @@ async def get_backtest_trades(
         .order_by(BacktestTrade.entry_time)
     )
     trades = result.scalars().all()
-    return [
-        BacktestTradeResponse(
+    out = []
+    for t in trades:
+        out.append(BacktestTradeResponse(
             id=str(t.id), direction=t.direction.value if hasattr(t.direction, "value") else str(t.direction),
-            entry_price=t.entry_price, exit_price=t.exit_price or 0,
-            entry_time=t.entry_time.isoformat(), exit_time=t.exit_time.isoformat(),
-            pnl=safe_float(t.pnl), net_pnl=safe_float(t.net_pnl),
-            is_winner=t.is_winner, exit_reason=t.exit_reason or "",
-        ) for t in trades
-    ]
+            entry_price=_safe_float(t.entry_price), exit_price=_safe_float(t.exit_price),
+            entry_time=_iso_or_none(t.entry_time) or "", exit_time=_iso_or_none(t.exit_time) or "",
+            pnl=_safe_float(t.pnl), net_pnl=_safe_float(t.net_pnl),
+            is_winner=bool(t.is_winner), exit_reason=t.exit_reason or "",
+        ))
+    return out
 
 @router.get("/{backtest_id}/chart-data")
 async def get_backtest_chart_data(

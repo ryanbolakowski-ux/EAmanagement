@@ -40,6 +40,21 @@ class OptimizationRunResponse(BaseModel):
     # for frontend convenience.
     error_message: Optional[str] = None
     failure_reason: Optional[str] = None
+    progress: float = 0.0
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+def _opt_progress(run) -> float:
+    """Percent complete. The model has no progress column, so derive it from
+    completed/total (and force 100 on a completed run)."""
+    st = run.status.value if hasattr(run.status, "value") else str(run.status)
+    if st == "completed":
+        return 100.0
+    tot = run.total_combinations or 0
+    if tot <= 0:
+        return 0.0
+    return round(min(100.0, (run.completed_combinations or 0) / tot * 100.0), 1)
 
 
 class OptimizationResultResponse(BaseModel):
@@ -130,6 +145,9 @@ async def list_optimizations(
             status=r.status.value, total_combinations=r.total_combinations,
             completed_combinations=r.completed_combinations, created_at=r.created_at.isoformat(),
             error_message=r.error_message, failure_reason=r.error_message,
+            progress=_opt_progress(r),
+            started_at=r.started_at.isoformat() if r.started_at else None,
+            completed_at=r.completed_at.isoformat() if r.completed_at else None,
         )
         for r, strategy_name in result.all()
     ]
@@ -249,6 +267,9 @@ async def get_optimization_run(
         status=run.status.value, total_combinations=run.total_combinations,
         completed_combinations=run.completed_combinations, created_at=run.created_at.isoformat(),
         error_message=run.error_message, failure_reason=run.error_message,
+        progress=_opt_progress(run),
+        started_at=run.started_at.isoformat() if run.started_at else None,
+        completed_at=run.completed_at.isoformat() if run.completed_at else None,
     )
 
 

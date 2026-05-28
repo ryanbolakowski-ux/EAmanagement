@@ -87,12 +87,19 @@ def _fw_check(to: str) -> tuple[bool, str]:
 def _ensure_configured() -> bool:
     if not settings.RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set; skipping email send")
-        return False
+        return {"sent": False, "provider_message_id": None, "provider_status": "not_configured", "error": "RESEND_API_KEY not set", "latency_ms": 0}
     resend.api_key = settings.RESEND_API_KEY
     return True
 
 
 def _send(to: str, subject: str, html: str) -> bool:
+    """Backward-compatible bool wrapper around _send_tracked (used by all the
+    transactional emails). Signal emails call _send_tracked directly to get
+    the provider message id / status for delivery tracking."""
+    return _send_tracked(to, subject, html)["sent"]
+
+
+def _send_tracked(to: str, subject: str, html: str) -> dict:
     """Send via Resend's REST API with a hard 8s timeout + 1 retry on
     transient errors (timeout, 429, 5xx). Returns True on success.
 
@@ -114,7 +121,7 @@ def _send(to: str, subject: str, html: str) -> bool:
         is_theta = "Theta Scanner" in s
         if not is_transactional and not is_theta:
             logger.info("[killswitch] dropped (non-whitelist) to=" + str(to) + " subj=" + s[:80])
-            return False
+            return {"sent": False, "provider_message_id": None, "provider_status": "killswitch_dropped", "error": "kill switch", "latency_ms": 0}
     if not settings.RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set; skipping email send")
         return False
@@ -144,12 +151,12 @@ def _send(to: str, subject: str, html: str) -> bool:
                 except Exception:
                     rid = "?"
                 logger.info(f"Email sent to {to}: {subject} (id={rid}, attempt={attempt}, {elapsed_ms}ms)")
-                # Keep the SDK in sync so resend.Emails.send() elsewhere also works
                 try:
                     resend.api_key = settings.RESEND_API_KEY
                 except Exception:
                     pass
-                return True
+                return {"sent": True, "provider_message_id": (None if rid == "?" else rid),
+                        "provider_status": "sent", "error": None, "latency_ms": elapsed_ms}
             # Retry on 429 (rate-limit) + 5xx, fail-fast on 4xx other.
             if r.status_code == 429 or r.status_code >= 500:
                 last_err = f"resend status={r.status_code} body={r.text[:160]}"
@@ -159,7 +166,7 @@ def _send(to: str, subject: str, html: str) -> bool:
                     continue
             else:
                 logger.error(f"Email permanent failure to {to} ({subject}): status={r.status_code} body={r.text[:160]}")
-                return False
+                return {"sent": False, "provider_message_id": None, "provider_status": f"http_{r.status_code}", "error": r.text[:200], "latency_ms": elapsed_ms}
         except (_httpx_es.TimeoutException, _httpx_es.NetworkError, _httpx_es.ConnectError) as e:
             last_err = f"{type(e).__name__}: {e}"
             logger.warning(f"Email network issue (attempt {attempt}/2) to {to}: {last_err}")
@@ -168,9 +175,9 @@ def _send(to: str, subject: str, html: str) -> bool:
                 continue
         except Exception as e:
             logger.exception(f"Email send unexpected exception to {to} ({subject}): {type(e).__name__}: {e}")
-            return False
+            return {"sent": False, "provider_message_id": None, "provider_status": "exception", "error": f"{type(e).__name__}: {e}", "latency_ms": 0}
     logger.error(f"Email send failed permanently after retries to {to} ({subject}): {last_err}")
-    return False
+    return {"sent": False, "provider_message_id": None, "provider_status": "failed_after_retries", "error": str(last_err)[:200], "latency_ms": 0}
 
 
 def _logo_header() -> str:

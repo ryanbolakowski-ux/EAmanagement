@@ -19,7 +19,7 @@ from app.database import get_db, async_session_factory
 from app.models.user import User
 from app.models.strategy import Strategy
 from app.core.auth import get_current_user
-from app.services.email import _send, _logo_header
+from app.services.email import _send, _send_tracked, _logo_header
 from app.config import settings
 
 router = APIRouter()
@@ -128,6 +128,16 @@ async def create_watcher(
     strategy = sresult.scalar_one_or_none()
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # Bug 2: a DRAFT strategy is not ready to trade — block watcher creation so
+    # we never email/push signals for an unpublished strategy. The UI surfaces
+    # this 409 with a clear "activate the strategy first" message.
+    _stat = strategy.status.value if hasattr(strategy.status, "value") else str(strategy.status)
+    if _stat == "draft":
+        raise HTTPException(
+            status_code=409,
+            detail="This strategy is a draft. Activate (publish) it before creating a signal watcher.",
+        )
 
     wid = uuid.uuid4()
     # asyncpg + JSON columns: list/dict params must be JSON-serialized first
@@ -242,7 +252,7 @@ def send_signal_email(
                 f"strategy={strategy_name} entry_detected_at={_detected_iso} "
                 f"sent_attempt_at={_attempt_iso} outcome=duplicate-suppressed"
             )
-            return False
+            return {"sent": False, "provider_status": "duplicate_suppressed", "provider_message_id": None, "error": None, "suppressed": True}
 
         if _sess == "DEAD":
             _lg.info(
@@ -250,7 +260,7 @@ def send_signal_email(
                 f"strategy={strategy_name} to={to} entry_detected_at={_detected_iso} "
                 f"sent_attempt_at={_attempt_iso} outcome=dead-zone-suppressed"
             )
-            return False
+            return {"sent": False, "provider_status": "dead_zone_suppressed", "provider_message_id": None, "error": None, "suppressed": True}
 
         # Layer 1 — one futures email per (user, session, day). First wins.
         _key = f"futures_email:{to}:{_sess}:{_day}"
@@ -261,7 +271,7 @@ def send_signal_email(
                 f"entry_detected_at={_detected_iso} sent_attempt_at={_attempt_iso} "
                 f"outcome=session-cap"
             )
-            return False
+            return {"sent": False, "provider_status": "session_cap_suppressed", "provider_message_id": None, "error": None, "suppressed": True}
     except Exception as _cap_err:
         # Fail-open is correct — we would rather send than not — but we MUST
         # log it so a Redis outage doesn't go unnoticed. Was: bare pass.
@@ -301,7 +311,8 @@ def send_signal_email(
       </p>
     </div>
     """
-    _ok = _send(to, subject, html)
+    _result = _send_tracked(to, subject, html)
+    _ok = bool(_result.get("sent"))
     _sent_iso = _dt_fs.now(_tz_fs.utc).isoformat()
     _latency_ms = int((_dt_fs.now(_tz_fs.utc) - entry_detected_at).total_seconds() * 1000) if entry_detected_at else 0
     _lg.info(
@@ -310,7 +321,14 @@ def send_signal_email(
         f"session={_sess} entry_detected_at={_detected_iso} email_sent_at={_sent_iso} "
         f"latency_ms={_latency_ms} outcome={('sent' if _ok else 'send-failed')}"
     )
-    return _ok
+    return {
+        "sent": _ok,
+        "provider_message_id": _result.get("provider_message_id"),
+        "provider_status": _result.get("provider_status"),
+        "error": _result.get("error"),
+        "suppressed": False,
+        "provider_sent_at": _sent_iso if _ok else None,
+    }
 """Patch — add device-registration + push helpers. Append to account_signals.py."""
 
 
