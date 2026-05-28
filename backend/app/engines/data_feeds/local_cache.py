@@ -81,14 +81,18 @@ async def fetch_from_cache(
             is_etf = True
 
         if is_etf:
-            scale = PRICE_SCALE.get(inst, 1.0)
-            logger.info(f"ETF proxy data detected, scaling by {scale}x")
+            # Dynamic (futures/ETF) ratio — the old hardcoded PRICE_SCALE drifted
+            # (NQ/QQQ was 31, now ~41 => ~25% wrong prices). proxy_scale fetches
+            # the live ratio (cached 1h) and falls back to a recent constant.
+            from app.engines.data_feeds.proxy_scale import get_proxy_scale
+            scale = get_proxy_scale(inst)
+            logger.info(f"[price-source] {inst}: ETF-proxy cache data (first_price={first_price:.2f}); scaling x{scale}")
             df["open"] = df["open"] * scale
             df["high"] = df["high"] * scale
             df["low"] = df["low"] * scale
             df["close"] = df["close"] * scale
         else:
-            logger.info(f"Real futures data detected for {inst}, no scaling needed")
+            logger.info(f"[price-source] {inst}: real futures cache data (first_price={first_price:.2f}); no scaling")
 
         # Aggregate to requested timeframe
         minutes = TIMEFRAME_MINUTES.get(interval, 15)
