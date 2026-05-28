@@ -31,6 +31,8 @@ export default function ChatBubble() {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [showSuggestions, setShowSuggestions] = useState(true)
+  // null = unknown (not yet checked); false = assistant has no provider key
+  const [configured, setConfigured] = useState<boolean | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -42,9 +44,21 @@ export default function ChatBubble() {
   // Auto-focus when opened
   useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 100) }, [open])
 
+  // Check whether the assistant is configured (has a provider key) the first
+  // time the panel opens, so we never present an enabled input that always fails.
+  useEffect(() => {
+    if (!open || configured !== null) return
+    console.debug('[chat] open — checking /support/chat/status')
+    api.get('/api/v1/support/chat/status')
+      .then((r: any) => { const ok = !!r?.data?.configured; setConfigured(ok); console.debug('[chat] configured =', ok) })
+      .catch((e: any) => { setConfigured(true); console.debug('[chat] status check failed; assuming configured', e?.message) })
+  }, [open, configured])
+
   async function send(text?: string) {
     const content = (text ?? input).trim()
     if (!content || busy) return
+    if (configured === false) { console.debug('[chat] submit blocked — assistant not configured'); return }
+    console.debug('[chat] submit', { len: content.length })
     setInput('')
     setShowSuggestions(false)
     const next: Msg[] = [...msgs, { role: 'user', content }]
@@ -65,7 +79,9 @@ export default function ChatBubble() {
         body: JSON.stringify({ messages: next }),
       })
 
+      console.debug('[chat] backend response', r.status)
       if (!r.ok) {
+        if (r.status === 503) setConfigured(false)
         const errBody = await r.json().catch(() => ({}))
         setMsgs(m => {
           const copy = [...m]
@@ -168,6 +184,11 @@ export default function ChatBubble() {
 
           {/* Messages */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50 dark:bg-slate-950">
+            {configured === false && (
+              <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3.5 py-2.5 text-[12.5px] text-amber-800 dark:text-amber-200">
+                The assistant is being set up and is not available yet. For help right now, email <a className="underline font-semibold" href="mailto:support@thetaalgos.com">support@thetaalgos.com</a>.
+              </div>
+            )}
             {msgs.map((m, i) => (
               <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
@@ -213,15 +234,15 @@ export default function ChatBubble() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
-                placeholder="Ask anything..."
-                disabled={busy}
+                placeholder={configured === false ? 'Assistant is being set up…' : 'Ask anything...'}
+                disabled={busy || configured === false}
                 rows={1}
                 className="flex-1 resize-none rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent max-h-32"
                 style={{ minHeight: '36px' }}
               />
               <button
                 onClick={() => send()}
-                disabled={busy || !input.trim()}
+                disabled={busy || !input.trim() || configured === false}
                 className="bg-violet-600 hover:bg-violet-500 disabled:bg-slate-300 disabled:dark:bg-slate-700 text-white p-2 rounded-xl transition-colors flex-shrink-0"
                 aria-label="Send"
               >
