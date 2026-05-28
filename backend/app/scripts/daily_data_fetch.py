@@ -37,36 +37,42 @@ async def fetch_range_for_instrument(
     rows are skipped). Yahoo only serves 1m data in <=7-day windows, so callers
     must chunk wider ranges.
     """
-    ticker = yf.Ticker(yahoo_sym)
-    df = ticker.history(
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        interval="1m",
-    )
-    if df is None or df.empty:
+    # The yfinance network call + the row-by-row DataFrame conversion are pure
+    # synchronous/CPU work. Run them in a worker thread so they never block the
+    # event loop (which drives the premarket email scheduler + serves the Live
+    # Trading API). Previously this ran inline and stalled the loop for the
+    # duration of the fetch on startup and at the 5 AM UTC daily run.
+    import asyncio as _asyncio_df
+
+    def _fetch_rows_sync():
+        ticker = yf.Ticker(yahoo_sym)
+        df = ticker.history(
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            interval="1m",
+        )
+        if df is None or df.empty:
+            return None
+        df.columns = [c.lower() for c in df.columns]
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert("UTC")
+        out = []
+        for ts, row in df.iterrows():
+            py_ts = ts.to_pydatetime()
+            if py_ts.tzinfo is None:
+                py_ts = py_ts.replace(tzinfo=timezone.utc)
+            out.append({
+                "sym": instrument, "inst": instrument, "ts": py_ts,
+                "o": float(row["open"]), "h": float(row["high"]),
+                "l": float(row["low"]), "c": float(row["close"]),
+                "v": int(row.get("volume", 0) or 0),
+            })
+        return out
+
+    rows = await _asyncio_df.to_thread(_fetch_rows_sync)
+    if rows is None:
         logger.warning(f"No Yahoo data for {instrument} {start.date()}..{end.date()}")
         return 0
-
-    df.columns = [c.lower() for c in df.columns]
-    if df.index.tz is not None:
-        df.index = df.index.tz_convert("UTC")
-
-    rows = []
-    for ts, row in df.iterrows():
-        py_ts = ts.to_pydatetime()
-        if py_ts.tzinfo is None:
-            py_ts = py_ts.replace(tzinfo=timezone.utc)
-        rows.append({
-            "sym": instrument,
-            "inst": instrument,
-            "ts": py_ts,
-            "o": float(row["open"]),
-            "h": float(row["high"]),
-            "l": float(row["low"]),
-            "c": float(row["close"]),
-            "v": int(row.get("volume", 0) or 0),
-        })
-
     if not rows:
         return 0
 

@@ -1007,6 +1007,7 @@ async def _check_and_run_theta_scanner():
         _r = _redis_theta.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
         if _r.get(f"theta_fired:{today_key}"):
             _theta_fired_today = today
+            logger.info(f"[ThetaScanner] skip: already fired today ({today_key})")
             return
     except Exception as _e:
         logger.warning(f"[ThetaScanner] redis check failed: {_e}")
@@ -1014,6 +1015,7 @@ async def _check_and_run_theta_scanner():
 
     # Find the best premarket candidate
     threshold = _min_score_for_et(et)
+    logger.info(f"[ThetaScanner] job start {et.strftime('%H:%M ET')} threshold={threshold}")
     try:
         from app.engines.options.theta_scanner import find_best_premarket_pick
         from app.database import async_session_factory as _asf
