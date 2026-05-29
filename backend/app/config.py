@@ -1,3 +1,4 @@
+import re
 from pydantic_settings import BaseSettings
 from typing import List
 
@@ -51,6 +52,15 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
 
-settings = Settings()
+def _safe_settings():
+    try:
+        return Settings()
+    except Exception as e:
+        # NEVER dump env values to logs. Strip pydantic's input_value spam.
+        msg = re.sub(r"input_value=[^,)]*", "input_value=<redacted>", str(e))
+        raise RuntimeError(f"Settings init failed: {msg[:500]}") from None
+
+settings = _safe_settings()

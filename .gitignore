@@ -47,3 +47,7 @@ data/cache/
 backend/data/
 backend/*.parquet
 backend/dl_*.py
+docker-compose.yml.tmp
+download_databento.py
+backend/app/diag_login.html
+backend/set_admin_passcode.py
