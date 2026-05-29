@@ -48,10 +48,15 @@ async def _ensure_kyc_events_table(db):
     global _kyc_table_checked
     if _kyc_table_checked: return
     try:
-        await db.execute(text(_KYC_EVENTS_DDL))
+        # asyncpg can't run multiple commands in one prepared statement, so
+        # execute each ';'-separated DDL statement (table + indexes) on its own.
+        for _stmt in _KYC_EVENTS_DDL.split(";"):
+            if _stmt.strip():
+                await db.execute(text(_stmt))
         await db.commit()
         _kyc_table_checked = True
     except Exception as e:
+        await db.rollback()  # don't leave the session in an aborted-transaction state
         logger.warning(f"[kyc] could not ensure kyc_events table: {e}")
 
 async def _log_kyc_event(db, *, user_id: str, user_email: str | None,
