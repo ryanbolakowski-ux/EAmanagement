@@ -12,6 +12,7 @@ import { TradeChartModal } from '../components/TradeChartModal'
 import AcknowledgmentModal from '../components/AcknowledgmentModal'
 import SizingModal from '../components/SizingModal'
 import { LIVE_TRADING_CONSENT_TEXT } from '../utils/legalText'
+import { classifyAssetClass, supportedClasses, type AssetClass } from '../utils/assetClass'
 
 type Period = 'today' | 'month' | 'year' | 'all'
 const PERIOD_LABELS: Record<Period, string> = { today: 'Today', month: 'Month', year: 'Year', all: 'All time' }
@@ -562,23 +563,48 @@ export default function LiveTrading() {
                 <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-1.5 dark:text-slate-300">Strategy</label>
                 <select value={sessionForm.strategy_id} onChange={e => setSessionForm({...sessionForm, strategy_id: e.target.value})}
                   className="w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700">
-                  <option value="">{strategies.length ? `Select a strategy... (${strategies.length} available)` : "Loading strategies..."}</option>
                   {(() => {
-                    const active = strategies.filter((s: any) => (s.status || "").toLowerCase() === "active")
-                    const futures = active.filter((s: any) => (s.instruments || []).some((i: string) => ["ES","NQ","RTY","YM"].includes(i)))
-                    const options = active.filter((s: any) => !futures.includes(s))
+                    // Mirrors the LiveTradingV2 filter so the classic and
+                    // v2 pages agree on which strategies are deployable
+                    // to which broker. Skips template strategies (empty
+                    // instruments → classifyAssetClass returns 'unknown')
+                    // and adds Theta Scanner under Stocks when the broker
+                    // is stock-capable.
+                    const acct = accounts.find((a: any) => a.id === sessionForm.broker_account_id)
+                    if (!sessionForm.broker_account_id) {
+                      return <option value="">Select a broker account first to see compatible strategies.</option>
+                    }
+                    if (!acct) {
+                      return <option value="">Loading account info…</option>
+                    }
+                    const accountClasses = supportedClasses(acct.broker) as ReadonlyArray<AssetClass>
+                    const cls = (st: any): AssetClass => (st.asset_class as AssetClass) || classifyAssetClass(st.instruments || [])
+                    const active = strategies.filter((st: any) => (st.status || "").toLowerCase() === "active")
+                    const byClass: Record<AssetClass, any[]> = { futures: [], options: [], stock: [], unknown: [] }
+                    for (const st of active) {
+                      const c = cls(st)
+                      if (accountClasses.includes(c)) byClass[c].push(st)
+                    }
+                    if (accountClasses.includes("stock")) {
+                      byClass.stock = [{ id: "theta_scanner", name: "🎯 Theta Scanner — daily premarket pick (built-in)" }, ...byClass.stock]
+                    }
+                    const groups = [
+                      { label: "Futures", emoji: "⚡", items: byClass.futures },
+                      { label: "Options", emoji: "🎯", items: byClass.options },
+                      { label: "Stocks",  emoji: "📈", items: byClass.stock },
+                    ].filter(g => g.items.length > 0)
+                    const total = groups.reduce((s, g) => s + g.items.length, 0)
+                    if (total === 0) {
+                      return <option value="">No compatible strategies for {acct.broker} — create one at /app/strategies.</option>
+                    }
                     return (
                       <>
-                        {futures.length > 0 && (
-                          <optgroup label="Futures (ES/NQ/RTY/YM)">
-                            {futures.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        <option value="">Select a strategy… ({total} available for {acct.broker})</option>
+                        {groups.map(g => (
+                          <optgroup key={g.label} label={`${g.emoji} ${g.label}`}>
+                            {g.items.map((st: any) => <option key={st.id} value={st.id}>{st.name}</option>)}
                           </optgroup>
-                        )}
-                        {options.length > 0 && (
-                          <optgroup label="Stocks / Options">
-                            {options.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                          </optgroup>
-                        )}
+                        ))}
                       </>
                     )
                   })()}

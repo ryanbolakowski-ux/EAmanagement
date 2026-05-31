@@ -10,6 +10,7 @@ import { liveTradingApi, tradesApi, strategiesApi, dashboardApi } from '../api/e
 import api from '../api/client'
 import SizingModal from '../components/SizingModal'
 import AddBrokerInline from '../components/AddBrokerInline'
+import { classifyAssetClass, supportedClasses, type AssetClass } from '../utils/assetClass'
 
 type Period = 'today' | 'week' | 'month' | 'ytd'
 
@@ -865,21 +866,72 @@ export default function LiveTradingV2() {
                 <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 block mb-1.5">Strategy</label>
                 <select value={deployForm.strategy_id} onChange={(e) => setDeployForm({...deployForm, strategy_id: e.target.value})}
                   className="w-full border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-slate-800">
-                  <option value="">{strategies.length ? `Select a strategy...` : 'Loading...'}</option>
                   {(() => {
+                    // Strategy filter logic — same rules the backend uses to
+                    // reject mismatched deploys (see strategy_classification.py).
+                    //
+                    //   1. Look up the currently-selected broker account.
+                    //      If no broker chosen yet, prompt the user — we
+                    //      can't filter intelligently without one.
+                    //   2. Trust the backend-derived `asset_class` if the
+                    //      API returned one; fall back to classifying the
+                    //      instruments list client-side for older payloads.
+                    //   3. Filter to active strategies whose asset class
+                    //      is supported by the broker AND matches the
+                    //      currently-selected asset-type tab.
+                    //   4. For stock-supporting brokers, surface Theta
+                    //      Scanner (the built-in daily premarket pick)
+                    //      in the Stock optgroup so jaceford12 et al can
+                    //      deploy it without authoring their own strategy.
+                    const acct = (portfolio?.per_account || []).find((a: any) => a.id === deployForm.broker_account_id)
+                    if (!deployForm.broker_account_id) {
+                      return <option value="">Select a broker account first to see compatible strategies.</option>
+                    }
+                    if (!acct) {
+                      return <option value="">Loading account info…</option>
+                    }
+                    const accountClasses = supportedClasses(acct.broker) as ReadonlyArray<AssetClass>
+                    const cls = (st: any): AssetClass => (st.asset_class as AssetClass) || classifyAssetClass(st.instruments || [])
                     const active = strategies.filter((st: any) => (st.status || '').toLowerCase() === 'active')
-                    const isFutures = (st: any) => (st.instruments || []).some((i: string) => ['ES','NQ','RTY','YM','MES','MNQ','M2K','MYM'].includes(i))
-                    const isOptions = (st: any) => (st.name || '').toLowerCase().includes('option') || (st.options_mode)
-                    let filtered = active
-                    if (assetType === 'futures') filtered = active.filter(isFutures)
-                    else if (assetType === 'options') filtered = active.filter(isOptions)
-                    else filtered = active.filter((st: any) => !isFutures(st) && !isOptions(st))
-                    return filtered.map((st: any) => <option key={st.id} value={st.id}>{st.name}</option>)
+                    // Group active strategies by (broker-supported) asset class.
+                    const byClass: Record<AssetClass, any[]> = { futures: [], options: [], stock: [], unknown: [] }
+                    for (const st of active) {
+                      const c = cls(st)
+                      if (accountClasses.includes(c)) byClass[c].push(st)
+                    }
+                    // Match the asset-type tab the user has selected (futures/options/stocks).
+                    const tabClass: AssetClass = assetType === 'stocks' ? 'stock' : assetType
+                    const groups: { label: string; assetClass: AssetClass; items: any[]; emoji: string }[] = [
+                      { label: 'Futures',  assetClass: 'futures',  items: byClass.futures,  emoji: '⚡' },
+                      { label: 'Options',  assetClass: 'options',  items: byClass.options,  emoji: '🎯' },
+                      { label: 'Stocks',   assetClass: 'stock',    items: byClass.stock,    emoji: '📈' },
+                    ].filter(g => g.assetClass === tabClass)
+                    // Add Theta Scanner to the stock optgroup if the broker
+                    // supports stocks. (It's the only built-in non-user
+                    // strategy and only relevant for stock-capable accounts.)
+                    const tabGroup = groups[0]
+                    if (tabGroup && tabClass === 'stock' && accountClasses.includes('stock')) {
+                      tabGroup.items = [{ id: 'theta_scanner', name: '🎯 Theta Scanner — daily premarket pick (built-in)' }, ...tabGroup.items]
+                    }
+                    if (!tabGroup || !accountClasses.includes(tabClass)) {
+                      return <option value="">No {tabClass === 'stock' ? 'stock' : tabClass} support on {acct.broker} ({accountClasses.join(', ') || 'unknown broker'}).</option>
+                    }
+                    if (tabGroup.items.length === 0) {
+                      return <option value="">No {tabClass === 'stock' ? 'stock' : tabClass} strategies yet — create one at /app/strategies.</option>
+                    }
+                    return (
+                      <>
+                        <option value="">Select a strategy… ({tabGroup.items.length} available)</option>
+                        <optgroup label={`${tabGroup.emoji} ${tabGroup.label}`}>
+                          {tabGroup.items.map((st: any) => <option key={st.id} value={st.id}>{st.name}</option>)}
+                        </optgroup>
+                      </>
+                    )
                   })()}
                 </select>
                 {strategies.length === 0 && (
                   <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1.5">
-                    No strategies — <Link to="/app/strategies" className="underline font-semibold">create one</Link>.
+                    No strategies yet — <Link to="/app/strategies" className="underline font-semibold">create one</Link>.
                   </p>
                 )}
               </div>

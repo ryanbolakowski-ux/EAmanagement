@@ -9,6 +9,7 @@ from app.database import get_db
 from app.models.user import User, SubscriptionTier
 from app.models.strategy import Strategy, StrategyStatus
 from app.core.auth import require_tier, get_current_user
+from app.engines.strategy_classification import classify_asset_class
 
 router = APIRouter()
 
@@ -57,6 +58,9 @@ class StrategyResponse(BaseModel):
     stop_loss_type: str
     session_filters: list
     starred: bool = False
+    # Derived in code from `instruments` (the DB has no asset_class
+    # column). 'futures' | 'options' | 'stock' | 'unknown'.
+    asset_class: str = "unknown"
     created_at: str
 
     class Config:
@@ -79,6 +83,7 @@ async def list_strategies(
             higher_timeframes=s.higher_timeframes or [],
             risk_reward_ratio=s.risk_reward_ratio, stop_loss_type=s.stop_loss_type,
             session_filters=s.session_filters, starred=getattr(s, "starred", False),
+            asset_class=classify_asset_class(s.instruments),
             created_at=s.created_at.isoformat(),
         )
         for s in result.scalars().all()
@@ -115,6 +120,7 @@ async def create_strategy(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=getattr(strategy, "starred", False),
+        asset_class=classify_asset_class(strategy.instruments),
         created_at=strategy.created_at.isoformat(),
     )
 
@@ -138,6 +144,7 @@ async def get_strategy(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=getattr(strategy, "starred", False),
+        asset_class=classify_asset_class(strategy.instruments),
         created_at=strategy.created_at.isoformat(),
     )
 
@@ -177,6 +184,7 @@ async def update_strategy(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=getattr(strategy, "starred", False),
+        asset_class=classify_asset_class(strategy.instruments),
         created_at=strategy.created_at.isoformat(),
     )
 
@@ -213,6 +221,7 @@ def _strategy_to_response(s) -> "StrategyResponse":
         higher_timeframes=s.higher_timeframes or [],
         risk_reward_ratio=s.risk_reward_ratio, stop_loss_type=s.stop_loss_type,
         session_filters=s.session_filters, starred=getattr(s, "starred", False),
+        asset_class=classify_asset_class(s.instruments),
         created_at=s.created_at.isoformat(),
     )
 
@@ -279,6 +288,7 @@ async def toggle_strategy_star(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=bool(strategy.starred),
+        asset_class=classify_asset_class(strategy.instruments),
         created_at=strategy.created_at.isoformat(),
     )
 """Patch — append to strategies.py to add share/import endpoints.
@@ -466,5 +476,6 @@ async def import_shared_strategy(
         risk_reward_ratio=copy.risk_reward_ratio, stop_loss_type=copy.stop_loss_type,
         session_filters=copy.session_filters,
         starred=False,
+        asset_class=classify_asset_class(copy.instruments),
         created_at=copy.created_at.isoformat(),
     )

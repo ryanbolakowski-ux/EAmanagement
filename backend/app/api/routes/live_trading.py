@@ -13,6 +13,11 @@ from app.api.routes.legal import require_current_ack
 from app.core.auth import get_current_user, require_live_trading
 from app.core.security import encrypt_credentials, decrypt_credentials
 from app.api.routes.kyc import require_kyc_verified
+from app.engines.strategy_classification import (
+    classify_asset_class,
+    broker_supports,
+    supported_classes,
+)
 
 router = APIRouter()
 
@@ -252,6 +257,45 @@ async def set_account_trading_enabled(
     return _to_response(account, await _account_daily_pnl(db, account.id))
 
 
+def assert_broker_supports_strategy(strategy, broker_account) -> None:
+    """Raise 400 if the broker account can't execute the strategy's asset
+    class. Factored out of start_live_session so the validation is unit
+    testable in isolation (no FastAPI app, no DB, no fixtures).
+
+    Args:
+        strategy: a Strategy ORM row (or any object with `.instruments`,
+            `.name`).
+        broker_account: a BrokerAccount ORM row (or any object with
+            `.broker`).
+
+    Raises:
+        HTTPException(400) if the broker does not support the strategy's
+        derived asset class. 'unknown' (empty instruments) also raises —
+        a template strategy can't be deployed live.
+    """
+    asset_class = classify_asset_class(getattr(strategy, "instruments", None) or [])
+    if asset_class == "unknown":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Strategy {strategy.name!r} has no instruments configured "
+                f"and cannot be deployed live. Edit it to add at least one "
+                f"symbol."
+            ),
+        )
+    broker = (getattr(broker_account, "broker", "") or "").lower()
+    if not broker_supports(broker, asset_class):
+        sc = supported_classes(broker) or ["(none — unknown broker)"]
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot deploy a {asset_class} strategy "
+                f"({strategy.name!r}) to a {broker or 'unknown'} account — "
+                f"{broker or 'this broker'} supports {', '.join(sc)}."
+            ),
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Live Sessions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,6 +328,18 @@ async def start_live_session(
     )).scalar_one_or_none()
     if not acct:
         raise HTTPException(status_code=404, detail="Broker account not found.")
+
+    # Asset-class / broker compatibility — never let a futures strategy
+    # land on a stock-only Tradier account (or vice versa). The DB has
+    # no asset_class column; we derive it from the strategy's instrument
+    # list via classify_asset_class().
+    assert_broker_supports_strategy(strat, acct)
+    from loguru import logger as _lg
+    _lg.info(
+        f"[live_trading.start_live_session] deploying "
+        f"strategy={strat.id} asset_class={classify_asset_class(strat.instruments or [])} "
+        f"broker={acct.broker} account={acct.id}"
+    )
 
     session = TradeSession(
         strategy_id=strat.id,
