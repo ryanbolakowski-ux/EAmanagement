@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, Briefcase, X,
   Wallet, Zap, AlertCircle, ArrowLeft, RefreshCw, Calculator,
-  Lock, Unlock, Pause, Play
+  Lock, Unlock, Pause, Play, ChevronDown, ChevronUp
 } from 'lucide-react'
 import { liveTradingApi, tradesApi, strategiesApi, dashboardApi } from '../api/endpoints'
 import api from '../api/client'
@@ -460,17 +460,62 @@ function SizingPreviewCard() {
 }
 
 function PortfolioHeader({ data }: { data: any }) {
+  const qc = useQueryClient()
+  const [showDebug, setShowDebug] = useState(false)
+  const [syncMsg, setSyncMsg] = useState<string | null>(null)
+  // Always declare hooks before any early return so React's rules of hooks
+  // never trip when `data` flips from undefined → loaded.
+  const firstAccountId = data?.per_account?.[0]?.id as string | undefined
+  const syncFromBroker = useMutation({
+    mutationFn: async () => {
+      if (!firstAccountId) throw new Error('No connected broker account')
+      const r = await api.post(`/api/v1/live-trading/accounts/${firstAccountId}/reconcile-from-broker`)
+      return r.data
+    },
+    onSuccess: (resp: any) => {
+      const c = resp?.reconcile || {}
+      setSyncMsg(
+        `Synced: fetched ${c.fetched_from_broker ?? 0}, ` +
+        `already tracked ${c.already_tracked ?? 0}, ` +
+        `inserted ${c.inserted ?? 0}.`
+      )
+      qc.invalidateQueries({ queryKey: ['portfolio-summary'] })
+      qc.invalidateQueries({ queryKey: ['live-trades'] })
+      setTimeout(() => setSyncMsg(null), 8000)
+    },
+    onError: (e: any) => {
+      setSyncMsg(`Sync failed: ${e?.response?.data?.detail || e?.message || 'unknown'}`)
+      setTimeout(() => setSyncMsg(null), 8000)
+    },
+  })
   if (!data) return null
   const sparkData = (data.equity_curve_14d || []).map((p: any) => p.pnl).reduce((acc: number[], v: number) => {
     acc.push((acc[acc.length - 1] || 0) + v); return acc
   }, [] as number[])
   const todayClass = pnlColor(data.today_pnl)
+  const recon = data.reconciliation || {}
   return (
     <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950 dark:from-slate-950 dark:via-slate-950 dark:to-violet-950 text-white p-6 md:p-8 shadow-xl">
       <div className="flex items-center justify-between mb-5">
         <div>
           <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">Equity · Net Liquidation Value</div>
-          <div className="text-3xl md:text-4xl font-extrabold tabular-nums" title="Cash + market value of open positions. Pulled from your broker (cached).">{fmtUsd(data.total_equity)}</div>
+          <div className="flex items-center gap-2">
+            <div className="text-3xl md:text-4xl font-extrabold tabular-nums" title="Cash + market value of open positions. Pulled from your broker (cached).">{fmtUsd(data.total_equity)}</div>
+            {firstAccountId && (
+              <button
+                onClick={() => syncFromBroker.mutate()}
+                disabled={syncFromBroker.isPending}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold text-violet-200 bg-violet-900/40 hover:bg-violet-800/60 border border-violet-700/40 disabled:opacity-50"
+                title="Pull the broker's authoritative trade history and backfill any closing fills that aren't in our trades table yet. Safe to click repeatedly."
+              >
+                <RefreshCw size={10} className={syncFromBroker.isPending ? 'animate-spin' : ''}/>
+                {syncFromBroker.isPending ? 'Syncing…' : 'Sync from broker'}
+              </button>
+            )}
+          </div>
+          {syncMsg && (
+            <div className="text-[10px] text-emerald-300 mt-1">{syncMsg}</div>
+          )}
           <div className="text-xs text-slate-400 mt-1">{data.accounts_count} broker {data.accounts_count === 1 ? 'account' : 'accounts'} linked · {data.healthy_accounts} healthy</div>
           {data.reconciliation && (
             <div className="text-[10px] text-slate-400 mt-2 leading-snug" title={data.reconciliation.notes}>
@@ -478,7 +523,73 @@ function PortfolioHeader({ data }: { data: any }) {
               {' · realized YTD '}<span className={`font-semibold ${pnlColor(data.reconciliation.realized_ytd_net)}`}>{pnlSign(data.reconciliation.realized_ytd_net)}{fmtUsd(Math.abs(data.reconciliation.realized_ytd_net), 0)}</span>
               {' · open '}<span className={`font-semibold ${pnlColor(data.reconciliation.unrealized_open)}`}>{pnlSign(data.reconciliation.unrealized_open)}{fmtUsd(Math.abs(data.reconciliation.unrealized_open), 0)}</span>
               {Math.abs(data.reconciliation.unexplained_gap) >= 0.5 && (
-                <>{' · '}<span className="font-semibold text-amber-400" title="Equity change not explained by realized + open. Usually broker-side closes not in our trades table (e.g. flatten_all), un-recorded fees, or slippage vs recorded fills.">gap {pnlSign(data.reconciliation.unexplained_gap)}{fmtUsd(Math.abs(data.reconciliation.unexplained_gap), 0)}</span></>
+                <>{' · '}<span className="font-semibold text-amber-400" title="Equity change not explained by realized + open. Usually broker-side closes not in our trades table (e.g. flatten_all), un-recorded fees, or slippage vs recorded fills. Click Sync from broker to backfill.">gap {pnlSign(data.reconciliation.unexplained_gap)}{fmtUsd(Math.abs(data.reconciliation.unexplained_gap), 0)}</span></>
+              )}
+              <button
+                onClick={() => setShowDebug(v => !v)}
+                className="ml-2 inline-flex items-center gap-0.5 text-violet-300 hover:text-violet-200 font-semibold"
+              >
+                {showDebug ? <ChevronUp size={10}/> : <ChevronDown size={10}/>}
+                {showDebug ? 'Hide details' : 'Show details'}
+              </button>
+            </div>
+          )}
+          {showDebug && data.reconciliation && (
+            <div className="mt-3 p-3 rounded-lg bg-slate-950/60 border border-white/5 text-[10px] text-slate-300">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-2">
+                <div>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Cash</div>
+                  <div className="tabular-nums font-semibold">{fmtUsd(recon.total_cash ?? data.total_cash ?? 0, 2)}</div>
+                </div>
+                <div>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Equity (NLV)</div>
+                  <div className="tabular-nums font-semibold">{fmtUsd(recon.equity_now ?? data.total_equity ?? 0, 2)}</div>
+                </div>
+                <div title={recon.transfer_note || ''}>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Deposits YTD</div>
+                  <div className="tabular-nums font-semibold">{fmtUsd(recon.deposits_ytd ?? 0, 2)}</div>
+                </div>
+                <div title={recon.transfer_note || ''}>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Withdrawals YTD</div>
+                  <div className="tabular-nums font-semibold">{fmtUsd(recon.withdrawals_ytd ?? 0, 2)}</div>
+                </div>
+                <div title={recon.transfer_note || ''}>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Transfers YTD</div>
+                  <div className="tabular-nums font-semibold">{fmtUsd(recon.transfers_ytd ?? 0, 2)}</div>
+                </div>
+                <div>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Source field</div>
+                  <div className="font-mono font-semibold">{recon.source_field_used || 'equity'}</div>
+                </div>
+                <div>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Last sync</div>
+                  <div className="tabular-nums font-semibold">{recon.last_broker_sync_at ? new Date(recon.last_broker_sync_at).toLocaleString() : '—'}</div>
+                </div>
+                <div>
+                  <div className="uppercase tracking-wider text-slate-500 font-bold">Broker history rows</div>
+                  <div className="tabular-nums font-semibold">{recon.broker_history_count ?? '—'}</div>
+                </div>
+              </div>
+              {recon.transfer_note && (
+                <div className="mt-2 text-[9px] text-slate-500 italic">
+                  Deposits / withdrawals / transfers: {recon.transfer_note}.
+                </div>
+              )}
+              {Array.isArray(recon.per_account_debug) && recon.per_account_debug.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-white/5">
+                  <div className="uppercase tracking-wider text-slate-500 font-bold mb-1">Per-account</div>
+                  <div className="space-y-1">
+                    {recon.per_account_debug.map((pa: any) => (
+                      <div key={pa.id} className="grid grid-cols-5 gap-2 text-[10px] tabular-nums">
+                        <div className="text-slate-400 truncate" title={pa.account_name}>{pa.broker}: {pa.account_name}</div>
+                        <div>start {pa.starting_equity != null ? fmtUsd(pa.starting_equity, 0) : '—'}</div>
+                        <div>equity {fmtUsd(pa.equity ?? 0, 0)}</div>
+                        <div>cash {fmtUsd(pa.cash ?? 0, 0)}</div>
+                        <div className={pa.is_stale ? 'text-amber-400' : 'text-emerald-400'}>{pa.is_stale ? 'stale' : 'live'}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
           )}

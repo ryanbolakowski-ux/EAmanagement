@@ -184,6 +184,125 @@ class TradierBroker(BrokerBase):
             "raw":          bal,
         }
 
+
+    async def get_account_history(self, limit: int = 200, activity_type: str | None = "trade") -> list[dict]:
+        """Pull account activity history from Tradier.
+
+        Endpoint: GET /v1/accounts/{id}/history?limit=N[&type=trade]
+
+        Tradier wraps responses inconsistently — `history.event` can be a list
+        OR a single dict. We always normalise to a list of flat dicts so the
+        reconcile layer never has to think about Tradier's wire format.
+
+        Returns:
+            [{"date":..., "symbol":..., "side":"buy"|"sell", "quantity":N,
+              "price":..., "amount":..., "commission":..., "trade_type":...,
+              "raw":{...full event...}}, ...]
+
+        Defensive: empty/missing responses → [], NEVER raises.
+        """
+        if not self._connected or not self._session:
+            logger.warning("[Tradier] get_account_history called before connect()")
+            return []
+        if not self.account_id:
+            logger.warning("[Tradier] get_account_history: no account_id resolved")
+            return []
+        params: dict = {"limit": str(int(limit or 200))}
+        if activity_type:
+            # Tradier accepts type=trade|option|dividend|journal|... — passing
+            # 'trade' filters to trade fills, which is what reconcile cares about.
+            params["type"] = str(activity_type)
+        url = f"{self.base_url}/accounts/{self.account_id}/history"
+        try:
+            async with self._session.get(url, params=params) as r:
+                if r.status != 200:
+                    body = await r.text()
+                    logger.warning(f"[Tradier] history -> {r.status}: {body[:200]}")
+                    return []
+                data = await r.json()
+        except Exception as e:
+            logger.warning(f"[Tradier] get_account_history error: {e}")
+            return []
+
+        history = (data or {}).get("history") or {}
+        if not history:
+            return []
+        events = history.get("event")
+        if not events:
+            return []
+        # Normalise single-dict → list (Tradier returns a bare dict when
+        # there's exactly one event).
+        if isinstance(events, dict):
+            events = [events]
+        if not isinstance(events, list):
+            return []
+
+        out: list[dict] = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            etype = (ev.get("type") or "").lower()
+            date  = ev.get("date") or ev.get("trade_date") or None
+            amount = None
+            try:
+                if ev.get("amount") is not None:
+                    amount = float(ev.get("amount"))
+            except (TypeError, ValueError):
+                amount = None
+
+            # Trade / option fills live in a nested sub-object that mirrors the
+            # event's `type` field. We surface symbol/qty/price/side from there.
+            inner = ev.get(etype) if etype in ("trade", "option") else None
+            if etype in ("trade", "option") and isinstance(inner, dict):
+                symbol = inner.get("symbol") or ev.get("symbol")
+                # Tradier's `quantity` is signed: positive = buy, negative = sell.
+                try:
+                    qty_raw = float(inner.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    qty_raw = 0.0
+                qty = int(abs(qty_raw)) if qty_raw else 0
+                # Side: prefer the explicit `trade_type` ("buy"/"sell"); fall
+                # back to the sign of quantity.
+                tt = (inner.get("trade_type") or "").lower()
+                if tt in ("buy", "sell"):
+                    side = tt
+                else:
+                    side = "buy" if qty_raw >= 0 else "sell"
+                try:
+                    price = float(inner.get("price") or 0)
+                except (TypeError, ValueError):
+                    price = 0.0
+                try:
+                    commission = float(inner.get("commission") or 0)
+                except (TypeError, ValueError):
+                    commission = 0.0
+                trade_type = inner.get("trade_type") or etype
+            else:
+                # Non-trade events (journal/dividend/cash/etc.) — still surface
+                # the basics so the caller can compute deposits/withdrawals from
+                # the same list.
+                symbol = ev.get("symbol")
+                qty = 0
+                side = ""
+                price = 0.0
+                commission = 0.0
+                trade_type = etype
+
+            out.append({
+                "type":        etype,
+                "date":        date,
+                "symbol":      symbol,
+                "side":        side,
+                "quantity":    qty,
+                "price":       price,
+                "amount":      amount,
+                "commission":  commission,
+                "trade_type":  trade_type,
+                "raw":         ev,
+            })
+        return out
+
+
     async def place_order(self, order: OrderRequest) -> OrderResponse:
         if not self._connected:
             raise RuntimeError("Not connected to Tradier")

@@ -620,22 +620,36 @@ class SizingUpdate(BaseModel):
     max_position_usd: float | None = None    # hard cap on capital deployed per trade
 
 
-_starting_equity_col_checked = False
-async def _ensure_starting_equity_column(db):
-    """Idempotently ensure broker_accounts.starting_equity exists. Captured
-    once at link time so the dashboard can reconcile equity vs realized P&L."""
-    global _starting_equity_col_checked
-    if _starting_equity_col_checked:
+_balance_cols_checked = False
+async def _ensure_balance_columns(db):
+    """Idempotently ensure broker_accounts has BOTH starting_equity AND
+    cached_cash columns. Called from:
+      • get_account_balance       — before we try to read starting_equity
+      • get_portfolio_summary     — at the TOP, BEFORE the SELECT (fixes a
+        race where the dashboard was queried on a fresh redeploy before
+        any per-account get_balance call had executed the ALTER).
+    """
+    global _balance_cols_checked
+    if _balance_cols_checked:
         return
+    from sqlalchemy import text as _t
+    from loguru import logger as _lg
     try:
-        await db.execute(text(
+        await db.execute(_t(
             "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS starting_equity DOUBLE PRECISION"
         ))
+        await db.execute(_t(
+            "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS cached_cash DOUBLE PRECISION"
+        ))
         await db.commit()
-        _starting_equity_col_checked = True
+        _balance_cols_checked = True
     except Exception as e:
         await db.rollback()
-        logger.warning(f"[live-trading] could not ensure starting_equity column: {e}")
+        _lg.warning(f"[live-trading] could not ensure balance columns: {e}")
+
+
+# Backwards-compat shim — older code paths still call the original name.
+_ensure_starting_equity_column = _ensure_balance_columns
 
 
 @router.get("/accounts/{account_id}/balance")
@@ -677,9 +691,20 @@ async def get_account_balance(
 
     # Cache for fast UI reads
     from datetime import datetime, timezone
+    from sqlalchemy import text as _t_cc
     account.cached_equity = float(bal.get("equity") or 0)
     account.cached_buying_power = float(bal.get("buying_power") or 0)
     account.cached_balance_at = datetime.now(timezone.utc)
+    # cached_cash isn't on the ORM (added via ADD COLUMN IF NOT EXISTS), so we
+    # update it via raw SQL — the next portfolio-summary read will surface it.
+    try:
+        await db.execute(_t_cc(
+            "UPDATE broker_accounts SET cached_cash = :cash WHERE id = :id"
+        ), {"cash": float(bal.get("cash") or 0), "id": str(account.id)})
+    except Exception:
+        # Column might not exist on a brand-new deploy before _ensure ran.
+        # _ensure runs a few lines down; the next call will catch up.
+        pass
     # If we discovered the broker reports a margin account but our row says cash, sync it.
     detected_type = bal.get("account_type", "cash")
     if account.account_type != detected_type:
@@ -689,8 +714,10 @@ async def get_account_balance(
     # Capture starting_equity once (used by /portfolio-summary reconciliation).
     # Tradier sandbox accounts always fund to $100k; for real accounts we
     # capture the first observed equity at link time.
-    await _ensure_starting_equity_column(db)
-    se_row = (await db.execute(text(
+    await _ensure_balance_columns(db)
+    from sqlalchemy import text as _t_se
+    from loguru import logger as _lg_se
+    se_row = (await db.execute(_t_se(
         "SELECT starting_equity FROM broker_accounts WHERE id = :id"
     ), {"id": str(account.id)})).first()
     if not se_row or se_row[0] is None:
@@ -698,11 +725,11 @@ async def get_account_balance(
             new_se = 100_000.0
         else:
             new_se = float(bal.get("equity") or 0)
-        await db.execute(text(
+        await db.execute(_t_se(
             "UPDATE broker_accounts SET starting_equity = :se WHERE id = :id"
         ), {"se": new_se, "id": str(account.id)})
         await db.commit()
-        logger.info(f"[live-trading] captured starting_equity={new_se:.2f} for account={account.id} broker={account.broker} is_demo={account.is_demo}")
+        _lg_se.info(f"[live-trading] captured starting_equity={new_se:.2f} for account={account.id} broker={account.broker} is_demo={account.is_demo}")
 
     return {
         "equity":       bal.get("equity"),
@@ -801,26 +828,52 @@ async def get_portfolio_summary(
         today_pnl, week_pnl, month_pnl, ytd_pnl
         open_positions_count
         accounts_count, healthy_accounts
-        per_account: [{...}]"""
+        per_account: [{...}]
+        reconciliation: {... debug fields ...}"""
     from datetime import datetime, timezone, timedelta
     from sqlalchemy import text as _t
 
-    # Fetch all the user's broker accounts
+    # Race fix: ensure the columns this endpoint reads (starting_equity,
+    # cached_cash) actually exist BEFORE we try to SELECT them. Previously
+    # this ALTER only ran inside get_account_balance, which meant a fresh
+    # redeploy that hit /portfolio-summary first would 500. Hot-fix on prod
+    # was a manual ALTER; this is the permanent fix.
+    await _ensure_balance_columns(db)
+
+    # Fetch all the user's broker accounts, including the cached_cash column
+    # we just guaranteed exists.
     rows = (await db.execute(
         select(BrokerAccount).where(BrokerAccount.user_id == current_user.id, BrokerAccount.is_active == True)
     )).scalars().all()
+    # Pull per-account cached_cash via raw SQL since it's not on the ORM.
+    cash_map: dict[str, float] = {}
+    if rows:
+        ids = [str(a.id) for a in rows]
+        try:
+            res = await db.execute(_t(
+                "SELECT id, cached_cash FROM broker_accounts WHERE id = ANY(:ids)"
+            ), {"ids": ids})
+            for rid, ccash in res.fetchall():
+                cash_map[str(rid)] = float(ccash or 0)
+        except Exception:
+            cash_map = {}
 
     total_equity = 0.0
     total_buying_power = 0.0
     total_cash = 0.0
     healthy = 0
     per_account = []
+    last_sync: datetime | None = None
     for a in rows:
         eq = float(a.cached_equity or 0)
         bp = float(a.cached_buying_power or 0)
+        cash = float(cash_map.get(str(a.id), 0) or 0)
         total_equity += eq
         total_buying_power += bp
+        total_cash += cash
         cached_at = a.cached_balance_at.isoformat() if a.cached_balance_at else None
+        if a.cached_balance_at and (last_sync is None or a.cached_balance_at > last_sync):
+            last_sync = a.cached_balance_at
         is_stale = False
         if a.cached_balance_at:
             is_stale = (datetime.now(timezone.utc) - a.cached_balance_at).total_seconds() > 1800
@@ -838,6 +891,7 @@ async def get_portfolio_summary(
             "account_type": getattr(a, "account_type", "cash"),
             "equity":       eq,
             "buying_power": bp,
+            "cash":         cash,
             "cached_at":    cached_at,
             "is_stale":     is_stale,
         })
@@ -984,6 +1038,34 @@ async def get_portfolio_summary(
     equity_delta     = total_equity - starting_equity
     reconciled_delta = ytd_breakdown["net"] + total_unrealized_pnl
     unexplained_gap  = equity_delta - reconciled_delta
+    # Per-account debug rows so the UI can show a per-broker breakdown when
+    # the disclosure is expanded. Same field-set as the per_account loop above
+    # plus the per-account starting_equity (often the most-useful debug field
+    # because Tradier sandbox = $100k flat).
+    per_account_debug = []
+    for a, pa in zip(rows, per_account):
+        per_account_debug.append({
+            "id":               str(a.id),
+            "broker":           a.broker,
+            "account_name":     a.account_name,
+            "starting_equity":  se_map.get(str(a.id)),
+            "equity":           pa["equity"],
+            "cash":             pa["cash"],
+            "buying_power":     pa["buying_power"],
+            "cached_at":        pa["cached_at"],
+            "is_stale":         pa["is_stale"],
+        })
+
+    # deposits/withdrawals/transfers — Tradier sandbox doesn't expose these
+    # in a meaningful way (the only "transfer" event is the initial funding,
+    # which we already capture as starting_equity). We expose the keys with
+    # 0.00 + a note so the UI doesn't have to guess.
+    deposits_ytd       = 0.00
+    withdrawals_ytd    = 0.00
+    transfers_ytd      = 0.00
+    broker_history_count: int | None = None
+    transfer_note = "broker doesn't track in software"
+
     reconciliation = {
         "starting_equity":    round(starting_equity, 2),
         "realized_ytd_net":   round(ytd_breakdown["net"], 2),
@@ -994,15 +1076,28 @@ async def get_portfolio_summary(
         "equity_delta":       round(equity_delta, 2),
         "reconciled_delta":   round(reconciled_delta, 2),
         "unexplained_gap":    round(unexplained_gap, 2),
+        # ── extended debug fields (user's explicit ask) ──
+        "total_cash":         round(total_cash, 2),
+        "deposits_ytd":       round(deposits_ytd, 2),
+        "withdrawals_ytd":    round(withdrawals_ytd, 2),
+        "transfers_ytd":      round(transfers_ytd, 2),
+        "transfer_note":      transfer_note,
+        "last_broker_sync_at": last_sync.isoformat() if last_sync else None,
+        "source_field_used":  "equity",
+        "broker_history_count": broker_history_count,
+        "per_account_debug":  per_account_debug,
         "notes": (
             "equity_delta should ~= realized_ytd_net + unrealized_open. "
             "A non-zero unexplained_gap usually means broker-side closes that "
             "did not write a trade row (e.g. flatten_all), un-recorded fees, "
             "slippage between recorded entry/exit and actual broker fill, "
-            "or a stale cached_equity."
+            "or a stale cached_equity. Use POST "
+            "/api/v1/live-trading/accounts/{id}/reconcile-from-broker to "
+            "backfill missing broker fills into the trades table."
         ),
     }
-    logger.info(
+    from loguru import logger as _lg_ps
+    _lg_ps.info(
         f"[portfolio] user={current_user.email} "
         f"eq={total_equity:.2f} start={starting_equity:.2f} "
         f"rlz_net_ytd={ytd_breakdown['net']:.2f} unrlz={total_unrealized_pnl:.2f} "
@@ -1012,7 +1107,8 @@ async def get_portfolio_summary(
     return {
         "total_equity":        total_equity,
         "total_buying_power":  total_buying_power,
-        "total_cash":          total_cash,
+        "total_cash":          round(total_cash, 2),
+        "last_broker_sync_at": last_sync.isoformat() if last_sync else None,
         "today_pnl":           today_pnl,
         "today_unrealized_pnl": round(today_unrealized_pnl, 2),
         "total_unrealized_pnl": round(total_unrealized_pnl, 2),
@@ -1026,6 +1122,53 @@ async def get_portfolio_summary(
         "healthy_accounts":    healthy,
         "per_account":         per_account,
         "equity_curve_14d":    curve,
+    }
+
+
+
+@router.post("/accounts/{account_id}/reconcile-from-broker")
+async def reconcile_from_broker_endpoint(
+    account_id: str,
+    current_user: User = Depends(require_kyc_verified),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pull the broker's authoritative trade history, INSERT any closing
+    fills that aren't in our `trades` table yet, and return the updated
+    portfolio summary so the UI can refresh in one round-trip.
+
+    Idempotent — safe to click the button repeatedly. NEVER updates
+    existing trade rows (the user's data is sacred). The matching rule
+    (instrument + qty + entry_price ±1% + ±24h time window) errs on the
+    side of "already tracked" to avoid double-counting.
+    """
+    result = await db.execute(
+        select(BrokerAccount).where(
+            BrokerAccount.id == account_id,
+            BrokerAccount.user_id == current_user.id,
+        )
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Broker account not found.")
+
+    from app.engines.live_trading.reconcile import reconcile_trades_from_broker
+    from loguru import logger as _lg
+    try:
+        counters = await reconcile_trades_from_broker(db, account)
+    except Exception as e:
+        _lg.error(f"[reconcile-endpoint] failed account={account_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Broker reconcile failed: {e}")
+
+    # Pull the fresh portfolio summary so the UI can refresh in one shot.
+    try:
+        summary = await get_portfolio_summary(current_user=current_user, db=db)
+    except Exception as e:
+        _lg.warning(f"[reconcile-endpoint] summary fetch after reconcile failed: {e}")
+        summary = None
+
+    return {
+        "reconcile": counters,
+        "portfolio_summary": summary,
     }
 
 
