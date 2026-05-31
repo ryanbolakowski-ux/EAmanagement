@@ -1141,3 +1141,207 @@ async def get_unrealized_pnl(
         "total_unrealized": round(total, 2),
         "positions": positions,
     }
+
+
+# ── position sizing preview ──────────────────────────────────────────
+def compute_stock_position_size(
+    *,
+    entry_price: float,
+    stop_loss: float,
+    account_equity: float | None,
+    buying_power: float | None,
+    account_type: str | None,
+    risk_per_trade_usd: float | None,
+    risk_per_trade_pct: float | None,
+    max_position_usd: float | None,
+) -> dict:
+    """Compute how many shares to buy given entry/stop and account-level risk
+    settings. Pure function — no DB, no I/O. Used by the /sizing-preview
+    endpoint and unit-tested in backend/tests/test_position_sizing.py.
+
+    Returns a dict whose `summary` field contains the literal placeholder
+    `{TICKER}` so the caller substitutes the symbol.
+    """
+    # Coerce None equity/BP to 0 so downstream math doesn't blow up.
+    eq = float(account_equity) if account_equity is not None else 0.0
+    bp = float(buying_power) if buying_power is not None else 0.0
+    acct_type = (account_type or "cash").lower()
+
+    # Edge: bad entry price.
+    if entry_price is None or entry_price <= 0:
+        return {
+            "error": "entry_price must be > 0",
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "final_shares": 0,
+            "summary": "Invalid entry price.",
+        }
+
+    # Edge: entry == stop → undefined position size.
+    risk_per_share = abs(float(entry_price) - float(stop_loss))
+    if risk_per_share == 0:
+        return {
+            "error": "entry and stop_loss are equal — risk-per-share is zero",
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "risk_per_share": 0.0,
+            "final_shares": 0,
+            "summary": "Entry and stop are equal — define a stop to size the trade.",
+        }
+
+    # Pick risk model: explicit USD wins over %, else default to 1%.
+    if risk_per_trade_usd is not None and float(risk_per_trade_usd) > 0:
+        risk_model = "usd"
+        risk_dollars_target = float(risk_per_trade_usd)
+    elif risk_per_trade_pct is not None and float(risk_per_trade_pct) > 0:
+        risk_model = "pct"
+        risk_dollars_target = eq * (float(risk_per_trade_pct) / 100.0)
+    else:
+        risk_model = "default_pct_1"
+        risk_dollars_target = eq * 0.01
+
+    raw_shares = int(risk_dollars_target // risk_per_share)
+    raw_notional = raw_shares * float(entry_price)
+
+    # Constraints: max_position_usd then buying_power. Both are applied if
+    # they'd reduce share count; we report each one's would-cap and whether
+    # it was the binding constraint.
+    constraints: list[dict] = []
+
+    if max_position_usd is not None and float(max_position_usd) > 0:
+        mp_cap_shares = int(float(max_position_usd) // float(entry_price))
+    else:
+        mp_cap_shares = None
+    constraints.append({
+        "name": "max_position_usd",
+        "limit_usd": float(max_position_usd) if max_position_usd is not None else None,
+        "would_cap_shares_at": mp_cap_shares,
+        "applied": False,
+    })
+
+    bp_cap_shares = int(bp // float(entry_price)) if bp > 0 else 0
+    constraints.append({
+        "name": "buying_power",
+        "limit_usd": bp,
+        "would_cap_shares_at": bp_cap_shares,
+        "applied": False,
+    })
+
+    final_shares = raw_shares
+    if mp_cap_shares is not None and mp_cap_shares < final_shares:
+        final_shares = mp_cap_shares
+        constraints[0]["applied"] = True
+    if bp_cap_shares < final_shares:
+        final_shares = bp_cap_shares
+        constraints[1]["applied"] = True
+    # If max_position_usd already capped us and buying_power matches that cap
+    # exactly, treat buying_power as not the binding constraint (max_position
+    # already did the work). Only mark applied if it strictly reduced shares.
+
+    if final_shares < 0:
+        final_shares = 0
+
+    final_notional = final_shares * float(entry_price)
+    actual_dollar_risk = final_shares * risk_per_share
+
+    if final_shares == 0:
+        # Build a brief reason from whichever constraint zeroed us out.
+        reasons = []
+        if mp_cap_shares is not None and mp_cap_shares == 0:
+            reasons.append(f"max_position_usd=${float(max_position_usd):,.0f}")
+        if bp_cap_shares == 0:
+            reasons.append(f"buying_power=${bp:,.0f}")
+        if raw_shares == 0:
+            reasons.append(
+                f"risk target ${risk_dollars_target:,.2f} < risk/share ${risk_per_share:,.2f}"
+            )
+        reason_str = "; ".join(reasons) if reasons else "constraints zeroed position"
+        summary = f"Cannot size a position: {reason_str}."
+    else:
+        plural = "s" if final_shares != 1 else ""
+        summary = (
+            f"Buy {final_shares} share{plural} of {{TICKER}} "
+            f"(~${final_notional:,.2f} total). "
+            f"Risk: ${actual_dollar_risk:,.2f} if stop hits at ${float(stop_loss):.2f}."
+        )
+
+    return {
+        "entry_price": float(entry_price),
+        "stop_loss": float(stop_loss),
+        "risk_per_share": float(risk_per_share),
+        "risk_model": risk_model,
+        "risk_per_trade_usd": float(risk_per_trade_usd) if risk_per_trade_usd is not None else None,
+        "risk_per_trade_pct": float(risk_per_trade_pct) if risk_per_trade_pct is not None else None,
+        "max_position_usd": float(max_position_usd) if max_position_usd is not None else None,
+        "account_equity_used": eq,
+        "buying_power_used": bp,
+        "account_type": acct_type,
+        "risk_dollars_target": float(risk_dollars_target),
+        "raw_shares": int(raw_shares),
+        "raw_notional": float(raw_notional),
+        "constraints": constraints,
+        "final_shares": int(final_shares),
+        "final_notional": float(final_notional),
+        "actual_dollar_risk": float(actual_dollar_risk),
+        "summary": summary,
+    }
+
+
+@router.get("/sizing-preview")
+async def sizing_preview(
+    ticker: str,
+    entry: float,
+    stop: float,
+    current_user: User = Depends(require_kyc_verified),
+    db: AsyncSession = Depends(get_db),
+):
+    """For a hypothetical trade signal at (entry, stop) on `ticker`, show
+    *exactly* what each of the user's active broker accounts would buy.
+
+    Pulls per-account risk settings + cached balance from broker_accounts.
+    Does NOT place any orders.
+    """
+    from loguru import logger  # already used elsewhere in this module
+    sym = (ticker or "").strip().upper()
+
+    accts_res = await db.execute(
+        select(BrokerAccount).where(
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.is_active == True,  # noqa: E712
+        )
+    )
+    accts = list(accts_res.scalars().all())
+
+    logger.info(
+        f"[sizing-preview] user={current_user.email} ticker={sym} "
+        f"entry={entry} stop={stop} accounts={len(accts)}"
+    )
+
+    per_account = []
+    for a in accts:
+        sizing = compute_stock_position_size(
+            entry_price=float(entry),
+            stop_loss=float(stop),
+            account_equity=a.cached_equity,
+            buying_power=a.cached_buying_power,
+            account_type=a.account_type,
+            risk_per_trade_usd=a.risk_per_trade_usd,
+            risk_per_trade_pct=a.risk_per_trade_pct,
+            max_position_usd=a.max_position_usd,
+        )
+        # Caller substitutes the symbol into the summary placeholder.
+        sizing["summary"] = sizing["summary"].replace("{TICKER}", sym)
+        per_account.append({
+            "broker_account_id": str(a.id),
+            "broker": a.broker,
+            "account_name": a.account_name,
+            "is_demo": bool(a.is_demo),
+            "sizing": sizing,
+        })
+
+    return {
+        "ticker": sym,
+        "entry": float(entry),
+        "stop": float(stop),
+        "per_account": per_account,
+    }
