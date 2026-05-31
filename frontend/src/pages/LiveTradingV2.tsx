@@ -319,6 +319,146 @@ function TodayPickCard() {
   )
 }
 
+// ── sizing preview card ─────────────────────────────────────────────
+// "If a signal fires for ticker X, here is exactly what each connected
+// broker account would buy." Defaults seed an NVDA worked example so the
+// user sees concrete numbers (shares, notional, $ at risk) on first load.
+function SizingPreviewCard() {
+  const [ticker, setTicker] = useState('NVDA')
+  const [entry, setEntry] = useState('1300')
+  const [stop, setStop] = useState('1287')
+
+  const tickerOk = ticker.trim().length > 0
+  const entryNum = parseFloat(entry)
+  const stopNum = parseFloat(stop)
+  const inputsOk = tickerOk && Number.isFinite(entryNum) && entryNum > 0
+    && Number.isFinite(stopNum) && stopNum > 0
+
+  const { data, isFetching, error } = useQuery({
+    queryKey: ['sizing-preview', ticker.trim().toUpperCase(), entry, stop],
+    queryFn: () => api.get('/api/v1/live-trading/sizing-preview', {
+      params: { ticker: ticker.trim().toUpperCase(), entry: entryNum, stop: stopNum },
+    }).then(r => r.data),
+    enabled: inputsOk,
+    refetchInterval: 30000,
+  })
+
+  const accts: any[] = data?.per_account || []
+
+  return (
+    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5 md:p-6 shadow-sm">
+      <div className="flex items-start justify-between mb-1">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300 font-extrabold">Trade Sizing Preview</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">If a signal fires for this ticker, here's exactly what each account would buy.</div>
+        </div>
+        {isFetching && <div className="text-[10px] text-slate-400">refreshing…</div>}
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 mt-4 max-w-md">
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mb-1">Ticker</label>
+          <input
+            value={ticker}
+            onChange={e => setTicker(e.target.value)}
+            className="w-full px-2 py-1.5 text-sm font-semibold uppercase rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 tabular-nums focus:outline-none focus:ring-2 focus:ring-violet-500"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mb-1">Entry $</label>
+          <input
+            value={entry}
+            onChange={e => setEntry(e.target.value)}
+            inputMode="decimal"
+            className="w-full px-2 py-1.5 text-sm font-semibold rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 tabular-nums focus:outline-none focus:ring-2 focus:ring-violet-500"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mb-1">Stop $</label>
+          <input
+            value={stop}
+            onChange={e => setStop(e.target.value)}
+            inputMode="decimal"
+            className="w-full px-2 py-1.5 text-sm font-semibold rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 tabular-nums focus:outline-none focus:ring-2 focus:ring-violet-500"
+          />
+        </div>
+      </div>
+
+      {!inputsOk && (
+        <div className="mt-4 text-xs text-slate-500 dark:text-slate-400">Enter a ticker, entry price, and stop price.</div>
+      )}
+
+      {error && (
+        <div className="mt-4 text-xs text-rose-600 dark:text-rose-400">Could not load sizing preview.</div>
+      )}
+
+      {inputsOk && accts.length === 0 && !isFetching && !error && (
+        <div className="mt-4 text-xs text-slate-500 dark:text-slate-400">No active broker accounts to size against.</div>
+      )}
+
+      <div className="mt-4 grid grid-cols-1 gap-3">
+        {accts.map((a: any) => {
+          const s = a.sizing || {}
+          const shares = Number(s.final_shares || 0)
+          const summaryClass = shares > 0
+            ? 'text-emerald-600 dark:text-emerald-400'
+            : 'text-slate-500 dark:text-slate-400'
+          const cappedNames = (s.constraints || [])
+            .filter((c: any) => c.applied)
+            .map((c: any) => c.name)
+          const modelLabel = s.risk_model === 'usd'
+            ? `$${Number(s.risk_per_trade_usd || 0).toLocaleString()} per trade`
+            : s.risk_model === 'pct'
+              ? `${Number(s.risk_per_trade_pct || 0)}% per trade`
+              : s.risk_model === 'default_pct_1'
+                ? '1% per trade (default)'
+                : '—'
+          return (
+            <div key={a.broker_account_id} className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-4">
+              <div className="flex items-start justify-between mb-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">
+                    {a.account_name} <span className="text-slate-500 dark:text-slate-400 font-normal">· {a.broker}</span>
+                    {a.is_demo && <span className="ml-2 text-[10px] uppercase tracking-wider font-extrabold text-amber-600 dark:text-amber-400">sandbox</span>}
+                  </div>
+                </div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold whitespace-nowrap">{modelLabel}</div>
+              </div>
+
+              <div className={`text-base md:text-lg font-extrabold tabular-nums ${summaryClass}`}>
+                {s.summary || '—'}
+              </div>
+
+              {cappedNames.length > 0 && (
+                <div className="text-xs text-amber-600 dark:text-amber-400 mt-1.5 font-semibold">Capped by: {cappedNames.join(', ')}</div>
+              )}
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Equity used</div>
+                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.account_equity_used || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Buying power</div>
+                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.buying_power_used || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Risk target</div>
+                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.risk_dollars_target || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Risk/share</div>
+                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.risk_per_share || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function PortfolioHeader({ data }: { data: any }) {
   if (!data) return null
   const sparkData = (data.equity_curve_14d || []).map((p: any) => p.pnl).reduce((acc: number[], v: number) => {
@@ -329,9 +469,19 @@ function PortfolioHeader({ data }: { data: any }) {
     <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950 dark:from-slate-950 dark:via-slate-950 dark:to-violet-950 text-white p-6 md:p-8 shadow-xl">
       <div className="flex items-center justify-between mb-5">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">Portfolio · Live</div>
-          <div className="text-3xl md:text-4xl font-extrabold tabular-nums">{fmtUsd(data.total_equity)}</div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">Equity · Net Liquidation Value</div>
+          <div className="text-3xl md:text-4xl font-extrabold tabular-nums" title="Cash + market value of open positions. Pulled from your broker (cached).">{fmtUsd(data.total_equity)}</div>
           <div className="text-xs text-slate-400 mt-1">{data.accounts_count} broker {data.accounts_count === 1 ? 'account' : 'accounts'} linked · {data.healthy_accounts} healthy</div>
+          {data.reconciliation && (
+            <div className="text-[10px] text-slate-400 mt-2 leading-snug" title={data.reconciliation.notes}>
+              start <span className="font-semibold text-slate-300">{fmtUsd(data.reconciliation.starting_equity, 0)}</span>
+              {' · realized YTD '}<span className={`font-semibold ${pnlColor(data.reconciliation.realized_ytd_net)}`}>{pnlSign(data.reconciliation.realized_ytd_net)}{fmtUsd(Math.abs(data.reconciliation.realized_ytd_net), 0)}</span>
+              {' · open '}<span className={`font-semibold ${pnlColor(data.reconciliation.unrealized_open)}`}>{pnlSign(data.reconciliation.unrealized_open)}{fmtUsd(Math.abs(data.reconciliation.unrealized_open), 0)}</span>
+              {Math.abs(data.reconciliation.unexplained_gap) >= 0.5 && (
+                <>{' · '}<span className="font-semibold text-amber-400" title="Equity change not explained by realized + open. Usually broker-side closes not in our trades table (e.g. flatten_all), un-recorded fees, or slippage vs recorded fills.">gap {pnlSign(data.reconciliation.unexplained_gap)}{fmtUsd(Math.abs(data.reconciliation.unexplained_gap), 0)}</span></>
+              )}
+            </div>
+          )}
         </div>
         <div className="text-right">
           <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">Today P&L (realized + open)</div>
@@ -375,8 +525,14 @@ function PortfolioHeader({ data }: { data: any }) {
           <div className={`text-lg font-bold tabular-nums ${pnlColor(data.month_pnl)}`}>{pnlSign(data.month_pnl)}{fmtUsd(data.month_pnl, 0)}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">YTD</div>
-          <div className={`text-lg font-bold tabular-nums ${pnlColor(data.ytd_pnl)}`}>{pnlSign(data.ytd_pnl)}{fmtUsd(data.ytd_pnl, 0)}</div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">YTD (realized + open)</div>
+          <div className={`text-lg font-bold tabular-nums ${pnlColor((data.ytd_pnl || 0) + (data.total_unrealized_pnl || 0))}`}>{pnlSign((data.ytd_pnl || 0) + (data.total_unrealized_pnl || 0))}{fmtUsd(Math.abs((data.ytd_pnl || 0) + (data.total_unrealized_pnl || 0)), 0)}</div>
+          <div className="text-[9px] text-slate-500 mt-0.5 leading-tight">
+            <span>realized {pnlSign(data.ytd_pnl)}{fmtUsd(Math.abs(data.ytd_pnl || 0), 0)}</span>
+            {data.total_unrealized_pnl !== undefined && data.total_unrealized_pnl !== 0 && (
+              <span className="ml-1">· open {pnlSign(data.total_unrealized_pnl)}{fmtUsd(Math.abs(data.total_unrealized_pnl), 0)}</span>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -583,6 +739,8 @@ export default function LiveTradingV2() {
       <OpenPositionsCard/>
 
       <PortfolioHeader data={portfolio}/>
+
+      <SizingPreviewCard/>
 
       {/* Daily Bias — futures bias for the live trader's quick context */}
       {biasData?.biases && biasData.biases.length > 0 && (

@@ -620,6 +620,24 @@ class SizingUpdate(BaseModel):
     max_position_usd: float | None = None    # hard cap on capital deployed per trade
 
 
+_starting_equity_col_checked = False
+async def _ensure_starting_equity_column(db):
+    """Idempotently ensure broker_accounts.starting_equity exists. Captured
+    once at link time so the dashboard can reconcile equity vs realized P&L."""
+    global _starting_equity_col_checked
+    if _starting_equity_col_checked:
+        return
+    try:
+        await db.execute(text(
+            "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS starting_equity DOUBLE PRECISION"
+        ))
+        await db.commit()
+        _starting_equity_col_checked = True
+    except Exception as e:
+        await db.rollback()
+        logger.warning(f"[live-trading] could not ensure starting_equity column: {e}")
+
+
 @router.get("/accounts/{account_id}/balance")
 async def get_account_balance(
     account_id: str,
@@ -667,6 +685,24 @@ async def get_account_balance(
     if account.account_type != detected_type:
         account.account_type = detected_type
     await db.commit()
+
+    # Capture starting_equity once (used by /portfolio-summary reconciliation).
+    # Tradier sandbox accounts always fund to $100k; for real accounts we
+    # capture the first observed equity at link time.
+    await _ensure_starting_equity_column(db)
+    se_row = (await db.execute(text(
+        "SELECT starting_equity FROM broker_accounts WHERE id = :id"
+    ), {"id": str(account.id)})).first()
+    if not se_row or se_row[0] is None:
+        if account.is_demo and (account.broker or "").lower() == "tradier":
+            new_se = 100_000.0
+        else:
+            new_se = float(bal.get("equity") or 0)
+        await db.execute(text(
+            "UPDATE broker_accounts SET starting_equity = :se WHERE id = :id"
+        ), {"se": new_se, "id": str(account.id)})
+        await db.commit()
+        logger.info(f"[live-trading] captured starting_equity={new_se:.2f} for account={account.id} broker={account.broker} is_demo={account.is_demo}")
 
     return {
         "equity":       bal.get("equity"),
@@ -815,6 +851,26 @@ async def get_portfolio_summary(
         ), {"uid": str(current_user.id), "since": since})
         return float(r.scalar() or 0)
 
+    async def _pnl_breakdown_since(since: datetime) -> dict:
+        """Like _pnl_since but returns gross/net/commission so the UI can
+        reconcile equity vs realized and surface fees explicitly."""
+        r = await db.execute(_t(
+            "SELECT COALESCE(SUM(pnl), 0)                       AS gross, "
+            "       COALESCE(SUM(COALESCE(net_pnl, pnl)), 0)    AS net, "
+            "       COALESCE(SUM(commission), 0)                AS commission, "
+            "       COUNT(*)                                    AS n "
+            "  FROM trades "
+            " WHERE user_id = :uid AND mode = 'live' AND status = 'closed' "
+            "   AND (exit_time >= :since OR (exit_time IS NULL AND entry_time >= :since))"
+        ), {"uid": str(current_user.id), "since": since})
+        row = r.fetchone()
+        return {
+            "gross":      float(row.gross or 0),
+            "net":        float(row.net or 0),
+            "commission": float(row.commission or 0),
+            "count":      int(row.n or 0),
+        }
+
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=now.weekday())
@@ -905,6 +961,54 @@ async def get_portfolio_summary(
     """), {"uid": str(current_user.id), "since": now - timedelta(days=14)})
     curve = [{"d": r[0].date().isoformat() if r[0] else None, "pnl": float(r[1] or 0)} for r in curve_rows.fetchall()]
 
+    # === RECONCILIATION ===
+    # Explicitly explain: starting_equity → realized_net + open_unrealized → current equity.
+    # Any non-zero unexplained_gap is almost always broker-side closes that did not write
+    # a trade row (e.g. flatten_all), un-recorded fees, slippage vs recorded entry/exit,
+    # or a stale cached_equity.
+    ytd_breakdown = await _pnl_breakdown_since(ytd_start)
+    se_rows = (await db.execute(_t(
+        "SELECT id, starting_equity FROM broker_accounts "
+        "WHERE user_id = :uid AND is_active = true"
+    ), {"uid": str(current_user.id)})).all()
+    se_map = {str(r[0]): (float(r[1]) if r[1] is not None else None) for r in se_rows}
+    starting_equity = 0.0
+    for a in rows:
+        se = se_map.get(str(a.id))
+        if se is not None:
+            starting_equity += se
+        elif a.is_demo and (a.broker or "").lower() == "tradier":
+            starting_equity += 100_000.0  # Tradier sandbox default funding
+        else:
+            starting_equity += float(a.cached_equity or 0)
+    equity_delta     = total_equity - starting_equity
+    reconciled_delta = ytd_breakdown["net"] + total_unrealized_pnl
+    unexplained_gap  = equity_delta - reconciled_delta
+    reconciliation = {
+        "starting_equity":    round(starting_equity, 2),
+        "realized_ytd_net":   round(ytd_breakdown["net"], 2),
+        "realized_ytd_gross": round(ytd_breakdown["gross"], 2),
+        "commission_ytd":     round(ytd_breakdown["commission"], 2),
+        "unrealized_open":    round(total_unrealized_pnl, 2),
+        "equity_now":         round(total_equity, 2),
+        "equity_delta":       round(equity_delta, 2),
+        "reconciled_delta":   round(reconciled_delta, 2),
+        "unexplained_gap":    round(unexplained_gap, 2),
+        "notes": (
+            "equity_delta should ~= realized_ytd_net + unrealized_open. "
+            "A non-zero unexplained_gap usually means broker-side closes that "
+            "did not write a trade row (e.g. flatten_all), un-recorded fees, "
+            "slippage between recorded entry/exit and actual broker fill, "
+            "or a stale cached_equity."
+        ),
+    }
+    logger.info(
+        f"[portfolio] user={current_user.email} "
+        f"eq={total_equity:.2f} start={starting_equity:.2f} "
+        f"rlz_net_ytd={ytd_breakdown['net']:.2f} unrlz={total_unrealized_pnl:.2f} "
+        f"delta={equity_delta:.2f} gap={unexplained_gap:.2f}"
+    )
+
     return {
         "total_equity":        total_equity,
         "total_buying_power":  total_buying_power,
@@ -916,6 +1020,7 @@ async def get_portfolio_summary(
         "month_pnl":           month_pnl,
         "ytd_pnl":             ytd_pnl,
         "ytd_total_pnl":       round(ytd_pnl + total_unrealized_pnl, 2),
+        "reconciliation":      reconciliation,
         "open_positions_count": open_positions_count,
         "accounts_count":      len(rows),
         "healthy_accounts":    healthy,
@@ -1091,4 +1196,208 @@ async def get_unrealized_pnl(
         "open_count": len(positions),
         "total_unrealized": round(total, 2),
         "positions": positions,
+    }
+
+
+# ── position sizing preview ──────────────────────────────────────────
+def compute_stock_position_size(
+    *,
+    entry_price: float,
+    stop_loss: float,
+    account_equity: float | None,
+    buying_power: float | None,
+    account_type: str | None,
+    risk_per_trade_usd: float | None,
+    risk_per_trade_pct: float | None,
+    max_position_usd: float | None,
+) -> dict:
+    """Compute how many shares to buy given entry/stop and account-level risk
+    settings. Pure function — no DB, no I/O. Used by the /sizing-preview
+    endpoint and unit-tested in backend/tests/test_position_sizing.py.
+
+    Returns a dict whose `summary` field contains the literal placeholder
+    `{TICKER}` so the caller substitutes the symbol.
+    """
+    # Coerce None equity/BP to 0 so downstream math doesn't blow up.
+    eq = float(account_equity) if account_equity is not None else 0.0
+    bp = float(buying_power) if buying_power is not None else 0.0
+    acct_type = (account_type or "cash").lower()
+
+    # Edge: bad entry price.
+    if entry_price is None or entry_price <= 0:
+        return {
+            "error": "entry_price must be > 0",
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "final_shares": 0,
+            "summary": "Invalid entry price.",
+        }
+
+    # Edge: entry == stop → undefined position size.
+    risk_per_share = abs(float(entry_price) - float(stop_loss))
+    if risk_per_share == 0:
+        return {
+            "error": "entry and stop_loss are equal — risk-per-share is zero",
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "risk_per_share": 0.0,
+            "final_shares": 0,
+            "summary": "Entry and stop are equal — define a stop to size the trade.",
+        }
+
+    # Pick risk model: explicit USD wins over %, else default to 1%.
+    if risk_per_trade_usd is not None and float(risk_per_trade_usd) > 0:
+        risk_model = "usd"
+        risk_dollars_target = float(risk_per_trade_usd)
+    elif risk_per_trade_pct is not None and float(risk_per_trade_pct) > 0:
+        risk_model = "pct"
+        risk_dollars_target = eq * (float(risk_per_trade_pct) / 100.0)
+    else:
+        risk_model = "default_pct_1"
+        risk_dollars_target = eq * 0.01
+
+    raw_shares = int(risk_dollars_target // risk_per_share)
+    raw_notional = raw_shares * float(entry_price)
+
+    # Constraints: max_position_usd then buying_power. Both are applied if
+    # they'd reduce share count; we report each one's would-cap and whether
+    # it was the binding constraint.
+    constraints: list[dict] = []
+
+    if max_position_usd is not None and float(max_position_usd) > 0:
+        mp_cap_shares = int(float(max_position_usd) // float(entry_price))
+    else:
+        mp_cap_shares = None
+    constraints.append({
+        "name": "max_position_usd",
+        "limit_usd": float(max_position_usd) if max_position_usd is not None else None,
+        "would_cap_shares_at": mp_cap_shares,
+        "applied": False,
+    })
+
+    bp_cap_shares = int(bp // float(entry_price)) if bp > 0 else 0
+    constraints.append({
+        "name": "buying_power",
+        "limit_usd": bp,
+        "would_cap_shares_at": bp_cap_shares,
+        "applied": False,
+    })
+
+    final_shares = raw_shares
+    if mp_cap_shares is not None and mp_cap_shares < final_shares:
+        final_shares = mp_cap_shares
+        constraints[0]["applied"] = True
+    if bp_cap_shares < final_shares:
+        final_shares = bp_cap_shares
+        constraints[1]["applied"] = True
+    # If max_position_usd already capped us and buying_power matches that cap
+    # exactly, treat buying_power as not the binding constraint (max_position
+    # already did the work). Only mark applied if it strictly reduced shares.
+
+    if final_shares < 0:
+        final_shares = 0
+
+    final_notional = final_shares * float(entry_price)
+    actual_dollar_risk = final_shares * risk_per_share
+
+    if final_shares == 0:
+        # Build a brief reason from whichever constraint zeroed us out.
+        reasons = []
+        if mp_cap_shares is not None and mp_cap_shares == 0:
+            reasons.append(f"max_position_usd=${float(max_position_usd):,.0f}")
+        if bp_cap_shares == 0:
+            reasons.append(f"buying_power=${bp:,.0f}")
+        if raw_shares == 0:
+            reasons.append(
+                f"risk target ${risk_dollars_target:,.2f} < risk/share ${risk_per_share:,.2f}"
+            )
+        reason_str = "; ".join(reasons) if reasons else "constraints zeroed position"
+        summary = f"Cannot size a position: {reason_str}."
+    else:
+        plural = "s" if final_shares != 1 else ""
+        summary = (
+            f"Buy {final_shares} share{plural} of {{TICKER}} "
+            f"(~${final_notional:,.2f} total). "
+            f"Risk: ${actual_dollar_risk:,.2f} if stop hits at ${float(stop_loss):.2f}."
+        )
+
+    return {
+        "entry_price": float(entry_price),
+        "stop_loss": float(stop_loss),
+        "risk_per_share": float(risk_per_share),
+        "risk_model": risk_model,
+        "risk_per_trade_usd": float(risk_per_trade_usd) if risk_per_trade_usd is not None else None,
+        "risk_per_trade_pct": float(risk_per_trade_pct) if risk_per_trade_pct is not None else None,
+        "max_position_usd": float(max_position_usd) if max_position_usd is not None else None,
+        "account_equity_used": eq,
+        "buying_power_used": bp,
+        "account_type": acct_type,
+        "risk_dollars_target": float(risk_dollars_target),
+        "raw_shares": int(raw_shares),
+        "raw_notional": float(raw_notional),
+        "constraints": constraints,
+        "final_shares": int(final_shares),
+        "final_notional": float(final_notional),
+        "actual_dollar_risk": float(actual_dollar_risk),
+        "summary": summary,
+    }
+
+
+@router.get("/sizing-preview")
+async def sizing_preview(
+    ticker: str,
+    entry: float,
+    stop: float,
+    current_user: User = Depends(require_kyc_verified),
+    db: AsyncSession = Depends(get_db),
+):
+    """For a hypothetical trade signal at (entry, stop) on `ticker`, show
+    *exactly* what each of the user's active broker accounts would buy.
+
+    Pulls per-account risk settings + cached balance from broker_accounts.
+    Does NOT place any orders.
+    """
+    from loguru import logger  # already used elsewhere in this module
+    sym = (ticker or "").strip().upper()
+
+    accts_res = await db.execute(
+        select(BrokerAccount).where(
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.is_active == True,  # noqa: E712
+        )
+    )
+    accts = list(accts_res.scalars().all())
+
+    logger.info(
+        f"[sizing-preview] user={current_user.email} ticker={sym} "
+        f"entry={entry} stop={stop} accounts={len(accts)}"
+    )
+
+    per_account = []
+    for a in accts:
+        sizing = compute_stock_position_size(
+            entry_price=float(entry),
+            stop_loss=float(stop),
+            account_equity=a.cached_equity,
+            buying_power=a.cached_buying_power,
+            account_type=a.account_type,
+            risk_per_trade_usd=a.risk_per_trade_usd,
+            risk_per_trade_pct=a.risk_per_trade_pct,
+            max_position_usd=a.max_position_usd,
+        )
+        # Caller substitutes the symbol into the summary placeholder.
+        sizing["summary"] = sizing["summary"].replace("{TICKER}", sym)
+        per_account.append({
+            "broker_account_id": str(a.id),
+            "broker": a.broker,
+            "account_name": a.account_name,
+            "is_demo": bool(a.is_demo),
+            "sizing": sizing,
+        })
+
+    return {
+        "ticker": sym,
+        "entry": float(entry),
+        "stop": float(stop),
+        "per_account": per_account,
     }
