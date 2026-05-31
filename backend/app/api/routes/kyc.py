@@ -112,12 +112,41 @@ async def kyc_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return the user's KYC verification status."""
+    """Return the user's KYC verification status.
+
+    Opportunistic safety net: if the user is currently 'pending' AND we have a
+    Stripe session id, pull the authoritative status from Stripe before
+    responding. This self-heals the (real, observed) case where Stripe sent us
+    a verified webhook but our handler crashed before persisting.
+    """
+    cur_status = getattr(current_user, "kyc_status", None) or "not_started"
+    session_id = getattr(current_user, "kyc_session_id", None)
+    verification_url: str | None = None
+    if cur_status == "pending" and session_id:
+        try:
+            synced = await sync_kyc_status_from_stripe(
+                db, user_id=str(current_user.id), session_id=session_id
+            )
+            if synced is not None:
+                await db.refresh(current_user)
+                cur_status = getattr(current_user, "kyc_status", None) or cur_status
+        except Exception as _e:
+            logger.warning(f"[kyc-status] opportunistic sync failed: {_e}")
+    if cur_status == "requires_input" and session_id:
+        try:
+            import stripe as _stripe
+            if STRIPE_IDENTITY_KEY:
+                _stripe.api_key = STRIPE_IDENTITY_KEY
+                _vs = _stripe.identity.VerificationSession.retrieve(session_id)
+                verification_url = getattr(_vs, "url", None)
+        except Exception as _e:
+            logger.debug(f"[kyc-status] could not fetch verification_url: {_e}")
     return {
-        "status": getattr(current_user, "kyc_status", None) or "not_started",
+        "status": cur_status,
         "verified_at": current_user.kyc_verified_at.isoformat() if getattr(current_user, "kyc_verified_at", None) else None,
         "provider": getattr(current_user, "kyc_provider", None),
         "country": getattr(current_user, "country_code", None),
+        "verification_url": verification_url,
     }
 
 
@@ -258,43 +287,97 @@ async def kyc_start(
 
 @router.post("/webhook")
 async def kyc_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    """Stripe Identity webhook receiver. Verify signature, then update user."""
-    if not STRIPE_IDENTITY_KEY:
-        return {"status": "stub"}
+    """Stripe Identity webhook receiver.
+
+    Stripe Python SDK v8+ returns event["data"]["object"] as a StripeObject,
+    not a plain dict. Calling .get() on it raises AttributeError via the
+    StripeObject.__getattr__ shim. This previously caused every webhook to
+    500, which left real users stuck at 'pending' forever even after Stripe
+    verified them. We now convert StripeObject -> dict via to_dict_recursive()
+    before any field access.
+    """
     body = await request.body()
     sig = request.headers.get("stripe-signature", "")
     webhook_secret = os.environ.get("STRIPE_IDENTITY_WEBHOOK_SECRET", "")
+    logger.info(
+        f"[kyc-webhook] received bytes={len(body)} sig_present={bool(sig)} "
+        f"secret_configured={bool(webhook_secret)}"
+    )
+    if not STRIPE_IDENTITY_KEY:
+        return {"status": "stub"}
     if not webhook_secret:
         raise HTTPException(status_code=503, detail="Webhook secret not configured.")
+
     try:
         import stripe
-        event = stripe.Webhook.construct_event(body, sig, webhook_secret)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid signature.")
+        try:
+            event = stripe.Webhook.construct_event(body, sig, webhook_secret)
+        except stripe.error.SignatureVerificationError as e:
+            logger.warning(f"[kyc-webhook] signature verification failed: {e}")
+            raise HTTPException(status_code=400, detail="Invalid signature.")
+        except Exception as e:
+            logger.error(f"[kyc-webhook] construct_event failed: {e}")
+            raise HTTPException(status_code=400, detail="Could not parse event.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[kyc-webhook] stripe import / setup failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal webhook error.")
 
-    obj = event["data"]["object"]
+    # Pull event_type from either StripeObject attr or dict key
+    event_type = getattr(event, "type", None) or (event.get("type") if isinstance(event, dict) else None)
+
+    # Extract the inner object. event.data.object is a StripeObject on SDK v8+
+    raw_obj = None
+    try:
+        if hasattr(event, "data") and getattr(event, "data", None) is not None:
+            raw_obj = event.data.object if hasattr(event.data, "object") else None
+        if raw_obj is None and isinstance(event, dict):
+            raw_obj = (event.get("data") or {}).get("object")
+    except Exception as e:
+        logger.warning(f"[kyc-webhook] could not access event.data.object: {e}")
+        raw_obj = None
+
+    # Convert to a plain dict — THIS is the line that fixes the production bug.
+    if raw_obj is None:
+        obj: dict = {}
+    elif hasattr(raw_obj, "to_dict_recursive"):
+        try:
+            obj = raw_obj.to_dict_recursive()
+        except Exception as e:
+            logger.warning(f"[kyc-webhook] to_dict_recursive failed: {e}")
+            obj = {}
+    elif isinstance(raw_obj, dict):
+        obj = raw_obj
+    else:
+        try:
+            obj = dict(raw_obj)
+        except Exception:
+            obj = {}
+
     session_id = obj.get("id")
-    user_id = (obj.get("metadata") or {}).get("user_id")
-    event_type = event.get("type")
+    metadata = obj.get("metadata") or {}
+    user_id = metadata.get("user_id")
+    logger.info(
+        f"[kyc-webhook] event_type={event_type} session={session_id} user={user_id}"
+    )
 
     if event_type == "identity.verification_session.verified":
-        # Cross-check: the document's country MUST be US.
-        # Stripe returns verified_outputs.address.country once the ID has been validated.
+        # Cross-check: the document's country MUST be US. Stripe returns
+        # verified_outputs.address.country once the ID has been validated.
         doc_country = None
         try:
             verified = obj.get("verified_outputs") or {}
             doc_country = ((verified.get("address") or {}).get("country") or "").upper() or None
-            # Stripe sometimes returns the issuing-country in dob document fields instead
             if not doc_country:
                 doc_country = ((verified.get("id_number") or {}).get("country") or "").upper() or None
         except Exception:
             doc_country = None
 
         if doc_country and doc_country != "US":
-            # User passed Stripe verification but the document is from a different country.
-            # Mark as failed + log it loudly.
             await db.execute(text(
-                "UPDATE users SET kyc_status='failed' WHERE id = :uid AND kyc_session_id = :sid"
+                "UPDATE users SET kyc_status='failed' "
+                "WHERE id = :uid AND kyc_session_id = :sid AND kyc_status NOT IN ('verified')"
             ), {"uid": user_id, "sid": session_id})
             await db.commit()
             try:
@@ -303,38 +386,203 @@ async def kyc_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     session_id=session_id, country=doc_country,
                     detail=f"Stripe verified user but document country is {doc_country}, not US — rejected")
             except Exception: pass
-            logger.warning(f"[kyc] REJECTED user={user_id} session={session_id} doc_country={doc_country} (non-US)")
+            logger.warning(f"[kyc-webhook] REJECTED user={user_id} session={session_id} doc_country={doc_country} (non-US)")
         else:
             await db.execute(text(
-                "UPDATE users SET kyc_status='verified', kyc_verified_at=NOW(), country_code='US' "
+                "UPDATE users SET kyc_status='verified', "
+                "  kyc_verified_at=COALESCE(kyc_verified_at, NOW()), "
+                "  country_code='US' "
                 "WHERE id = :uid AND kyc_session_id = :sid"
             ), {"uid": user_id, "sid": session_id})
             await db.commit()
-            logger.info(f"[kyc] verified user={user_id} session={session_id} doc_country={doc_country or 'unknown'}")
+            try:
+                await _log_kyc_event(db, user_id=user_id or "", user_email=None,
+                    event_type="webhook", status="verified", provider="stripe_identity",
+                    session_id=session_id, country=doc_country or "US",
+                    detail=event_type)
+            except Exception: pass
+            logger.info(f"[kyc-webhook] verified user={user_id} session={session_id} doc_country={doc_country or 'unknown'}")
+
     elif event_type == "identity.verification_session.requires_input":
         await db.execute(text(
             "UPDATE users SET kyc_status='requires_input' "
-            "WHERE id = :uid AND kyc_session_id = :sid"
+            "WHERE id = :uid AND kyc_session_id = :sid AND kyc_status NOT IN ('verified')"
         ), {"uid": user_id, "sid": session_id})
         await db.commit()
+        try:
+            await _log_kyc_event(db, user_id=user_id or "", user_email=None,
+                event_type="webhook", status="requires_input", provider="stripe_identity",
+                session_id=session_id, detail=event_type)
+        except Exception: pass
+
     elif event_type == "identity.verification_session.canceled":
         await db.execute(text(
             "UPDATE users SET kyc_status='failed' "
-            "WHERE id = :uid AND kyc_session_id = :sid"
+            "WHERE id = :uid AND kyc_session_id = :sid AND kyc_status NOT IN ('verified')"
         ), {"uid": user_id, "sid": session_id})
         await db.commit()
+        try:
+            await _log_kyc_event(db, user_id=user_id or "", user_email=None,
+                event_type="webhook", status="failed", provider="stripe_identity",
+                session_id=session_id, detail=event_type)
+        except Exception: pass
 
-    # Audit log every webhook event we recognized
-    if event_type in ("identity.verification_session.verified",
-                       "identity.verification_session.requires_input",
-                       "identity.verification_session.canceled"):
-        status_label = {"identity.verification_session.verified": "verified",
-                        "identity.verification_session.requires_input": "requires_input",
-                        "identity.verification_session.canceled": "failed"}[event_type]
-        await _log_kyc_event(db, user_id=user_id or "", user_email=None,
-            event_type="webhook", status=status_label, provider="stripe_identity",
-            session_id=session_id, detail=event_type)
-    return {"status": "ok"}
+    elif event_type == "identity.verification_session.processing":
+        # Stripe is still working on it — keep us at pending. Audit only.
+        await db.execute(text(
+            "UPDATE users SET kyc_status='pending' "
+            "WHERE id = :uid AND kyc_session_id = :sid AND kyc_status NOT IN ('verified')"
+        ), {"uid": user_id, "sid": session_id})
+        await db.commit()
+        try:
+            await _log_kyc_event(db, user_id=user_id or "", user_email=None,
+                event_type="webhook", status="pending", provider="stripe_identity",
+                session_id=session_id, detail=event_type)
+        except Exception: pass
+
+    elif event_type == "identity.verification_session.created":
+        # Idempotent — we already created this session on our side. Audit only.
+        try:
+            await _log_kyc_event(db, user_id=user_id or "", user_email=None,
+                event_type="webhook", status="created", provider="stripe_identity",
+                session_id=session_id, detail=event_type)
+        except Exception: pass
+
+    elif event_type == "identity.verification_session.redacted":
+        # Stripe redacted PII per retention policy — we keep our internal status.
+        # If they were verified, they stay verified. Audit only.
+        try:
+            await _log_kyc_event(db, user_id=user_id or "", user_email=None,
+                event_type="webhook", status="redacted", provider="stripe_identity",
+                session_id=session_id, detail=event_type)
+        except Exception: pass
+
+    else:
+        logger.info(f"[kyc-webhook] unhandled event_type={event_type} session={session_id}")
+
+    # Always ACK so Stripe doesn't retry forever on event types we don't action.
+    return {"status": "ok", "event_type": event_type, "session_id": session_id}
+
+
+# --- kyc patch v2 (StripeObject-safe webhook + sync helper + admin force-sync) ---
+# --- Stripe-side status sync helper + admin force-sync endpoint ---
+# Webhook-loss safety net: pull authoritative status from Stripe and reconcile
+# the local row. Used opportunistically by GET /status for pending users, and
+# explicitly by the admin force-sync endpoint for bulk recovery.
+
+_STRIPE_TO_INTERNAL = {
+    "verified": "verified",
+    "requires_input": "requires_input",
+    "canceled": "failed",
+    "processing": "pending",
+    "redacted": "verified",  # preserve verified history when PII is purged
+}
+
+
+async def sync_kyc_status_from_stripe(db, user_id: str, session_id: str) -> str | None:
+    """Authoritative pull from Stripe. Returns the (possibly updated) internal
+    status, or None if Stripe is unreachable / not configured. Safe to call on
+    every /status request for pending users — Stripe Identity reads are cheap."""
+    if not STRIPE_IDENTITY_KEY or not session_id:
+        return None
+    try:
+        import stripe
+        stripe.api_key = STRIPE_IDENTITY_KEY
+        vs = stripe.identity.VerificationSession.retrieve(session_id)
+    except Exception as e:
+        logger.warning(f"[kyc-sync] stripe retrieve failed user={user_id} session={session_id}: {e}")
+        return None
+
+    stripe_status = getattr(vs, "status", None) or (vs.get("status") if hasattr(vs, "get") else None)
+    internal = _STRIPE_TO_INTERNAL.get(stripe_status)
+    if internal is None:
+        logger.warning(f"[kyc-sync] unknown stripe_status={stripe_status} user={user_id} session={session_id}")
+        return None
+
+    # Country cross-check for verified (consistent with webhook logic)
+    doc_country = None
+    try:
+        vo = getattr(vs, "verified_outputs", None)
+        if vo is None and hasattr(vs, "get"):
+            vo = vs.get("verified_outputs")
+        if vo is not None:
+            if hasattr(vo, "to_dict_recursive"):
+                vo = vo.to_dict_recursive()
+            elif not isinstance(vo, dict):
+                try: vo = dict(vo)
+                except Exception: vo = {}
+            doc_country = ((vo.get("address") or {}).get("country") or "").upper() or None
+            if not doc_country:
+                doc_country = ((vo.get("id_number") or {}).get("country") or "").upper() or None
+    except Exception:
+        doc_country = None
+
+    if internal == "verified" and doc_country and doc_country != "US":
+        internal = "failed"
+
+    # Idempotent UPDATE: never downgrade verified; only set kyc_verified_at if NULL.
+    if internal == "verified":
+        await db.execute(text(
+            "UPDATE users SET kyc_status='verified', "
+            "  kyc_verified_at=COALESCE(kyc_verified_at, NOW()), "
+            "  country_code='US' "
+            "WHERE id = :uid"
+        ), {"uid": user_id})
+    else:
+        await db.execute(text(
+            "UPDATE users SET kyc_status=:st "
+            "WHERE id = :uid AND kyc_status NOT IN ('verified')"
+        ), {"uid": user_id, "st": internal})
+    await db.commit()
+    try:
+        await _log_kyc_event(db, user_id=user_id, user_email=None,
+            event_type="sync", status=internal, provider="stripe_identity",
+            session_id=session_id, country=doc_country,
+            detail=f"stripe={stripe_status} -> internal={internal}")
+    except Exception: pass
+    logger.info(f"[kyc-sync] user={user_id} session={session_id} stripe={stripe_status} -> internal={internal}")
+    return internal
+
+
+@router.post("/admin/force-sync")
+async def admin_force_sync_kyc(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only: bulk-reconcile every pending user that has a Stripe session.
+    Used to recover from past webhook delivery failures. Returns one row per
+    user with before/after status so the admin can verify the sweep."""
+    if not getattr(current_user, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    logger.warning(f"[kyc-force-sync] admin={current_user.email} triggered bulk reconciliation")
+    rows = (await db.execute(text(
+        "SELECT id::text AS id, email, kyc_status, kyc_session_id "
+        "FROM users "
+        "WHERE kyc_status = 'pending' AND kyc_session_id IS NOT NULL"
+    ))).mappings().all()
+
+    results = []
+    for r in rows:
+        before = r["kyc_status"]
+        after = None
+        try:
+            after = await sync_kyc_status_from_stripe(
+                db, user_id=str(r["id"]), session_id=r["kyc_session_id"]
+            )
+        except Exception as e:
+            logger.error(f"[kyc-force-sync] user={r['email']} failed: {e}")
+        results.append({
+            "email": r["email"],
+            "session_id": r["kyc_session_id"],
+            "before": before,
+            "after": after or before,
+        })
+    logger.warning(
+        f"[kyc-force-sync] swept {len(results)} pending users; "
+        f"transitions={sum(1 for x in results if x['before'] != x['after'])}"
+    )
+    return {"swept": len(results), "results": results}
+
 
 
 async def require_kyc_verified(
