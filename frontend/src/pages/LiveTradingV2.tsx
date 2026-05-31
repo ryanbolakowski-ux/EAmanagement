@@ -328,9 +328,19 @@ function PortfolioHeader({ data }: { data: any }) {
     <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950 dark:from-slate-950 dark:via-slate-950 dark:to-violet-950 text-white p-6 md:p-8 shadow-xl">
       <div className="flex items-center justify-between mb-5">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">Portfolio · Live</div>
-          <div className="text-3xl md:text-4xl font-extrabold tabular-nums">{fmtUsd(data.total_equity)}</div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">Equity · Net Liquidation Value</div>
+          <div className="text-3xl md:text-4xl font-extrabold tabular-nums" title="Cash + market value of open positions. Pulled from your broker (cached).">{fmtUsd(data.total_equity)}</div>
           <div className="text-xs text-slate-400 mt-1">{data.accounts_count} broker {data.accounts_count === 1 ? 'account' : 'accounts'} linked · {data.healthy_accounts} healthy</div>
+          {data.reconciliation && (
+            <div className="text-[10px] text-slate-400 mt-2 leading-snug" title={data.reconciliation.notes}>
+              start <span className="font-semibold text-slate-300">{fmtUsd(data.reconciliation.starting_equity, 0)}</span>
+              {' · realized YTD '}<span className={`font-semibold ${pnlColor(data.reconciliation.realized_ytd_net)}`}>{pnlSign(data.reconciliation.realized_ytd_net)}{fmtUsd(Math.abs(data.reconciliation.realized_ytd_net), 0)}</span>
+              {' · open '}<span className={`font-semibold ${pnlColor(data.reconciliation.unrealized_open)}`}>{pnlSign(data.reconciliation.unrealized_open)}{fmtUsd(Math.abs(data.reconciliation.unrealized_open), 0)}</span>
+              {Math.abs(data.reconciliation.unexplained_gap) >= 0.5 && (
+                <>{' · '}<span className="font-semibold text-amber-400" title="Equity change not explained by realized + open. Usually broker-side closes not in our trades table (e.g. flatten_all), un-recorded fees, or slippage vs recorded fills.">gap {pnlSign(data.reconciliation.unexplained_gap)}{fmtUsd(Math.abs(data.reconciliation.unexplained_gap), 0)}</span></>
+              )}
+            </div>
+          )}
         </div>
         <div className="text-right">
           <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">Today P&L (realized + open)</div>
@@ -374,8 +384,14 @@ function PortfolioHeader({ data }: { data: any }) {
           <div className={`text-lg font-bold tabular-nums ${pnlColor(data.month_pnl)}`}>{pnlSign(data.month_pnl)}{fmtUsd(data.month_pnl, 0)}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">YTD</div>
-          <div className={`text-lg font-bold tabular-nums ${pnlColor(data.ytd_pnl)}`}>{pnlSign(data.ytd_pnl)}{fmtUsd(data.ytd_pnl, 0)}</div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">YTD (realized + open)</div>
+          <div className={`text-lg font-bold tabular-nums ${pnlColor((data.ytd_pnl || 0) + (data.total_unrealized_pnl || 0))}`}>{pnlSign((data.ytd_pnl || 0) + (data.total_unrealized_pnl || 0))}{fmtUsd(Math.abs((data.ytd_pnl || 0) + (data.total_unrealized_pnl || 0)), 0)}</div>
+          <div className="text-[9px] text-slate-500 mt-0.5 leading-tight">
+            <span>realized {pnlSign(data.ytd_pnl)}{fmtUsd(Math.abs(data.ytd_pnl || 0), 0)}</span>
+            {data.total_unrealized_pnl !== undefined && data.total_unrealized_pnl !== 0 && (
+              <span className="ml-1">· open {pnlSign(data.total_unrealized_pnl)}{fmtUsd(Math.abs(data.total_unrealized_pnl), 0)}</span>
+            )}
+          </div>
         </div>
       </div>
     </div>

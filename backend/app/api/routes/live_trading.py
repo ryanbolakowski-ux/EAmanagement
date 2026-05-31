@@ -564,6 +564,24 @@ class SizingUpdate(BaseModel):
     max_position_usd: float | None = None    # hard cap on capital deployed per trade
 
 
+_starting_equity_col_checked = False
+async def _ensure_starting_equity_column(db):
+    """Idempotently ensure broker_accounts.starting_equity exists. Captured
+    once at link time so the dashboard can reconcile equity vs realized P&L."""
+    global _starting_equity_col_checked
+    if _starting_equity_col_checked:
+        return
+    try:
+        await db.execute(text(
+            "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS starting_equity DOUBLE PRECISION"
+        ))
+        await db.commit()
+        _starting_equity_col_checked = True
+    except Exception as e:
+        await db.rollback()
+        logger.warning(f"[live-trading] could not ensure starting_equity column: {e}")
+
+
 @router.get("/accounts/{account_id}/balance")
 async def get_account_balance(
     account_id: str,
@@ -611,6 +629,24 @@ async def get_account_balance(
     if account.account_type != detected_type:
         account.account_type = detected_type
     await db.commit()
+
+    # Capture starting_equity once (used by /portfolio-summary reconciliation).
+    # Tradier sandbox accounts always fund to $100k; for real accounts we
+    # capture the first observed equity at link time.
+    await _ensure_starting_equity_column(db)
+    se_row = (await db.execute(text(
+        "SELECT starting_equity FROM broker_accounts WHERE id = :id"
+    ), {"id": str(account.id)})).first()
+    if not se_row or se_row[0] is None:
+        if account.is_demo and (account.broker or "").lower() == "tradier":
+            new_se = 100_000.0
+        else:
+            new_se = float(bal.get("equity") or 0)
+        await db.execute(text(
+            "UPDATE broker_accounts SET starting_equity = :se WHERE id = :id"
+        ), {"se": new_se, "id": str(account.id)})
+        await db.commit()
+        logger.info(f"[live-trading] captured starting_equity={new_se:.2f} for account={account.id} broker={account.broker} is_demo={account.is_demo}")
 
     return {
         "equity":       bal.get("equity"),
@@ -759,6 +795,26 @@ async def get_portfolio_summary(
         ), {"uid": str(current_user.id), "since": since})
         return float(r.scalar() or 0)
 
+    async def _pnl_breakdown_since(since: datetime) -> dict:
+        """Like _pnl_since but returns gross/net/commission so the UI can
+        reconcile equity vs realized and surface fees explicitly."""
+        r = await db.execute(_t(
+            "SELECT COALESCE(SUM(pnl), 0)                       AS gross, "
+            "       COALESCE(SUM(COALESCE(net_pnl, pnl)), 0)    AS net, "
+            "       COALESCE(SUM(commission), 0)                AS commission, "
+            "       COUNT(*)                                    AS n "
+            "  FROM trades "
+            " WHERE user_id = :uid AND mode = 'live' AND status = 'closed' "
+            "   AND (exit_time >= :since OR (exit_time IS NULL AND entry_time >= :since))"
+        ), {"uid": str(current_user.id), "since": since})
+        row = r.fetchone()
+        return {
+            "gross":      float(row.gross or 0),
+            "net":        float(row.net or 0),
+            "commission": float(row.commission or 0),
+            "count":      int(row.n or 0),
+        }
+
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=now.weekday())
@@ -849,6 +905,54 @@ async def get_portfolio_summary(
     """), {"uid": str(current_user.id), "since": now - timedelta(days=14)})
     curve = [{"d": r[0].date().isoformat() if r[0] else None, "pnl": float(r[1] or 0)} for r in curve_rows.fetchall()]
 
+    # === RECONCILIATION ===
+    # Explicitly explain: starting_equity → realized_net + open_unrealized → current equity.
+    # Any non-zero unexplained_gap is almost always broker-side closes that did not write
+    # a trade row (e.g. flatten_all), un-recorded fees, slippage vs recorded entry/exit,
+    # or a stale cached_equity.
+    ytd_breakdown = await _pnl_breakdown_since(ytd_start)
+    se_rows = (await db.execute(_t(
+        "SELECT id, starting_equity FROM broker_accounts "
+        "WHERE user_id = :uid AND is_active = true"
+    ), {"uid": str(current_user.id)})).all()
+    se_map = {str(r[0]): (float(r[1]) if r[1] is not None else None) for r in se_rows}
+    starting_equity = 0.0
+    for a in rows:
+        se = se_map.get(str(a.id))
+        if se is not None:
+            starting_equity += se
+        elif a.is_demo and (a.broker or "").lower() == "tradier":
+            starting_equity += 100_000.0  # Tradier sandbox default funding
+        else:
+            starting_equity += float(a.cached_equity or 0)
+    equity_delta     = total_equity - starting_equity
+    reconciled_delta = ytd_breakdown["net"] + total_unrealized_pnl
+    unexplained_gap  = equity_delta - reconciled_delta
+    reconciliation = {
+        "starting_equity":    round(starting_equity, 2),
+        "realized_ytd_net":   round(ytd_breakdown["net"], 2),
+        "realized_ytd_gross": round(ytd_breakdown["gross"], 2),
+        "commission_ytd":     round(ytd_breakdown["commission"], 2),
+        "unrealized_open":    round(total_unrealized_pnl, 2),
+        "equity_now":         round(total_equity, 2),
+        "equity_delta":       round(equity_delta, 2),
+        "reconciled_delta":   round(reconciled_delta, 2),
+        "unexplained_gap":    round(unexplained_gap, 2),
+        "notes": (
+            "equity_delta should ~= realized_ytd_net + unrealized_open. "
+            "A non-zero unexplained_gap usually means broker-side closes that "
+            "did not write a trade row (e.g. flatten_all), un-recorded fees, "
+            "slippage between recorded entry/exit and actual broker fill, "
+            "or a stale cached_equity."
+        ),
+    }
+    logger.info(
+        f"[portfolio] user={current_user.email} "
+        f"eq={total_equity:.2f} start={starting_equity:.2f} "
+        f"rlz_net_ytd={ytd_breakdown['net']:.2f} unrlz={total_unrealized_pnl:.2f} "
+        f"delta={equity_delta:.2f} gap={unexplained_gap:.2f}"
+    )
+
     return {
         "total_equity":        total_equity,
         "total_buying_power":  total_buying_power,
@@ -860,6 +964,7 @@ async def get_portfolio_summary(
         "month_pnl":           month_pnl,
         "ytd_pnl":             ytd_pnl,
         "ytd_total_pnl":       round(ytd_pnl + total_unrealized_pnl, 2),
+        "reconciliation":      reconciliation,
         "open_positions_count": open_positions_count,
         "accounts_count":      len(rows),
         "healthy_accounts":    healthy,
