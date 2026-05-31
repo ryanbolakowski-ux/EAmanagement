@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Bell, Mail, Smartphone, PlayCircle, ShieldCheck, Plus, AlertTriangle, Info } from 'lucide-react'
+import { Bell, Mail, Smartphone, PlayCircle, ShieldCheck, Plus, AlertTriangle, Info, ShieldAlert } from 'lucide-react'
+import { useAuthStore } from '../stores/authStore'
 import { strategiesApi, paperTradingApi } from '../api/endpoints'
 import api from '../api/client'
 import { fmtEntryTime } from '../components/TradeMetrics'
@@ -15,12 +16,42 @@ type Signal = {
   take_profit: number
   bias: string | null
   fired_at: string
-  status: 'pending' | 'sent' | 'acted' | 'expired'
+  status: 'pending' | 'sent' | 'acted' | 'expired' | 'suppressed'
+  outcome?: string | null
+  outcome_price?: number | null
+  outcome_r?: number | null
+  resolved_at?: string | null
+  // Suppressed-row diagnostics (only set on /suppressed endpoint)
+  duplicate_suppressed_at?: string | null
+  duplicate_suppressed_count?: number | null
+  error_message?: string | null
   notes?: string
+}
+
+// ── Outcome dot ────────────────────────────────────────────────────────────
+// Tiny coloured pill that surfaces the resolved outcome of a fired signal so
+// the user can scan the list at a glance: green=win, red=loss, blue-grey=
+// breakeven, amber=expired, neutral grey=still pending. Falls through to
+// neutral for any unknown/empty value so weird data never breaks the row.
+function OutcomeDot({ outcome }: { outcome: string | null | undefined }) {
+  const o = (outcome || '').toLowerCase().trim()
+  let cls = 'bg-slate-300 dark:bg-slate-600'
+  let title = 'Pending — outcome not yet resolved'
+  if (o === 'win' || o === 'tp' || o === 'tp_hit') {
+    cls = 'bg-emerald-500'; title = 'Win — hit take profit'
+  } else if (o === 'loss' || o === 'sl' || o === 'sl_hit') {
+    cls = 'bg-rose-500'; title = 'Loss — hit stop loss'
+  } else if (o === 'breakeven' || o === 'be') {
+    cls = 'bg-slate-400 dark:bg-slate-500'; title = 'Break even'
+  } else if (o === 'expired') {
+    cls = 'bg-amber-400'; title = 'Expired before TP or SL was hit'
+  }
+  return <span className={`inline-block w-2.5 h-2.5 rounded-full ${cls}`} title={title} aria-label={title} />
 }
 
 const accountSignalsApi = {
   list: () => api.get<Signal[]>('/api/v1/account-signals/'),
+  listSuppressed: () => api.get<Signal[]>('/api/v1/account-signals/suppressed'),
   startWatcher: (data: { strategy_id: string; instruments: string[]; account_label: string; channels: string[] }) =>
     api.post('/api/v1/account-signals/watchers', data),
   listWatchers: () => api.get('/api/v1/account-signals/watchers'),
@@ -360,7 +391,10 @@ function ScannerHistory() {
 
 export default function AccountSignals() {
   const qc = useQueryClient()
+  const { user } = useAuthStore()
+  const isAdmin = !!(user as any)?.is_admin
   const [showSetup, setShowSetup] = useState(false)
+  const [showSuppressed, setShowSuppressed] = useState(false)
   const [form, setForm] = useState({
     account_label: '',
     strategy_id: '',
@@ -368,7 +402,17 @@ export default function AccountSignals() {
     channels: ['email'] as string[],
   })
 
-  const { data: signals = [] }   = useQuery({ queryKey: ['account-signals'],   queryFn: () => accountSignalsApi.list().then(r => r.data),   refetchInterval: 30000 })
+  // Backend defaults to status='sent', so this is already a clean list.
+  // Belt-and-suspenders filter below in case stale clients/caches sneak in
+  // anything else.
+  const { data: rawSignals = [] } = useQuery({ queryKey: ['account-signals'],   queryFn: () => accountSignalsApi.list().then(r => r.data),   refetchInterval: 30000 })
+  const signals = (rawSignals as Signal[]).filter(s => s.status === 'sent')
+  const { data: suppressedRows = [] } = useQuery({
+    queryKey: ['account-signals-suppressed'],
+    queryFn: () => accountSignalsApi.listSuppressed().then(r => r.data),
+    enabled: isAdmin && showSuppressed,
+    refetchInterval: 60000,
+  })
   const { data: watchers = [] }  = useQuery({ queryKey: ['signal-watchers'],   queryFn: () => accountSignalsApi.listWatchers().then(r => r.data) })
   const { data: strategies = [] }= useQuery({ queryKey: ['strategies'],         queryFn: () => strategiesApi.list().then(r => r.data) })
   const { data: stats } = useQuery<{ total: number; wins: number; losses: number; expired: number; pending: number; resolved: number; win_rate: number; total_r: number; avg_r: number }>({ queryKey: ['signals-stats'], queryFn: () => api.get('/api/v1/account-signals/stats').then(r => r.data), refetchInterval: 60000 })
@@ -476,7 +520,32 @@ export default function AccountSignals() {
 
       {/* Signal feed */}
       <section>
-        <h2 className="text-sm font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-3">Recent Signals Sent</h2>
+        <div className="flex items-end justify-between mb-3 gap-3 flex-wrap">
+          <h2 className="text-sm font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Recent Signals Sent</h2>
+          <div className="text-[11px] text-slate-400 dark:text-slate-500">
+            Showing <span className="font-semibold text-slate-600 dark:text-slate-300">{signals.length}</span> sent signal{signals.length === 1 ? '' : 's'}
+            {' '}— internal suppressed records (dead-zone, session cap, duplicates) are hidden
+            {isAdmin && (
+              <>
+                {' · '}
+                <button
+                  type="button"
+                  onClick={() => setShowSuppressed(v => !v)}
+                  className="inline-flex items-center gap-1 font-semibold text-blue-600 hover:text-blue-700 underline-offset-2 hover:underline">
+                  <ShieldAlert size={11}/> {showSuppressed ? 'Hide' : 'Show'} suppressed (admin)
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+        {/* Outcome legend so the colour dots are self-explanatory */}
+        <div className="flex items-center flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-500 dark:text-slate-400 mb-3">
+          <span className="inline-flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full bg-emerald-500"/>Win (TP)</span>
+          <span className="inline-flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full bg-rose-500"/>Loss (SL)</span>
+          <span className="inline-flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full bg-slate-400 dark:bg-slate-500"/>Break even</span>
+          <span className="inline-flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full bg-amber-400"/>Expired</span>
+          <span className="inline-flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full bg-slate-300 dark:bg-slate-600"/>Pending</span>
+        </div>
         {signals.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 p-8 text-center text-sm text-slate-400 dark:text-slate-500">
             No signals yet. When a watched strategy fires a setup it'll show up here and an email goes out.
@@ -486,6 +555,7 @@ export default function AccountSignals() {
             <table className="w-full text-sm">
               <thead className="bg-slate-100 dark:bg-slate-800 text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
+                  <th className="px-3 py-2.5 text-left font-semibold w-6"></th>
                   <th className="px-3 py-2.5 text-left font-semibold">Fired</th>
                   <th className="px-3 py-2.5 text-left font-semibold">Strategy</th>
                   <th className="px-3 py-2.5 text-left font-semibold">Symbol</th>
@@ -493,12 +563,13 @@ export default function AccountSignals() {
                   <th className="px-3 py-2.5 text-left font-semibold">Entry</th>
                   <th className="px-3 py-2.5 text-left font-semibold">Stop</th>
                   <th className="px-3 py-2.5 text-left font-semibold">Target</th>
-                  <th className="px-3 py-2.5 text-left font-semibold">Status</th>
+                  <th className="px-3 py-2.5 text-left font-semibold">Outcome</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {signals.map((s: Signal) => (
                   <tr key={s.id}>
+                    <td className="px-3 py-2.5 align-middle"><OutcomeDot outcome={s.outcome}/></td>
                     <td className="px-3 py-2.5 text-slate-700 dark:text-slate-200 whitespace-nowrap">{fmtEntryTime(s.fired_at)}</td>
                     <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300 truncate max-w-[180px]">{s.strategy_name}</td>
                     <td className="px-3 py-2.5 font-bold text-slate-900 dark:text-slate-100">{s.instrument}</td>
@@ -506,15 +577,62 @@ export default function AccountSignals() {
                     <td className="px-3 py-2.5 text-blue-600 font-semibold">{s.entry_price.toFixed(2)}</td>
                     <td className="px-3 py-2.5 text-red-500">{s.stop_loss.toFixed(2)}</td>
                     <td className="px-3 py-2.5 text-green-600">{s.take_profit.toFixed(2)}</td>
-                    <td className="px-3 py-2.5">
-                      <span className={`badge ${s.status === 'acted' ? 'badge-green' : s.status === 'expired' ? 'badge-grey' : 'badge-blue'}`}>
-                        {s.status}
-                      </span>
+                    <td className="px-3 py-2.5 text-xs">
+                      {s.outcome ? (
+                        <span className="font-semibold capitalize text-slate-700 dark:text-slate-200">
+                          {s.outcome}{typeof s.outcome_r === 'number' ? ` (${s.outcome_r >= 0 ? '+' : ''}${s.outcome_r.toFixed(2)}R)` : ''}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 dark:text-slate-500">pending</span>
+                      )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Admin-only suppressed view */}
+        {isAdmin && showSuppressed && (
+          <div className="mt-4 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50/40 dark:bg-amber-950/20 p-4">
+            <div className="flex items-center gap-2 mb-2 text-amber-800 dark:text-amber-200">
+              <ShieldAlert size={14}/>
+              <span className="text-[11px] font-bold uppercase tracking-widest">Suppressed signals (admin diagnostics)</span>
+              <span className="text-[10px] text-amber-700 dark:text-amber-300">{(suppressedRows as Signal[]).length} shown</span>
+            </div>
+            {(suppressedRows as Signal[]).length === 0 ? (
+              <div className="text-[11px] text-amber-700 dark:text-amber-300">No suppressed rows in the current window.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="text-amber-900 dark:text-amber-200 text-[10px] uppercase tracking-wider">
+                    <tr>
+                      <th className="px-2 py-1 text-left">Fired</th>
+                      <th className="px-2 py-1 text-left">Strategy</th>
+                      <th className="px-2 py-1 text-left">Symbol</th>
+                      <th className="px-2 py-1 text-left">Side</th>
+                      <th className="px-2 py-1 text-left">Entry</th>
+                      <th className="px-2 py-1 text-left">Dup. count</th>
+                      <th className="px-2 py-1 text-left">Error / reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-amber-200/60 dark:divide-amber-800/40">
+                    {(suppressedRows as Signal[]).map(s => (
+                      <tr key={s.id}>
+                        <td className="px-2 py-1 whitespace-nowrap text-slate-700 dark:text-slate-200">{fmtEntryTime(s.fired_at)}</td>
+                        <td className="px-2 py-1 truncate max-w-[160px]">{s.strategy_name}</td>
+                        <td className="px-2 py-1 font-semibold">{s.instrument}</td>
+                        <td className="px-2 py-1 uppercase">{s.direction}</td>
+                        <td className="px-2 py-1 text-blue-600">{s.entry_price.toFixed(2)}</td>
+                        <td className="px-2 py-1">{s.duplicate_suppressed_count ?? '—'}</td>
+                        <td className="px-2 py-1 text-slate-600 dark:text-slate-300 truncate max-w-[280px]" title={s.error_message || ''}>{s.error_message || (s.duplicate_suppressed_at ? 'duplicate' : '—')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </section>
