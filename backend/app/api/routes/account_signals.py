@@ -58,6 +58,14 @@ class SignalResponse(BaseModel):
     bias: Optional[str]
     fired_at: str
     status: str
+    outcome: Optional[str] = None
+    outcome_price: Optional[float] = None
+    outcome_r: Optional[float] = None
+    resolved_at: Optional[str] = None
+    # Suppressed-row diagnostics (populated only by the /suppressed endpoint)
+    duplicate_suppressed_at: Optional[str] = None
+    duplicate_suppressed_count: Optional[int] = None
+    error_message: Optional[str] = None
 
 
 # ─── Routes ──────────────────────────────────────────────────────────
@@ -66,16 +74,53 @@ class SignalResponse(BaseModel):
 async def list_signals(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    status: str = "sent",
+    include_suppressed: bool = False,
+    limit: int = 200,
 ):
-    rows = await db.execute(text("""
-        SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
-               s.take_profit, s.bias, s.fired_at, s.status, st.name AS strategy_name
-        FROM account_signals s
-        JOIN strategies st ON st.id = s.strategy_id
-        WHERE s.user_id = :uid
-        ORDER BY s.fired_at DESC
-        LIMIT 200
-    """), {"uid": str(current_user.id)})
+    """List signals for the current user.
+
+    By default returns only `status='sent'` rows so the Email Signals page
+    shows the clean list of signals that were actually delivered. The other
+    ~80% of rows in the table are `suppressed` (dead-zone, session-cap,
+    duplicate, geometry-rejected, etc.) — useful diagnostics but they should
+    not clutter the user-facing feed.
+
+    Override knobs:
+      * `?status=foo`            — filter to any specific status value
+      * `?include_suppressed=true` — drop the filter entirely (returns all)
+    """
+    if include_suppressed:
+        sql = """
+            SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
+                   s.take_profit, s.bias, s.fired_at, s.status,
+                   s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
+                   st.name AS strategy_name
+              FROM account_signals s
+              JOIN strategies st ON st.id = s.strategy_id
+             WHERE s.user_id = :uid
+             ORDER BY s.fired_at DESC
+             LIMIT :lim
+        """
+        params = {"uid": str(current_user.id), "lim": int(limit)}
+    else:
+        sql = """
+            SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
+                   s.take_profit, s.bias, s.fired_at, s.status,
+                   s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
+                   st.name AS strategy_name
+              FROM account_signals s
+              JOIN strategies st ON st.id = s.strategy_id
+             WHERE s.user_id = :uid AND s.status = :status
+             ORDER BY s.fired_at DESC
+             LIMIT :lim
+        """
+        params = {"uid": str(current_user.id), "status": status, "lim": int(limit)}
+    rows = (await db.execute(text(sql), params)).fetchall()
+    logger.info(
+        f"[signals.list] user={current_user.id} status={status} "
+        f"include_suppressed={include_suppressed} returned={len(rows)}"
+    )
     return [
         SignalResponse(
             id=str(r.id), strategy_name=r.strategy_name,
@@ -84,8 +129,59 @@ async def list_signals(
             take_profit=float(r.take_profit), bias=r.bias,
             fired_at=r.fired_at.isoformat() if r.fired_at else "",
             status=r.status,
+            outcome=r.outcome,
+            outcome_price=float(r.outcome_price) if r.outcome_price is not None else None,
+            outcome_r=float(r.outcome_r) if r.outcome_r is not None else None,
+            resolved_at=r.resolved_at.isoformat() if r.resolved_at else None,
         )
-        for r in rows.fetchall()
+        for r in rows
+    ]
+
+
+@router.get("/suppressed", response_model=list[SignalResponse])
+async def list_suppressed_signals(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 100,
+):
+    """Admin-only view of suppressed rows for diagnostics.
+
+    Surfaces duplicate-suppression metadata and any error_message that was
+    captured at send time. Sorted newest first so the freshest suppressions
+    are easy to spot."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only.")
+    rows = (await db.execute(text("""
+        SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
+               s.take_profit, s.bias, s.fired_at, s.status,
+               s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
+               s.duplicate_suppressed_at, s.duplicate_suppressed_count,
+               s.error_message,
+               st.name AS strategy_name
+          FROM account_signals s
+          JOIN strategies st ON st.id = s.strategy_id
+         WHERE s.status = 'suppressed'
+         ORDER BY s.fired_at DESC
+         LIMIT :lim
+    """), {"lim": int(limit)})).fetchall()
+    logger.info(f"[signals.suppressed] admin={current_user.id} returned={len(rows)}")
+    return [
+        SignalResponse(
+            id=str(r.id), strategy_name=r.strategy_name,
+            instrument=r.instrument, direction=r.direction,
+            entry_price=float(r.entry_price), stop_loss=float(r.stop_loss),
+            take_profit=float(r.take_profit), bias=r.bias,
+            fired_at=r.fired_at.isoformat() if r.fired_at else "",
+            status=r.status,
+            outcome=r.outcome,
+            outcome_price=float(r.outcome_price) if r.outcome_price is not None else None,
+            outcome_r=float(r.outcome_r) if r.outcome_r is not None else None,
+            resolved_at=r.resolved_at.isoformat() if r.resolved_at else None,
+            duplicate_suppressed_at=r.duplicate_suppressed_at.isoformat() if r.duplicate_suppressed_at else None,
+            duplicate_suppressed_count=int(r.duplicate_suppressed_count) if r.duplicate_suppressed_count is not None else None,
+            error_message=r.error_message,
+        )
+        for r in rows
     ]
 
 
