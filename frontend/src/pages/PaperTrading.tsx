@@ -8,6 +8,7 @@ import RefreshButton from '../components/RefreshButton'
 import ToggleSwitch from '../components/ToggleSwitch'
 import { fmtEntryTime, fmtHold } from '../components/TradeMetrics'
 import { TradeChartModal } from '../components/TradeChartModal'
+import { classifyAssetClass, type AssetClass } from '../utils/assetClass'
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -63,11 +64,14 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
   const [underlying, setUnderlying] = useState('SPY')
   const [error, setError] = useState<string | null>(null)
 
-  const optStrats = strategies.filter((s: any) =>
-    (s.options_mode || (s.instruments || []).some((i: string) =>
-      ['SPY','QQQ','NVDA','AAPL','MSFT','TSLA','AMD','META','AMZN','GOOGL','JPM','KO'].includes(i)))
-    && (s.status || '').toLowerCase() === 'active'
-  )
+  // Options Paper can trade either bona-fide OCC options strategies OR
+  // any stock-underlying strategy (the simulator prices an option off the
+  // strategy's instruments). Anything that classifies as 'futures' or
+  // 'unknown' (templates) is filtered out.
+  const optStrats = strategies.filter((s: any) => {
+    const cls: AssetClass = (s.asset_class as AssetClass) || classifyAssetClass(s.instruments || [])
+    return (cls === 'options' || cls === 'stock') && (s.status || '').toLowerCase() === 'active'
+  })
 
   const { data: sessions = [] } = useQuery({
     queryKey: ['options-paper-sessions'],
@@ -508,11 +512,14 @@ export default function PaperTrading() {
                   className="w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700">
                   <option value="">Select a futures strategy...</option>
                   {(() => {
-                    const OPT_TICKERS = ['SPY','QQQ','NVDA','AAPL','MSFT','TSLA','AMD','META','AMZN','GOOGL','JPM','KO']
-                    const isOptions = (st: any) =>
-                      !!st.options_mode ||
-                      (st.instruments || []).some((i: string) => OPT_TICKERS.includes(i))
-                    const futuresOnly = strategies.filter((st: any) => !isOptions(st) && (st.status || '').toLowerCase() === 'active')
+                    // Futures paper-trader: only show strategies whose
+                    // asset class is 'futures' (per the same rules the
+                    // backend uses). Template strategies (empty
+                    // instruments) classify as 'unknown' and are excluded.
+                    const futuresOnly = strategies.filter((st: any) => {
+                      const cls: AssetClass = (st.asset_class as AssetClass) || classifyAssetClass(st.instruments || [])
+                      return cls === 'futures' && (st.status || '').toLowerCase() === 'active'
+                    })
                     if (futuresOnly.length === 0) {
                       return <option value="" disabled>No active futures strategies — create one on the Strategies page</option>
                     }
