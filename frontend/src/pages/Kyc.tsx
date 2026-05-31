@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { ShieldCheck, Loader2, CheckCircle2, AlertTriangle } from "lucide-react"
-import api from "../api/client"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { ShieldCheck, Loader2, CheckCircle2, AlertTriangle, XCircle, RefreshCw } from "lucide-react"
+import api from "../api/client" /* kyc-frontend-patch-v2 */
 
 const MIN_AGE = 18
 // Latest acceptable DOB for an 18-year-old: today minus 18 years.
@@ -20,11 +21,13 @@ const _ageFromDob = (s: string): number | null => {
   return age
 }
 
-type Status = "not_started" | "pending" | "verified" | "failed" | "requires_input" | "stub" | null
+type Status = "not_started" | "pending" | "verified" | "failed" | "requires_input" | "canceled" | "manual_review" | "stub" | null
+
+type KycStatusResponse = { status: Status; verification_url?: string | null; verified_at?: string | null }
 
 export default function Kyc() {
   const navigate = useNavigate()
-  const [status, setStatus] = useState<Status>(null)
+  const qc = useQueryClient()
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
   const [dob, setDob] = useState("")
@@ -32,11 +35,30 @@ export default function Kyc() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
 
-  useEffect(() => {
-    api.get("/api/v1/kyc/status")
-      .then(r => setStatus(r.data?.status || "not_started"))
-      .catch((e) => { if (e?.response?.status === 401) { window.location.href = "/login"; } else { setStatus("not_started") } })
-  }, [])
+  // Poll while we're in a non-terminal state so the page self-updates as soon
+  // as the Stripe Identity webhook fires (or as soon as the opportunistic
+  // /status sync pulls the verified state from Stripe).
+  const { data: kycData, refetch, isFetching } = useQuery<KycStatusResponse>({
+    queryKey: ["kyc-status"],
+    queryFn: async () => {
+      try {
+        const r = await api.get("/api/v1/kyc/status")
+        console.debug("[kyc] status fetched:", r.data?.status)
+        return r.data as KycStatusResponse
+      } catch (e: any) {
+        if (e?.response?.status === 401) { window.location.href = "/login" }
+        throw e
+      }
+    },
+    refetchInterval: (q) => {
+      const s = (q.state.data as KycStatusResponse | undefined)?.status
+      return s === "pending" || s === "requires_input" ? 10000 : false
+    },
+    refetchOnWindowFocus: true,
+    retry: 1,
+  })
+  const status: Status = (kycData?.status as Status) || null
+  const verificationUrl = kycData?.verification_url || null
 
   const startVerification = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -58,11 +80,13 @@ export default function Kyc() {
       const { data } = await api.post("/api/v1/kyc/start", {
         first_name: firstName, last_name: lastName, date_of_birth: dob, country_code: country,
       })
+      // Trigger an immediate refetch so the UI catches state changes as soon
+      // as they happen (e.g. manual_review fallback returned by the backend).
+      qc.invalidateQueries({ queryKey: ["kyc-status"] })
       if (data?.redirect_url) {
         window.location.href = data.redirect_url
         return
       }
-      setStatus("pending")
     } catch (err: any) {
       setError(err.response?.data?.detail || "Could not start verification. Please try again.")
     } finally { setLoading(false) }
@@ -85,16 +109,64 @@ export default function Kyc() {
     )
   }
 
-  if (status === "pending" || status === "stub") {
+  if (status === "pending" || status === "stub" || status === "manual_review") {
+    const isManual = status === "manual_review"
     return (
       <div className="min-h-screen flex items-center justify-center px-6">
         <div className="max-w-md text-center">
           <Loader2 size={56} className="mx-auto text-blue-500 animate-spin mb-4" />
-          <h1 className="text-2xl font-bold mb-2 text-slate-900 dark:text-slate-100">Verification in progress</h1>
+          <h1 className="text-2xl font-bold mb-2 text-slate-900 dark:text-slate-100">
+            {isManual ? "Manual review pending" : "Verification in progress"}
+          </h1>
           <p className="text-slate-600 dark:text-slate-400 mb-6">
-            We are reviewing your ID. This usually takes under 60 seconds. You will receive an email when it is complete.
+            {isManual
+              ? "Your information has been submitted. Our team will review and approve your identity within 1 business day."
+              : "We are reviewing your ID. This usually takes under 60 seconds. You will receive an email when it is complete."}
           </p>
-          <button onClick={() => navigate("/app")} className="text-blue-600 underline">Back to dashboard</button>
+          <div className="flex items-center justify-center gap-3">
+            <button onClick={() => navigate("/app")} className="text-blue-600 underline">Back to dashboard</button>
+            <button
+              type="button"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-slate-300 dark:border-slate-700 rounded-md text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={isFetching ? "animate-spin" : ""} />
+              Refresh status
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (status === "failed" || status === "canceled") {
+    const wasCanceled = status === "canceled"
+    return (
+      <div className="min-h-screen flex items-center justify-center px-6">
+        <div className="max-w-md text-center">
+          <XCircle size={56} className="mx-auto text-red-500 mb-4" />
+          <h1 className="text-2xl font-bold mb-2 text-slate-900 dark:text-slate-100">
+            {wasCanceled ? "Verification canceled" : "Verification did not pass"}
+          </h1>
+          <p className="text-slate-600 dark:text-slate-400 mb-6">
+            {wasCanceled
+              ? "You exited the Stripe Identity flow before completing it. You can start again at any time."
+              : "Stripe Identity could not confirm your ID. Common causes: blurry photo, mismatched name, or a non-US document. Please try again with a clear, well-lit photo of your government-issued US ID."}
+          </p>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                // Drop the cached status so the form re-renders, allowing retry.
+                qc.setQueryData(["kyc-status"], { status: "not_started" })
+              }}
+              className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6 py-2.5 rounded-lg"
+            >
+              Try again
+            </button>
+            <button onClick={() => navigate("/app")} className="text-blue-600 underline">Back to dashboard</button>
+          </div>
         </div>
       </div>
     )
@@ -114,9 +186,19 @@ export default function Kyc() {
         </p>
 
         {status === "requires_input" && (
-          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg mb-4 flex items-start gap-2">
-            <AlertTriangle size={18} className="mt-0.5 flex-shrink-0" />
-            <span className="text-sm">Your previous attempt was incomplete. Please re-submit.</span>
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg mb-4">
+            <div className="flex items-start gap-2 mb-2">
+              <AlertTriangle size={18} className="mt-0.5 flex-shrink-0" />
+              <span className="text-sm">Your previous attempt was incomplete. You can continue where you left off, or start over below.</span>
+            </div>
+            {verificationUrl && (
+              <a
+                href={verificationUrl}
+                className="inline-block bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold px-4 py-1.5 rounded-md"
+              >
+                Continue verification
+              </a>
+            )}
           </div>
         )}
 
