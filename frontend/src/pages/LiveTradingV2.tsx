@@ -79,14 +79,14 @@ function PendingOrdersCard() {
         {data.orders.map((o: any) => (
           <div key={o.id} className="bg-white dark:bg-slate-900 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 min-w-0">
-              <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${o.side === 'sell' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>{o.side}</span>
-              <span className="font-bold">{o.symbol}</span>
-              <span className="text-slate-500">{o.quantity} sh</span>
+              <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${o.side === 'sell' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>{o.side}</span>
+              <span className="font-bold text-slate-900 dark:text-slate-100">{o.symbol}</span>
+              <span className="text-slate-500 dark:text-slate-400">{o.quantity} sh</span>
               <span className="text-slate-400 uppercase text-[10px]">{o.type}{o.price ? ` @ $${o.price}` : ''}</span>
               <span className="text-slate-400 uppercase text-[10px]">duration={o.duration}</span>
             </div>
             <button onClick={() => cancelOrder.mutate(o.id)} disabled={cancelOrder.isPending}
-              className="ml-2 text-[10px] font-bold text-rose-600 hover:underline whitespace-nowrap">Cancel</button>
+              className="ml-2 text-[10px] font-bold text-rose-600 dark:text-rose-400 hover:underline whitespace-nowrap">Cancel</button>
           </div>
         ))}
       </div>
@@ -121,7 +121,7 @@ function OpenPositionsCard() {
     )
   }
   if (!data) return isLoading ? (
-    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 text-xs text-slate-400 animate-pulse">Loading open positions…</div>
+    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 text-xs text-slate-400 dark:text-slate-500 animate-pulse">Loading open positions…</div>
   ) : null
   // No open positions but maybe realized P&L from earlier today
   if (data.count === 0) {
@@ -1024,8 +1024,8 @@ export default function LiveTradingV2() {
                       <tr key={t.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                         <td className="px-2 py-2 font-bold text-slate-900 dark:text-slate-100">{t.instrument}</td>
                         <td className="px-2 py-2"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${t.direction === 'long' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'}`}>{t.direction?.toUpperCase()}</span></td>
-                        <td className="px-2 py-2 text-right tabular-nums">{t.contracts}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{fmtUsd(t.entry_price || 0)}</td>
+                        <td className="px-2 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">{t.contracts}</td>
+                        <td className="px-2 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">{fmtUsd(t.entry_price || 0)}</td>
                         <td className="px-2 py-2 text-right tabular-nums text-rose-600 dark:text-rose-400">{fmtUsd(t.stop_loss || 0)}</td>
                         <td className="px-2 py-2 text-right tabular-nums text-emerald-600 dark:text-emerald-400">{fmtUsd(t.take_profit || 0)}</td>
                         <td className="px-2 py-2 text-slate-500 dark:text-slate-400 truncate max-w-[160px]">{sName}</td>
@@ -1074,9 +1074,9 @@ export default function LiveTradingV2() {
                           <td className="px-2 py-2 text-slate-500 dark:text-slate-400 whitespace-nowrap">{new Date(t.exit_time || t.entry_time).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</td>
                           <td className="px-2 py-2 font-bold text-slate-900 dark:text-slate-100">{t.instrument}</td>
                           <td className="px-2 py-2"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${t.direction === 'long' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'}`}>{(t.direction || '').toUpperCase()}</span></td>
-                          <td className="px-2 py-2 text-right tabular-nums">{fmtUsd(t.entry_price || 0)}</td>
-                          <td className="px-2 py-2 text-right tabular-nums">{fmtUsd(t.exit_price || 0)}</td>
-                          <td className="px-2 py-2 text-right tabular-nums">{t.contracts}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">{fmtUsd(t.entry_price || 0)}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">{fmtUsd(t.exit_price || 0)}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">{t.contracts}</td>
                           <td className={`px-2 py-2 text-right tabular-nums font-bold ${pnlColor(t.pnl || 0)}`}>{pnlSign(t.pnl || 0)}{fmtUsd(t.pnl || 0)}</td>
                           <td className="px-2 py-2 text-slate-500 dark:text-slate-400 truncate max-w-[140px]">{t.exit_reason || '—'}</td>
                         </tr>

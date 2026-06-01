@@ -74,14 +74,14 @@ function MetricCard({ label, value, color, sub }: { label: string; value: string
 export function MetricsGrid({ m }: { m: Metrics }) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-      <MetricCard label="Net P&L" value={fmtMoney(m.net_pnl)} color={m.net_pnl >= 0 ? 'text-green-600' : 'text-red-500'} sub={`${m.total_trades} closed`} />
-      <MetricCard label="Win Rate" value={`${(m.win_rate * 100).toFixed(1)}%`} color={m.win_rate >= 0.5 ? 'text-green-600' : 'text-amber-600'} sub={`${m.wins}W / ${m.losses}L`} />
-      <MetricCard label="Profit Factor" value={m.profit_factor != null ? m.profit_factor.toFixed(2) : '—'} color={(m.profit_factor ?? 0) >= 1.5 ? 'text-green-600' : 'text-amber-600'} />
-      <MetricCard label="Max Drawdown" value={fmtMoney(-Math.abs(m.max_drawdown))} color="text-red-500" sub={`${m.max_drawdown_pct.toFixed(1)}%`} />
-      <MetricCard label="Avg Win" value={fmtMoney(m.avg_win)} color="text-green-600" />
-      <MetricCard label="Avg Loss" value={fmtMoney(m.avg_loss)} color="text-red-500" />
-      <MetricCard label="Largest Win" value={fmtMoney(m.largest_win)} color="text-green-600" />
-      <MetricCard label="Largest Loss" value={fmtMoney(m.largest_loss)} color="text-red-500" />
+      <MetricCard label="Net P&L" value={fmtMoney(m.net_pnl)} color={m.net_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'} sub={`${m.total_trades} closed`} />
+      <MetricCard label="Win Rate" value={`${(m.win_rate * 100).toFixed(1)}%`} color={m.win_rate >= 0.5 ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'} sub={`${m.wins}W / ${m.losses}L`} />
+      <MetricCard label="Profit Factor" value={m.profit_factor != null ? m.profit_factor.toFixed(2) : '—'} color={(m.profit_factor ?? 0) >= 1.5 ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'} />
+      <MetricCard label="Max Drawdown" value={fmtMoney(-Math.abs(m.max_drawdown))} color="text-red-500 dark:text-red-400" sub={`${m.max_drawdown_pct.toFixed(1)}%`} />
+      <MetricCard label="Avg Win" value={fmtMoney(m.avg_win)} color="text-green-600 dark:text-green-400" />
+      <MetricCard label="Avg Loss" value={fmtMoney(m.avg_loss)} color="text-red-500 dark:text-red-400" />
+      <MetricCard label="Largest Win" value={fmtMoney(m.largest_win)} color="text-green-600 dark:text-green-400" />
+      <MetricCard label="Largest Loss" value={fmtMoney(m.largest_loss)} color="text-red-500 dark:text-red-400" />
     </div>
   )
 }
@@ -113,7 +113,7 @@ export function EquityCurve({ trades }: { trades: TradeRow[] }) {
           <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" className="dark:opacity-20"/>
           <XAxis dataKey="i" tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} label={{ value: 'Trade #', position: 'insideBottom', offset: -2, fontSize: 10, fill: '#94a3b8' }}/>
           <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} width={64}/>
-          <Tooltip contentStyle={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12 }} formatter={(v: any) => [`$${Number(v).toLocaleString()}`, 'Equity']} labelFormatter={(l) => `Trade #${l}`}/>
+          <Tooltip contentStyle={{ background: 'rgba(15,23,42,0.95)', border: '1px solid rgba(148,163,184,0.3)', borderRadius: 8, fontSize: 12, color: '#f1f5f9' }} formatter={(v: any) => [`$${Number(v).toLocaleString()}`, 'Equity']} labelFormatter={(l) => `Trade #${l}`}/>
           <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="2 2"/>
           <Line type="monotone" dataKey="equity" stroke="#2563eb" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#2563eb' }}/>
         </LineChart>
@@ -145,9 +145,9 @@ export function TradeTable({ trades }: { trades: TradeRow[] }) {
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {trades.map(t => {
-              const pnlColor = t.net_pnl == null ? 'text-slate-400' : t.net_pnl >= 0 ? 'text-green-600' : 'text-red-500'
+              const pnlColor = t.net_pnl == null ? 'text-slate-400 dark:text-slate-500' : t.net_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'
               return (
-                <tr key={t.id} className="hover:bg-slate-100 dark:hover:bg-slate-800/50 dark:hover:bg-slate-800">
+                <tr key={t.id} className="hover:bg-slate-100 dark:hover:bg-slate-800/50">
                   <td className="px-3 py-2 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtEntryTime(t.entry_time)}</td>
                   <td className="px-3 py-2 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtHold(t.entry_time, t.exit_time)}</td>
                   <td className="px-3 py-2 font-semibold text-slate-900 dark:text-slate-100">{t.instrument}</td>
