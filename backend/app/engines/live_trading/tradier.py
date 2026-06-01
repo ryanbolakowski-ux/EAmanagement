@@ -242,6 +242,16 @@ class TradierBroker(BrokerBase):
             events = [events]
         if not isinstance(events, list):
             return []
+        # Diagnostic: log the type-distribution so we can see what Tradier
+        # actually exposes for this account (different sandboxes return
+        # different sets — e.g., flatten_all closes may be under 'option'
+        # or unclassified rather than 'trade').
+        try:
+            from collections import Counter
+            type_counts = Counter((ev.get("type") if isinstance(ev, dict) else None) for ev in events)
+            logger.info(f"[Tradier] get_account_history returned {len(events)} events; types={dict(type_counts)}")
+        except Exception:
+            pass
 
         out: list[dict] = []
         for ev in events:

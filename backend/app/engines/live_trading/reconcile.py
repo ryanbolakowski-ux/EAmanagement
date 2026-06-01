@@ -110,7 +110,7 @@ async def reconcile_trades_from_broker(db: AsyncSession, broker_account) -> dict
         if not hasattr(broker, "get_account_history"):
             logger.info(f"[reconcile] broker {broker_account.broker!r} has no get_account_history; skipping")
             return counters
-        fills = await broker.get_account_history(limit=500)
+        fills = await broker.get_account_history(limit=500, activity_type=None)  # pull ALL types, filter client-side
     finally:
         try:
             await broker.disconnect()
