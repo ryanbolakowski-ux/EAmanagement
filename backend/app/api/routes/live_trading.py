@@ -641,6 +641,17 @@ async def _ensure_balance_columns(db):
         await db.execute(_t(
             "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS cached_cash DOUBLE PRECISION"
         ))
+        # last_history_count — last seen len(get_account_history()) for this
+        # account. Drives the reconciliation `tradier_history_supported` flag:
+        #   NULL or 0  → Tradier sandbox quirk (broker history endpoint returns
+        #                no events even when there's been activity). UI shows
+        #                an honest "broker history not exposed" explanation
+        #                instead of pretending an unexplained_gap is a bug.
+        #   >0         → broker history endpoint is populating; gap is a real
+        #                reconciliation issue worth investigating.
+        await db.execute(_t(
+            "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS last_history_count INTEGER"
+        ))
         await db.commit()
         _balance_cols_checked = True
     except Exception as e:
@@ -1066,6 +1077,54 @@ async def get_portfolio_summary(
     broker_history_count: int | None = None
     transfer_note = "broker doesn't track in software"
 
+    # ── tradier_history_supported flag ──
+    # Pull the LAST seen broker-history event count for each account from the
+    # column we just guaranteed exists. If any active Tradier account in this
+    # portfolio has last_history_count > 0, the broker history endpoint is
+    # genuinely surfacing events and an unexplained_gap is worth a real
+    # investigation. If ALL Tradier accounts here returned 0 (the Tradier
+    # SANDBOX case, confirmed via direct broker call 2026-06-01), the broker
+    # simply doesn't expose history; we say so honestly instead of calling it
+    # an "unexplained gap".
+    tradier_history_supported = True
+    try:
+        lhc_rows = (await db.execute(_t(
+            "SELECT id, broker, last_history_count FROM broker_accounts "
+            "WHERE user_id = :uid AND is_active = true"
+        ), {"uid": str(current_user.id)})).all()
+        tradier_rows = [r for r in lhc_rows if (r[1] or "").lower() == "tradier"]
+        if tradier_rows:
+            # Supported only if at least one Tradier account has confirmed >0
+            # history events on its most recent fetch.
+            tradier_history_supported = any(
+                (r[2] is not None and int(r[2]) > 0) for r in tradier_rows
+            )
+        # If there are NO tradier accounts, leave the flag at True (the
+        # caller is on a non-Tradier broker; the sandbox honesty message is
+        # not appropriate).
+        if not any((r[1] or "").lower() == "tradier" for r in lhc_rows):
+            tradier_history_supported = True
+    except Exception as _lhc_e:
+        from loguru import logger as _lg_lhc
+        _lg_lhc.warning(f"[portfolio] last_history_count lookup failed: {_lhc_e}")
+        tradier_history_supported = True  # don't lie when we can't tell
+
+    _default_notes = (
+        "equity_delta should ~= realized_ytd_net + unrealized_open. "
+        "A non-zero unexplained_gap usually means broker-side closes that "
+        "did not write a trade row (e.g. flatten_all), un-recorded fees, "
+        "slippage between recorded entry/exit and actual broker fill, "
+        "or a stale cached_equity. Use POST "
+        "/api/v1/live-trading/accounts/{id}/reconcile-from-broker to "
+        "backfill missing broker fills into the trades table."
+    )
+    _sandbox_notes = (
+        "Tradier sandbox does not expose broker-side activity via the history endpoint\n"
+        "(verified: 0 events returned). The gap reflects activity that occurred broker-side\n"
+        "(e.g. flatten_all closes, simulated fees, sandbox quirks) that cannot be reconciled\n"
+        "automatically. For real-money Tradier accounts, the history endpoint will populate."
+    )
+
     reconciliation = {
         "starting_equity":    round(starting_equity, 2),
         "realized_ytd_net":   round(ytd_breakdown["net"], 2),
@@ -1086,15 +1145,9 @@ async def get_portfolio_summary(
         "source_field_used":  "equity",
         "broker_history_count": broker_history_count,
         "per_account_debug":  per_account_debug,
-        "notes": (
-            "equity_delta should ~= realized_ytd_net + unrealized_open. "
-            "A non-zero unexplained_gap usually means broker-side closes that "
-            "did not write a trade row (e.g. flatten_all), un-recorded fees, "
-            "slippage between recorded entry/exit and actual broker fill, "
-            "or a stale cached_equity. Use POST "
-            "/api/v1/live-trading/accounts/{id}/reconcile-from-broker to "
-            "backfill missing broker fills into the trades table."
-        ),
+        # Honest stamp — drives the UI tooltip + sandbox-aware messaging.
+        "tradier_history_supported": tradier_history_supported,
+        "notes": _default_notes if tradier_history_supported else _sandbox_notes,
     }
     from loguru import logger as _lg_ps
     _lg_ps.info(

@@ -253,6 +253,23 @@ class TradierBroker(BrokerBase):
         except Exception:
             pass
 
+        # Debug-grade observability for the "is Tradier broken or are there
+        # genuinely no events?" question: when we got 0 events, log the raw
+        # response body (truncated) and the type filter used. Sandbox accounts
+        # legitimately return zero; real accounts returning zero is a red flag
+        # that needs investigation. Either way, the log line answers it.
+        if not events:
+            try:
+                import json as _json
+                raw_preview = _json.dumps(data, default=str)[:200]
+            except Exception:
+                raw_preview = str(data)[:200]
+            logger.info(
+                f"[Tradier] get_account_history: 0 events "
+                f"(type_filter={activity_type!r}, account={self.account_id}); "
+                f"raw_body[:200]={raw_preview!r}"
+            )
+
         out: list[dict] = []
         for ev in events:
             if not isinstance(ev, dict):

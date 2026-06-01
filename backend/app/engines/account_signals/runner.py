@@ -327,6 +327,22 @@ async def _run_watcher(watcher_id, strategy_id, user_id, instruments, account_la
         raise
     except Exception as e:
         logger.error(f"[Signals] watcher {watcher_id} crashed: {e}")
+        try:
+            from app.engines.pipeline_alerts import send_pipeline_failure_alert
+            import traceback as _tb
+            await send_pipeline_failure_alert(
+                reason=f"Account-signals watcher crashed: {type(e).__name__}",
+                context={"job": "account_signals.runner._run_watcher",
+                         "step": "watcher_outer",
+                         "watcher_id": str(watcher_id),
+                         "strategy_id": str(strategy_id),
+                         "user_id": str(user_id),
+                         "instruments": list(instruments) if instruments else [],
+                         "error": str(e)},
+                traceback_str=_tb.format_exc(),
+            )
+        except Exception:
+            pass
     finally:
         _active.pop(watcher_id, None)
 

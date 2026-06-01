@@ -501,6 +501,12 @@ function PortfolioHeader({ data }: { data: any }) {
           <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">Equity · Net Liquidation Value</div>
           <div className="flex items-center gap-2">
             <div className="text-3xl md:text-4xl font-extrabold tabular-nums" title="Cash + market value of open positions. Pulled from your broker (cached).">{fmtUsd(data.total_equity)}</div>
+            {(data.per_account || []).some((a: any) => a.is_demo) && (
+              <span
+                className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] uppercase tracking-wider font-extrabold bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                title="At least one linked account is a broker sandbox (paper) account. Equity figures from sandbox accounts are simulated, not real funds."
+              >(sandbox)</span>
+            )}
             {firstAccountId && (
               <button
                 onClick={() => syncFromBroker.mutate()}
@@ -523,7 +529,12 @@ function PortfolioHeader({ data }: { data: any }) {
               {' · realized YTD '}<span className={`font-semibold ${pnlColor(data.reconciliation.realized_ytd_net)}`}>{pnlSign(data.reconciliation.realized_ytd_net)}{fmtUsd(Math.abs(data.reconciliation.realized_ytd_net), 0)}</span>
               {' · open '}<span className={`font-semibold ${pnlColor(data.reconciliation.unrealized_open)}`}>{pnlSign(data.reconciliation.unrealized_open)}{fmtUsd(Math.abs(data.reconciliation.unrealized_open), 0)}</span>
               {Math.abs(data.reconciliation.unexplained_gap) >= 0.5 && (
-                <>{' · '}<span className="font-semibold text-amber-400" title="Equity change not explained by realized + open. Usually broker-side closes not in our trades table (e.g. flatten_all), un-recorded fees, or slippage vs recorded fills. Click Sync from broker to backfill.">gap {pnlSign(data.reconciliation.unexplained_gap)}{fmtUsd(Math.abs(data.reconciliation.unexplained_gap), 0)}</span></>
+                <>{' · '}<span
+                    className="font-semibold text-amber-400"
+                    title={data.reconciliation.tradier_history_supported === false
+                      ? "Tradier sandbox doesn't expose broker history via its API (verified: 0 events). This gap reflects broker-side activity (e.g. flatten_all closes, simulated fees, sandbox quirks) that cannot be reconciled automatically. Real-money Tradier accounts will populate the history endpoint."
+                      : "Equity change not explained by realized + open. Usually broker-side closes not in our trades table (e.g. flatten_all), un-recorded fees, or slippage vs recorded fills. Click Sync from broker to backfill."}
+                  >gap {pnlSign(data.reconciliation.unexplained_gap)}{fmtUsd(Math.abs(data.reconciliation.unexplained_gap), 0)}{data.reconciliation.tradier_history_supported === false ? ' (sandbox)' : ''}</span></>
               )}
               <button
                 onClick={() => setShowDebug(v => !v)}

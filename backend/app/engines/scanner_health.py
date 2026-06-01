@@ -166,13 +166,16 @@ async def send_daily_heartbeat():
     from app.services.email import _send
 
     async with async_session_factory() as db:
+        # ADMIN-ONLY heartbeat. The heartbeat is operational health telemetry,
+        # not a user-facing signal — only admins should receive it. Previously
+        # this fanned out to all 11 active users with strategy subscriptions,
+        # which (1) leaked internal pipeline state to customers and (2) trained
+        # them to ignore one more email per day.
         rows = (await db.execute(_t("""
             SELECT DISTINCT u.email
               FROM users u
-              LEFT JOIN strategies s ON s.user_id = u.id AND s.status = 'ACTIVE'
-              LEFT JOIN account_signal_watchers w ON w.user_id = u.id AND w.is_active = true
              WHERE u.is_active = true
-               AND (s.id IS NOT NULL OR w.id IS NOT NULL)
+               AND u.is_admin = true
         """))).fetchall()
 
     ok_emoji = "✅" if health["ok"] else "⚠️"
@@ -213,7 +216,21 @@ async def send_daily_heartbeat():
         except Exception:
             pass
     _LAST_HEARTBEAT_SENT = today_str
-    logger.info(f"[heartbeat] sent to {sent}/{len(rows)} subscribers (health.ok={health['ok']})")
+    logger.info(f"[heartbeat] sent to {sent}/{len(rows)} admins (health.ok={health['ok']})")
+    # If the health check itself flagged degraded pipeline, also fire a loud
+    # pipeline-failure alert. Heartbeat alone is too low-signal — admins skim it.
+    if not health.get("ok"):
+        try:
+            from app.engines.pipeline_alerts import send_pipeline_failure_alert
+            broken = [k for k, v in health.get("components", {}).items() if not v.get("ok")]
+            await send_pipeline_failure_alert(
+                reason="Daily heartbeat detected degraded pipeline",
+                context={"job": "scanner_health.send_daily_heartbeat",
+                         "date": today_str, "broken_components": broken,
+                         "health": health},
+            )
+        except Exception as _alert_e:
+            logger.error(f"[heartbeat] pipeline alert dispatch failed: {_alert_e}")
 
 
 async def run_health_monitor_loop():
@@ -230,4 +247,15 @@ async def run_health_monitor_loop():
                 logger.error(f"[scanner-health] PIPELINE DEGRADED — broken: {broken}")
         except Exception as e:
             logger.warning(f"[scanner-health] loop iteration failed: {e}")
+            try:
+                from app.engines.pipeline_alerts import send_pipeline_failure_alert
+                import traceback as _tb
+                await send_pipeline_failure_alert(
+                    reason=f"scanner-health monitor loop iteration crashed: {type(e).__name__}",
+                    context={"job": "scanner_health.run_health_monitor_loop",
+                             "step": "loop_iteration", "error": str(e)},
+                    traceback_str=_tb.format_exc(),
+                )
+            except Exception:
+                pass
         await asyncio.sleep(300)

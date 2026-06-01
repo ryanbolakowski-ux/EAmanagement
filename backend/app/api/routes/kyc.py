@@ -121,8 +121,23 @@ async def kyc_status(
     """
     cur_status = getattr(current_user, "kyc_status", None) or "not_started"
     session_id = getattr(current_user, "kyc_session_id", None)
+    verified_at = getattr(current_user, "kyc_verified_at", None)
     verification_url: str | None = None
-    if cur_status == "pending" and session_id:
+
+    # Aggressive sync: previously we only synced on 'pending'. We now ALSO
+    # sync on:
+    #   * 'requires_input' — the user may have submitted the missing input
+    #                        on Stripe's hosted page; we need to re-check.
+    #   * verified-with-null-verified_at — data consistency. If the row says
+    #                        verified but verified_at is NULL the row was
+    #                        partially updated by a half-failed webhook and
+    #                        re-pulling from Stripe will repair COALESCE.
+    needs_sync = bool(session_id) and (
+        cur_status == "pending"
+        or cur_status == "requires_input"
+        or (cur_status == "verified" and verified_at is None)
+    )
+    if needs_sync:
         try:
             synced = await sync_kyc_status_from_stripe(
                 db, user_id=str(current_user.id), session_id=session_id

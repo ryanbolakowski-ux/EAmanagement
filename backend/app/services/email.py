@@ -112,15 +112,49 @@ def _send_tracked(to: str, subject: str, html: str) -> dict:
     import httpx as _httpx_es
     if _os_es.environ.get("EMAIL_KILL_SWITCH", "0") == "1":
         s = subject or ""
-        # WHITELIST mode: ONLY transactional + Theta Scanner emails pass.
-        # Everything else (position logs, signal alerts, trade receipts) is dropped.
+        # ┌──────────────────────────────────────────────────────────────────┐
+        # │ EMAIL_KILL_SWITCH whitelist (audited 2026-06-01)                  │
+        # │                                                                  │
+        # │ PASSES — sends through unchanged:                                │
+        # │   * "Theta Scanner" anywhere in subject  (e.g. "🎯 Theta Scanner       │
+        # │     (Futures)", the 9:25 ET morning pick, daily heartbeat)       │
+        # │   * Transactional keywords (passwords, 2FA, welcome, verify,     │
+        # │     tier changes, daily digest, [Admin] notifications)           │
+        # │   * "URGENT" — used by pipeline_alerts.py for failure alerts so  │
+        # │     they always reach admins even with the switch flipped on     │
+        # │                                                                  │
+        # │ DROPPED — never sent while EMAIL_KILL_SWITCH=1:                  │
+        # │   * Legacy signal subjects of the form                           │
+        # │     "🔥 LONG ES @ X · Theta Algos signal" produced by                  │
+        # │     send_trade_receipt_email() (futures intraday emit path).     │
+        # │   * Anything else (random position logs, ad-hoc admin scripts,   │
+        # │     test sends).                                                 │
+        # │                                                                  │
+        # │ WHY THE LEGACY PATTERN IS DROPPED:                               │
+        # │   send_trade_receipt_email is the OLD per-fill signal email      │
+        # │   that pre-dates the consolidated Theta Scanner emit path. It    │
+        # │   is still wired into the watcher hot path and fires           │
+        # │   indiscriminately — the killswitch is the production "off"     │
+        # │   while we migrate the watcher to consolidated emits. Until      │
+        # │   that migration lands, treat any "🔥 ... Theta Algos signal"        │
+        # │   drop as expected, not a bug.                                   │
+        # │                                                                  │
+        # │ Do not relax this whitelist without re-auditing the legacy code  │
+        # │ path — re-enabling those emails today would send 10+ duplicate   │
+        # │ emails per user per signal.                                      │
+        # └──────────────────────────────────────────────────────────────────┘
         transactional_keywords = ["Reset your", "Verify your", "Welcome to", "2FA",
                                    "verification", "Comp ", "tier change", "Daily digest",
-                                   "[Admin]"]
+                                   "[Admin]", "URGENT"]
         is_transactional = any(k in s for k in transactional_keywords)
         is_theta = "Theta Scanner" in s
         if not is_transactional and not is_theta:
-            logger.info("[killswitch] dropped (non-whitelist) to=" + str(to) + " subj=" + s[:80])
+            # WARN (not info) so this is visible in default log scrapes —
+            # admins repeatedly missed the legacy-pattern drops with info-level.
+            logger.warning(
+                f"[killswitch] dropped (non-whitelist) to={to} subj={s[:120]!r} "
+                f"hint='non-Theta-Scanner / non-transactional subject'"
+            )
             return {"sent": False, "provider_message_id": None, "provider_status": "killswitch_dropped", "error": "kill switch", "latency_ms": 0}
     if not settings.RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set; skipping email send")
@@ -177,6 +211,30 @@ def _send_tracked(to: str, subject: str, html: str) -> dict:
             logger.exception(f"Email send unexpected exception to {to} ({subject}): {type(e).__name__}: {e}")
             return {"sent": False, "provider_message_id": None, "provider_status": "exception", "error": f"{type(e).__name__}: {e}", "latency_ms": 0}
     logger.error(f"Email send failed permanently after retries to {to} ({subject}): {last_err}")
+    # Fire a pipeline alert so admins see Resend brownouts in real time. Guarded
+    # so the alert path cannot recurse / crash the email pipeline. Subject filter
+    # avoids self-amplification: we never alert ABOUT a failing alert email.
+    try:
+        if not (subject or "").startswith("🚨 URGENT"):
+            import asyncio as _asyncio_a
+            from app.engines.pipeline_alerts import send_pipeline_failure_alert
+            async def _fire():
+                await send_pipeline_failure_alert(
+                    reason=f"Resend send failed after retries to {to}",
+                    context={"job": "email._send_tracked", "step": "retry_exhausted",
+                             "to": to, "subject": (subject or "")[:160],
+                             "last_err": str(last_err)[:300]},
+                )
+            try:
+                loop = _asyncio_a.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_fire())
+                else:
+                    loop.run_until_complete(_fire())
+            except RuntimeError:
+                _asyncio_a.run(_fire())
+    except Exception as _alert_e:
+        logger.error(f"[pipeline-alert] from _send_tracked failed: {_alert_e}")
     return {"sent": False, "provider_message_id": None, "provider_status": "failed_after_retries", "error": str(last_err)[:200], "latency_ms": 0}
 
 

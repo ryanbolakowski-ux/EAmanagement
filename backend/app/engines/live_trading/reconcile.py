@@ -117,6 +117,21 @@ async def reconcile_trades_from_broker(db: AsyncSession, broker_account) -> dict
         except Exception:
             pass
 
+    # Stamp the last seen history count so the portfolio reconciliation block
+    # can answer "does this broker's history endpoint actually expose events?"
+    # Tradier sandbox returns 0 here — that's what powers the honest UI
+    # message (instead of pretending the gap is a bug we can fix).
+    try:
+        from sqlalchemy import text as _t_lhc
+        await db.execute(_t_lhc(
+            "UPDATE broker_accounts SET last_history_count = :n WHERE id = :id"
+        ), {"n": int(len(fills) if fills else 0), "id": str(broker_account.id)})
+        await db.commit()
+    except Exception as _e_lhc:
+        logger.warning(f"[reconcile] could not persist last_history_count: {_e_lhc}")
+        try: await db.rollback()
+        except Exception: pass
+
     if not fills:
         logger.info(f"[reconcile] no broker history rows for account={broker_account.id}")
         return counters

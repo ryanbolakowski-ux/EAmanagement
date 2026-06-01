@@ -36,6 +36,65 @@ from app.scripts.daily_data_fetch import run_daily_loop
 from app.scripts.daily_digest import run_daily_digest_loop
 
 
+_KYC_STARTUP_SYNC_RAN = False
+
+async def _run_kyc_startup_sync() -> None:
+    """Sweep every user with kyc_status='pending' AND a Stripe session id,
+    pulling the authoritative status from Stripe. Per-user errors logged but
+    do NOT block the rest. Runs ONCE per backend startup (module-level flag).
+    """
+    global _KYC_STARTUP_SYNC_RAN
+    if _KYC_STARTUP_SYNC_RAN:
+        logger.info("[kyc-startup-sync] already ran this process; skipping")
+        return
+    _KYC_STARTUP_SYNC_RAN = True
+
+    try:
+        from sqlalchemy import text as _t
+        from app.database import async_session_factory as _asf
+        from app.api.routes.kyc import sync_kyc_status_from_stripe
+    except Exception as e:
+        logger.warning(f"[kyc-startup-sync] import failed: {e}")
+        return
+
+    try:
+        async with _asf() as _db:
+            rows = (await _db.execute(_t(
+                "SELECT id::text AS id, email, kyc_status, kyc_session_id "
+                "FROM users "
+                "WHERE kyc_status = 'pending' AND kyc_session_id IS NOT NULL"
+            ))).mappings().all()
+    except Exception as e:
+        logger.warning(f"[kyc-startup-sync] could not fetch pending users: {e}")
+        return
+
+    logger.info(f"[kyc-startup-sync] sweeping {len(rows)} pending users")
+    swept_changed = 0
+    for r in rows:
+        email = r.get("email") or "?"
+        sid = r.get("kyc_session_id")
+        before = r.get("kyc_status") or "?"
+        try:
+            async with _asf() as _db2:
+                after = await sync_kyc_status_from_stripe(
+                    _db2, user_id=str(r["id"]), session_id=sid
+                )
+            after_label = after or before
+            if after and after != before:
+                swept_changed += 1
+            logger.info(
+                f"[kyc-startup-sync] user={email} session={sid} "
+                f"before={before} after={after_label}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[kyc-startup-sync] user={email} session={sid} error: {e}"
+            )
+    logger.info(
+        f"[kyc-startup-sync] complete: swept={len(rows)} transitioned={swept_changed}"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Theta Algos API...")
@@ -148,6 +207,19 @@ async def lifespan(app: FastAPI):
         intraday_refresh_task = asyncio.create_task(run_intraday_refresh_loop())
     except Exception as e:
         logger.warning(f"Failed to start intraday data refresher: {e}")
+
+    # ── KYC startup auto-sync (Stripe Identity webhook-loss safety net) ──
+    # On every backend startup, pull the authoritative status from Stripe for
+    # every user currently sitting at 'pending' with a Stripe session id.
+    # Recovers users where Stripe verified them but we didn't see the webhook
+    # (or our handler crashed before persisting). Idempotent — protected by a
+    # module-level _KYC_STARTUP_SYNC_RAN flag so a hot-reload mid-startup never
+    # double-runs. Per-user errors are isolated so one bad row can't block the
+    # rest.
+    try:
+        await _run_kyc_startup_sync()
+    except Exception as e:
+        logger.warning(f"[kyc-startup-sync] outer guard caught: {e}")
 
     try:
         yield

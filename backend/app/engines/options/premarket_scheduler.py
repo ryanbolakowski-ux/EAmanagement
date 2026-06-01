@@ -766,6 +766,20 @@ async def _run_scan_cycle(*, is_premarket: bool):
             await _scan_one_strategy(strat, user, is_premarket=is_premarket)
         except Exception as e:
             logger.error(f"[Scanner] strategy {rm.get('id')} failed: {e}")
+            try:
+                from app.engines.pipeline_alerts import send_pipeline_failure_alert
+                import traceback as _tb
+                await send_pipeline_failure_alert(
+                    reason=f"Scanner strategy run failed: {type(e).__name__}",
+                    context={"job": "premarket_scheduler._run_scan_cycle",
+                             "step": "per-strategy",
+                             "strategy_id": str(rm.get("id")),
+                             "is_premarket": is_premarket,
+                             "error": str(e)},
+                    traceback_str=_tb.format_exc(),
+                )
+            except Exception:
+                pass
 
 
 async def _run_auto_execute_pass():
@@ -886,6 +900,17 @@ async def start_premarket_scheduler():
             return
         except Exception as e:
             logger.error(f"[Scanner] loop error: {e}")
+            try:
+                from app.engines.pipeline_alerts import send_pipeline_failure_alert
+                import traceback as _tb
+                await send_pipeline_failure_alert(
+                    reason=f"Premarket scheduler outer loop crashed: {type(e).__name__}",
+                    context={"job": "premarket_scheduler.start_premarket_scheduler",
+                             "step": "outer_loop", "error": str(e)},
+                    traceback_str=_tb.format_exc(),
+                )
+            except Exception:
+                pass
             await _check_and_run_theta_scanner()
             await _check_trail_watcher()
             await _check_and_refresh_news_calendar()
