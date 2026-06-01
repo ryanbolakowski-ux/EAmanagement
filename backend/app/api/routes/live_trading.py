@@ -652,6 +652,11 @@ async def _ensure_balance_columns(db):
         await db.execute(_t(
             "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS last_history_count INTEGER"
         ))
+        # Per-user default allocation for Theta Scanner one-tap deploys.
+        # Pre-fills the Allocation $ input on the Live Trading page.
+        await db.execute(_t(
+            "ALTER TABLE broker_accounts ADD COLUMN IF NOT EXISTS theta_scanner_allocation_usd DOUBLE PRECISION"
+        ))
         await db.commit()
         _balance_cols_checked = True
     except Exception as e:
@@ -742,13 +747,21 @@ async def get_account_balance(
         await db.commit()
         _lg_se.info(f"[live-trading] captured starting_equity={new_se:.2f} for account={account.id} broker={account.broker} is_demo={account.is_demo}")
 
+    # Surface theta_scanner_allocation_usd so the UI can pre-fill in one
+    # round-trip after a Refresh balance click.
+    from sqlalchemy import text as _t_tsa
+    tsa_row = (await db.execute(_t_tsa(
+        "SELECT theta_scanner_allocation_usd FROM broker_accounts WHERE id = :id"
+    ), {"id": str(account.id)})).first()
+    theta_alloc = float(tsa_row[0]) if tsa_row and tsa_row[0] is not None else None
     return {
-        "equity":       bal.get("equity"),
-        "buying_power": bal.get("buying_power"),
-        "cash":         bal.get("cash"),
-        "account_type": bal.get("account_type"),
-        "margin_call":  bal.get("margin_call"),
-        "cached_at":    account.cached_balance_at.isoformat() if account.cached_balance_at else None,
+        "equity":                        bal.get("equity"),
+        "buying_power":                  bal.get("buying_power"),
+        "cash":                          bal.get("cash"),
+        "account_type":                  bal.get("account_type"),
+        "margin_call":                   bal.get("margin_call"),
+        "cached_at":                     account.cached_balance_at.isoformat() if account.cached_balance_at else None,
+        "theta_scanner_allocation_usd": theta_alloc,
     }
 
 
@@ -815,14 +828,179 @@ async def get_account_sizing(
     account = result.scalar_one_or_none()
     if not account:
         raise HTTPException(status_code=404, detail="Broker account not found.")
+    # cached_cash + theta_scanner_allocation_usd are added via ADD COLUMN
+    # IF NOT EXISTS (not in the ORM) so we read them via raw SQL.
+    from sqlalchemy import text as _t_gs
+    await _ensure_balance_columns(db)
+    extra = (await db.execute(_t_gs(
+        "SELECT cached_cash, theta_scanner_allocation_usd "
+        "FROM broker_accounts WHERE id = :id"
+    ), {"id": str(account.id)})).first()
+    cached_cash = float(extra[0]) if extra and extra[0] is not None else None
+    theta_alloc = float(extra[1]) if extra and extra[1] is not None else None
     return {
-        "account_type":         getattr(account, "account_type", "cash"),
-        "risk_per_trade_usd":   account.risk_per_trade_usd,
-        "risk_per_trade_pct":   account.risk_per_trade_pct,
-        "max_position_usd":     account.max_position_usd,
-        "cached_equity":        account.cached_equity,
-        "cached_buying_power":  account.cached_buying_power,
-        "cached_balance_at":    account.cached_balance_at.isoformat() if account.cached_balance_at else None,
+        "account_type":                  getattr(account, "account_type", "cash"),
+        "risk_per_trade_usd":            account.risk_per_trade_usd,
+        "risk_per_trade_pct":            account.risk_per_trade_pct,
+        "max_position_usd":              account.max_position_usd,
+        "cached_equity":                 account.cached_equity,
+        "cached_buying_power":           account.cached_buying_power,
+        "cached_cash":                   cached_cash,
+        "cached_balance_at":             account.cached_balance_at.isoformat() if account.cached_balance_at else None,
+        "theta_scanner_allocation_usd": theta_alloc,
+    }
+
+
+# ── POST /sizing-preview (live allocation-aware preview) ──────────────────
+
+class SizingPreviewRequest(BaseModel):
+    ticker: str
+    entry: float
+    stop: float
+    allocation_usd: float | None = None
+
+
+@router.post("/sizing-preview")
+async def sizing_preview_post(
+    body: SizingPreviewRequest,
+    current_user: User = Depends(require_kyc_verified),
+    db: AsyncSession = Depends(get_db),
+):
+    """POST variant of /sizing-preview that supports allocation-mode sizing
+    plus per-account `validation` for the placement gate.
+
+    Reuses compute_stock_position_size + validate_account_for_placement so the
+    UI shows exactly the same numbers it would when actually placing a trade.
+    Does NOT place any orders.
+    """
+    from loguru import logger
+    from sqlalchemy import text as _t
+
+    sym = (body.ticker or "").strip().upper()
+
+    # _ensure_balance_columns idempotently adds cached_cash + theta_scanner_*
+    # columns. Safe to call on every request.
+    await _ensure_balance_columns(db)
+
+    accts_res = await db.execute(
+        select(BrokerAccount).where(
+            BrokerAccount.user_id == current_user.id,
+            BrokerAccount.is_active == True,  # noqa: E712
+        )
+    )
+    accts = list(accts_res.scalars().all())
+
+    # Pull cached_cash for each account in one round-trip (column is added
+    # dynamically, so we read via raw SQL rather than relying on the ORM).
+    cash_map: dict[str, float | None] = {}
+    if accts:
+        ids = [str(a.id) for a in accts]
+        rows = (await db.execute(
+            _t("SELECT id::text, cached_cash FROM broker_accounts WHERE id::text = ANY(:ids)"),
+            {"ids": ids},
+        )).all()
+        for aid, c in rows:
+            cash_map[aid] = float(c) if c is not None else None
+
+    logger.info(
+        f"[sizing-preview POST] user={current_user.email} ticker={sym} "
+        f"entry={body.entry} stop={body.stop} allocation={body.allocation_usd} "
+        f"accounts={len(accts)}"
+    )
+
+    per_account = []
+    for a in accts:
+        cached_cash = cash_map.get(str(a.id))
+        sizing = compute_stock_position_size(
+            entry_price=float(body.entry),
+            stop_loss=float(body.stop),
+            account_equity=a.cached_equity,
+            buying_power=a.cached_buying_power,
+            account_type=a.account_type,
+            risk_per_trade_usd=a.risk_per_trade_usd,
+            risk_per_trade_pct=a.risk_per_trade_pct,
+            max_position_usd=a.max_position_usd,
+            allocation_usd=body.allocation_usd,
+            cached_cash=cached_cash,
+        )
+        sizing["summary"] = sizing["summary"].replace("{TICKER}", sym)
+
+        # Attach cached_cash to the account ORM object so the validator sees
+        # it (the column isn't in the ORM declaration).
+        try:
+            setattr(a, "cached_cash", cached_cash)
+        except Exception:
+            pass
+        validation = validate_account_for_placement(a)
+
+        per_account.append({
+            "broker_account_id": str(a.id),
+            "broker": a.broker,
+            "account_name": a.account_name,
+            "is_demo": bool(a.is_demo),
+            "account_type": (a.account_type or "cash").lower(),
+            "cached_equity": a.cached_equity,
+            "cached_buying_power": a.cached_buying_power,
+            "cached_cash": cached_cash,
+            "cached_balance_at": a.cached_balance_at.isoformat() if a.cached_balance_at else None,
+            "sizing": sizing,
+            "validation": validation,
+        })
+
+    return {
+        "ticker": sym,
+        "entry": float(body.entry),
+        "stop": float(body.stop),
+        "allocation_usd": body.allocation_usd,
+        "per_account": per_account,
+    }
+
+
+# ── PATCH /accounts/{id}/theta-scanner-allocation ─────────────────────────
+
+class ThetaScannerAllocationUpdate(BaseModel):
+    allocation_usd: float | None = None
+
+
+@router.patch("/accounts/{account_id}/theta-scanner-allocation")
+async def update_theta_scanner_allocation(
+    account_id: str,
+    data: ThetaScannerAllocationUpdate,
+    current_user: User = Depends(require_kyc_verified),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist the user's default $-allocation for Theta Scanner picks on
+    this broker account. Pre-fills the Allocation $ input on Live Trading.
+    Setting `allocation_usd=null` clears the default."""
+    from sqlalchemy import text as _t
+
+    result = await db.execute(
+        select(BrokerAccount).where(
+            BrokerAccount.id == account_id,
+            BrokerAccount.user_id == current_user.id,
+        )
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Broker account not found.")
+
+    if data.allocation_usd is not None and float(data.allocation_usd) <= 0:
+        raise HTTPException(status_code=400, detail="allocation_usd must be > 0 (or null to clear).")
+
+    await _ensure_balance_columns(db)
+    await db.execute(
+        _t("UPDATE broker_accounts SET theta_scanner_allocation_usd = :v WHERE id = :id"),
+        {
+            "v": float(data.allocation_usd) if data.allocation_usd is not None else None,
+            "id": str(account.id),
+        },
+    )
+    await db.commit()
+    return {
+        "broker_account_id": str(account.id),
+        "theta_scanner_allocation_usd": (
+            float(data.allocation_usd) if data.allocation_usd is not None else None
+        ),
     }
 
 
@@ -1406,7 +1584,11 @@ def compute_stock_position_size(
     risk_per_trade_usd: float | None,
     risk_per_trade_pct: float | None,
     max_position_usd: float | None,
+    allocation_usd: float | None = None,
+    cached_cash: float | None = None,
 ) -> dict:
+    # RISK_CALC_ALLOCATION_V1 — adds allocation mode + cash-account
+    # constraint. See docstring below.
     """Compute how many shares to buy given entry/stop and account-level risk
     settings. Pure function — no DB, no I/O. Used by the /sizing-preview
     endpoint and unit-tested in backend/tests/test_position_sizing.py.
@@ -1417,6 +1599,7 @@ def compute_stock_position_size(
     # Coerce None equity/BP to 0 so downstream math doesn't blow up.
     eq = float(account_equity) if account_equity is not None else 0.0
     bp = float(buying_power) if buying_power is not None else 0.0
+    cash = float(cached_cash) if cached_cash is not None else None
     acct_type = (account_type or "cash").lower()
 
     # Edge: bad entry price.
@@ -1441,23 +1624,30 @@ def compute_stock_position_size(
             "summary": "Entry and stop are equal — define a stop to size the trade.",
         }
 
-    # Pick risk model: explicit USD wins over %, else default to 1%.
-    if risk_per_trade_usd is not None and float(risk_per_trade_usd) > 0:
+    # Pick model: allocation > usd > pct > default_pct_1. Allocation is the
+    # most specific intent ("buy $X of this stock") and wins over risk-based.
+    if allocation_usd is not None and float(allocation_usd) > 0:
+        risk_model = "allocation"
+        risk_dollars_target = float(allocation_usd)   # informational
+        raw_shares = int(float(allocation_usd) // float(entry_price))
+    elif risk_per_trade_usd is not None and float(risk_per_trade_usd) > 0:
         risk_model = "usd"
         risk_dollars_target = float(risk_per_trade_usd)
+        raw_shares = int(risk_dollars_target // risk_per_share)
     elif risk_per_trade_pct is not None and float(risk_per_trade_pct) > 0:
         risk_model = "pct"
         risk_dollars_target = eq * (float(risk_per_trade_pct) / 100.0)
+        raw_shares = int(risk_dollars_target // risk_per_share)
     else:
         risk_model = "default_pct_1"
         risk_dollars_target = eq * 0.01
+        raw_shares = int(risk_dollars_target // risk_per_share)
 
-    raw_shares = int(risk_dollars_target // risk_per_share)
     raw_notional = raw_shares * float(entry_price)
 
-    # Constraints: max_position_usd then buying_power. Both are applied if
-    # they'd reduce share count; we report each one's would-cap and whether
-    # it was the binding constraint.
+    # Constraints: max_position_usd, then cash (for cash accounts) OR
+    # buying_power (for margin accounts). Each one's `applied` says whether
+    # it was the binding constraint that strictly reduced share count.
     constraints: list[dict] = []
 
     if max_position_usd is not None and float(max_position_usd) > 0:
@@ -1471,24 +1661,37 @@ def compute_stock_position_size(
         "applied": False,
     })
 
-    bp_cap_shares = int(bp // float(entry_price)) if bp > 0 else 0
-    constraints.append({
-        "name": "buying_power",
-        "limit_usd": bp,
-        "would_cap_shares_at": bp_cap_shares,
-        "applied": False,
-    })
+    # Cash account → cash is the binding capital constraint (no leverage).
+    # Margin account → buying_power. If cash was passed for a margin account,
+    # we still show BP as the constraint (BP already encodes margin headroom).
+    if acct_type == "cash" and cash is not None:
+        cash_cap_shares = int(cash // float(entry_price)) if cash > 0 else 0
+        constraints.append({
+            "name": "cash",
+            "limit_usd": float(cash),
+            "would_cap_shares_at": cash_cap_shares,
+            "applied": False,
+        })
+        cap_index_capital = 1
+        capital_cap_shares = cash_cap_shares
+    else:
+        bp_cap_shares = int(bp // float(entry_price)) if bp > 0 else 0
+        constraints.append({
+            "name": "buying_power",
+            "limit_usd": bp,
+            "would_cap_shares_at": bp_cap_shares,
+            "applied": False,
+        })
+        cap_index_capital = 1
+        capital_cap_shares = bp_cap_shares
 
     final_shares = raw_shares
     if mp_cap_shares is not None and mp_cap_shares < final_shares:
         final_shares = mp_cap_shares
         constraints[0]["applied"] = True
-    if bp_cap_shares < final_shares:
-        final_shares = bp_cap_shares
-        constraints[1]["applied"] = True
-    # If max_position_usd already capped us and buying_power matches that cap
-    # exactly, treat buying_power as not the binding constraint (max_position
-    # already did the work). Only mark applied if it strictly reduced shares.
+    if capital_cap_shares < final_shares:
+        final_shares = capital_cap_shares
+        constraints[cap_index_capital]["applied"] = True
 
     if final_shares < 0:
         final_shares = 0
@@ -1501,14 +1704,27 @@ def compute_stock_position_size(
         reasons = []
         if mp_cap_shares is not None and mp_cap_shares == 0:
             reasons.append(f"max_position_usd=${float(max_position_usd):,.0f}")
-        if bp_cap_shares == 0:
-            reasons.append(f"buying_power=${bp:,.0f}")
-        if raw_shares == 0:
+        if capital_cap_shares == 0:
+            cap_name = constraints[cap_index_capital]["name"]
+            cap_amt = constraints[cap_index_capital]["limit_usd"] or 0
+            reasons.append(f"{cap_name}=${float(cap_amt):,.0f}")
+        if risk_model != "allocation" and raw_shares == 0:
             reasons.append(
                 f"risk target ${risk_dollars_target:,.2f} < risk/share ${risk_per_share:,.2f}"
             )
+        if risk_model == "allocation" and raw_shares == 0:
+            reasons.append(
+                f"allocation ${float(allocation_usd):,.0f} < entry ${float(entry_price):.2f}"
+            )
         reason_str = "; ".join(reasons) if reasons else "constraints zeroed position"
         summary = f"Cannot size a position: {reason_str}."
+    elif risk_model == "allocation":
+        plural = "s" if final_shares != 1 else ""
+        summary = (
+            f"Buy {final_shares} share{plural} of {{TICKER}} for "
+            f"~${final_notional:,.0f} (allocation: ${float(allocation_usd):,.0f}). "
+            f"Risk: ${actual_dollar_risk:,.0f} if stop hits at ${float(stop_loss):.2f}."
+        )
     else:
         plural = "s" if final_shares != 1 else ""
         summary = (
@@ -1525,6 +1741,8 @@ def compute_stock_position_size(
         "risk_per_trade_usd": float(risk_per_trade_usd) if risk_per_trade_usd is not None else None,
         "risk_per_trade_pct": float(risk_per_trade_pct) if risk_per_trade_pct is not None else None,
         "max_position_usd": float(max_position_usd) if max_position_usd is not None else None,
+        "allocation_usd": float(allocation_usd) if allocation_usd is not None else None,
+        "cached_cash_used": float(cash) if cash is not None else None,
         "account_equity_used": eq,
         "buying_power_used": bp,
         "account_type": acct_type,
@@ -1537,6 +1755,55 @@ def compute_stock_position_size(
         "actual_dollar_risk": float(actual_dollar_risk),
         "summary": summary,
     }
+
+
+def validate_account_for_placement(broker_account) -> dict | None:
+    """Pre-placement gate. Returns None if all good, else a dict with
+    `error` (user-facing message) and `reason` (machine-readable enum):
+
+      • "stale"             → cached_balance_at is null or older than 5 min
+      • "missing"           → cached_equity missing, or cash account with no cached_cash
+      • "insufficient_cash" → reserved (sizing math returns final_shares=0 in this case)
+      • "insufficient_bp"   → reserved (same)
+    """
+    from datetime import datetime, timezone
+
+    cached_at = getattr(broker_account, "cached_balance_at", None)
+    if cached_at is None:
+        return {
+            "error": "Account info missing. Sync account first.",
+            "reason": "missing",
+        }
+    now = datetime.now(timezone.utc)
+    age_seconds = (now - cached_at).total_seconds()
+    if age_seconds > 300:  # 5 minutes
+        age_min = int(age_seconds // 60)
+        return {
+            "error": (
+                f"Account data is {age_min} minutes stale. "
+                "Click 'Refresh balance' before placing trades."
+            ),
+            "reason": "stale",
+        }
+
+    eq = getattr(broker_account, "cached_equity", None)
+    if eq is None:
+        return {
+            "error": "Account info missing. Sync account first.",
+            "reason": "missing",
+        }
+
+    acct_type = (getattr(broker_account, "account_type", None) or "cash").lower()
+    if acct_type == "cash":
+        # cached_cash is added via ADD COLUMN IF NOT EXISTS — read defensively.
+        cash = getattr(broker_account, "cached_cash", None)
+        if cash is None:
+            return {
+                "error": "Account info missing. Sync account first.",
+                "reason": "missing",
+            }
+
+    return None
 
 
 @router.get("/sizing-preview")

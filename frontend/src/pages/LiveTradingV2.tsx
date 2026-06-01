@@ -323,21 +323,35 @@ function TodayPickCard() {
 // "If a signal fires for ticker X, here is exactly what each connected
 // broker account would buy." Defaults seed an NVDA worked example so the
 // user sees concrete numbers (shares, notional, $ at risk) on first load.
+// RISK_CALC_FRONTEND_V1 — Risk Calculator (allocation + cash/margin + staleness)
 function SizingPreviewCard() {
+  const qc = useQueryClient()
   const [ticker, setTicker] = useState('NVDA')
-  const [entry, setEntry] = useState('1300')
-  const [stop, setStop] = useState('1287')
+  const [entry, setEntry] = useState('150')
+  const [stop, setStop] = useState('147')
+  const [allocation, setAllocation] = useState('')           // dollar input ("" = risk-based)
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null)
+  const [saveAsDefault, setSaveAsDefault] = useState(false)
 
   const tickerOk = ticker.trim().length > 0
   const entryNum = parseFloat(entry)
   const stopNum = parseFloat(stop)
-  const inputsOk = tickerOk && Number.isFinite(entryNum) && entryNum > 0
+  const allocNum = parseFloat(allocation)
+  const allocOk = allocation === '' || (Number.isFinite(allocNum) && allocNum > 0)
+  const inputsOk = tickerOk
+    && Number.isFinite(entryNum) && entryNum > 0
     && Number.isFinite(stopNum) && stopNum > 0
+    && allocOk
 
+  // POST /sizing-preview is allocation-aware AND returns per-account
+  // validation (staleness/missing). Used whenever inputs change.
   const { data, isFetching, error } = useQuery({
-    queryKey: ['sizing-preview', ticker.trim().toUpperCase(), entry, stop],
-    queryFn: () => api.get('/api/v1/live-trading/sizing-preview', {
-      params: { ticker: ticker.trim().toUpperCase(), entry: entryNum, stop: stopNum },
+    queryKey: ['sizing-preview-v2', ticker.trim().toUpperCase(), entry, stop, allocation],
+    queryFn: () => api.post('/api/v1/live-trading/sizing-preview', {
+      ticker: ticker.trim().toUpperCase(),
+      entry: entryNum,
+      stop: stopNum,
+      allocation_usd: allocation === '' ? null : allocNum,
     }).then(r => r.data),
     enabled: inputsOk,
     refetchInterval: 30000,
@@ -345,17 +359,138 @@ function SizingPreviewCard() {
 
   const accts: any[] = data?.per_account || []
 
+  // Default the account selector to the first account once data loads.
+  if (selectedAccountId === null && accts.length > 0) {
+    setSelectedAccountId(accts[0].broker_account_id)
+  }
+  const selected = accts.find(a => a.broker_account_id === selectedAccountId) || accts[0] || null
+
+  // Pre-fill Allocation from the account's saved Theta Scanner default
+  // (only on initial load — never overwrite user edits).
+  const [allocPrefilledFor, setAllocPrefilledFor] = useState<string | null>(null)
+  if (selected && allocation === '' && allocPrefilledFor !== selected.broker_account_id) {
+    // We don't have theta_scanner_allocation_usd in the POST response; fetch
+    // it from GET /accounts/{id}/sizing lazily.
+    setAllocPrefilledFor(selected.broker_account_id)
+    api.get(`/api/v1/live-trading/accounts/${selected.broker_account_id}/sizing`)
+      .then(r => {
+        const v = r.data?.theta_scanner_allocation_usd
+        if (v && allocation === '') setAllocation(String(v))
+      })
+      .catch(() => {})
+  }
+
+  const refreshBalance = useMutation({
+    mutationFn: async () => {
+      if (!selected) throw new Error('no account selected')
+      return (await api.get(`/api/v1/live-trading/accounts/${selected.broker_account_id}/balance`)).data
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sizing-preview-v2'] })
+      qc.invalidateQueries({ queryKey: ['portfolio-summary'] })
+    },
+  })
+
+  const saveDefaultAlloc = useMutation({
+    mutationFn: async (amt: number | null) => {
+      if (!selected) throw new Error('no account selected')
+      return (await api.patch(
+        `/api/v1/live-trading/accounts/${selected.broker_account_id}/theta-scanner-allocation`,
+        { allocation_usd: amt },
+      )).data
+    },
+  })
+
+  // Persist allocation when the checkbox is checked and the user edits it.
+  // Light debounce: 600ms.
+  const [pendingSave, setPendingSave] = useState<number | null>(null)
+  if (saveAsDefault && selected && allocation !== '' && Number.isFinite(allocNum) && allocNum > 0) {
+    if (pendingSave !== allocNum) {
+      setPendingSave(allocNum)
+      const handle = setTimeout(() => { saveDefaultAlloc.mutate(allocNum) }, 600)
+      // cleanup when the value changes again
+      ;(window as any).__theta_alloc_handle && clearTimeout((window as any).__theta_alloc_handle)
+      ;(window as any).__theta_alloc_handle = handle
+    }
+  }
+
+  // ── Staleness color helper ──
+  function staleAge(iso?: string | null): { mins: number; tone: 'fresh' | 'amber' | 'red'; label: string } {
+    if (!iso) return { mins: Infinity, tone: 'red', label: 'never synced' }
+    const ms = Date.now() - new Date(iso).getTime()
+    const mins = Math.floor(ms / 60000)
+    let tone: 'fresh' | 'amber' | 'red' = 'fresh'
+    if (mins >= 30) tone = 'red'
+    else if (mins >= 5) tone = 'amber'
+    const label = mins < 1 ? 'just now' : `${mins} min ago`
+    return { mins, tone, label }
+  }
+
   return (
     <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5 md:p-6 shadow-sm">
       <div className="flex items-start justify-between mb-1">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300 font-extrabold">Trade Sizing Preview</div>
-          <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">If a signal fires for this ticker, here's exactly what each account would buy.</div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300 font-extrabold">Risk Calculator · Trade Sizing</div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Enter a ticker, entry, and stop. Set Allocation $ to size by dollars (overrides per-trade risk).
+          </div>
         </div>
         {isFetching && <div className="text-[10px] text-slate-400">refreshing…</div>}
       </div>
 
-      <div className="grid grid-cols-3 gap-3 mt-4 max-w-md">
+      {/* ── TOP STRIP: per-account status ───────────────────────────────── */}
+      {selected && (() => {
+        const stale = staleAge(selected.cached_balance_at)
+        const toneClass =
+          stale.tone === 'red'   ? 'text-rose-600 dark:text-rose-400'
+          : stale.tone === 'amber' ? 'text-amber-600 dark:text-amber-400'
+          : 'text-emerald-600 dark:text-emerald-400'
+        return (
+          <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-3">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-center">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Account type</div>
+                <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">{(selected.account_type || 'cash').toUpperCase()}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Cash</div>
+                <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                  {selected.cached_cash != null ? `$${Number(selected.cached_cash).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Buying power</div>
+                <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                  {selected.cached_buying_power != null ? `$${Number(selected.cached_buying_power).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Equity</div>
+                <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                  {selected.cached_equity != null ? `$${Number(selected.cached_equity).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Last synced</div>
+                <div className={`text-sm font-bold tabular-nums ${toneClass}`}>{stale.label}</div>
+              </div>
+              <div className="md:text-right">
+                <button
+                  onClick={() => refreshBalance.mutate()}
+                  disabled={refreshBalance.isPending}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-900/30 hover:bg-violet-100 dark:hover:bg-violet-900/50 disabled:opacity-50"
+                >
+                  <RefreshCw size={11} className={refreshBalance.isPending ? 'animate-spin' : ''}/>
+                  Refresh balance
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── INPUT GRID: 4 cols (ticker / entry / stop / allocation) + selector ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
         <div>
           <label className="block text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mb-1">Ticker</label>
           <input
@@ -382,10 +517,53 @@ function SizingPreviewCard() {
             className="w-full px-2 py-1.5 text-sm font-semibold rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 tabular-nums focus:outline-none focus:ring-2 focus:ring-violet-500"
           />
         </div>
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-violet-600 dark:text-violet-300 font-bold mb-1">Allocation $</label>
+          <input
+            value={allocation}
+            onChange={e => setAllocation(e.target.value)}
+            inputMode="decimal"
+            placeholder="(optional)"
+            className="w-full px-2 py-1.5 text-sm font-semibold rounded-lg border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 tabular-nums focus:outline-none focus:ring-2 focus:ring-violet-500"
+          />
+          <label className="mt-1 inline-flex items-center gap-1.5 text-[10px] text-slate-600 dark:text-slate-400 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={saveAsDefault}
+              onChange={e => {
+                setSaveAsDefault(e.target.checked)
+                if (!e.target.checked && selected) {
+                  // Clearing the checkbox clears the persisted default.
+                  saveDefaultAlloc.mutate(null)
+                }
+              }}
+              className="rounded border-slate-300 dark:border-slate-600 text-violet-600 focus:ring-violet-500"
+            />
+            Save as default (Theta Scanner)
+          </label>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="md:col-span-2">
+          <label className="block text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mb-1">Account</label>
+          <select
+            value={selectedAccountId || ''}
+            onChange={e => { setSelectedAccountId(e.target.value); setAllocPrefilledFor(null); setAllocation('') }}
+            className="w-full px-2 py-1.5 text-sm font-semibold rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+          >
+            {accts.length === 0 && <option value="">No active accounts</option>}
+            {accts.map(a => (
+              <option key={a.broker_account_id} value={a.broker_account_id}>
+                {a.account_name} — {a.broker}{a.is_demo ? ' (sandbox)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {!inputsOk && (
-        <div className="mt-4 text-xs text-slate-500 dark:text-slate-400">Enter a ticker, entry price, and stop price.</div>
+        <div className="mt-4 text-xs text-slate-500 dark:text-slate-400">Enter a ticker, entry, and stop (and optionally an allocation).</div>
       )}
 
       {error && (
@@ -396,9 +574,11 @@ function SizingPreviewCard() {
         <div className="mt-4 text-xs text-slate-500 dark:text-slate-400">No active broker accounts to size against.</div>
       )}
 
+      {/* ── PER-ACCOUNT RESULT CARDS ───────────────────────────────────── */}
       <div className="mt-4 grid grid-cols-1 gap-3">
         {accts.map((a: any) => {
           const s = a.sizing || {}
+          const v = a.validation
           const shares = Number(s.final_shares || 0)
           const summaryClass = shares > 0
             ? 'text-emerald-600 dark:text-emerald-400'
@@ -406,13 +586,14 @@ function SizingPreviewCard() {
           const cappedNames = (s.constraints || [])
             .filter((c: any) => c.applied)
             .map((c: any) => c.name)
-          const modelLabel = s.risk_model === 'usd'
-            ? `$${Number(s.risk_per_trade_usd || 0).toLocaleString()} per trade`
-            : s.risk_model === 'pct'
-              ? `${Number(s.risk_per_trade_pct || 0)}% per trade`
-              : s.risk_model === 'default_pct_1'
-                ? '1% per trade (default)'
-                : '—'
+          const modelLabel =
+            s.risk_model === 'allocation' ? `$${Number(s.allocation_usd || 0).toLocaleString()} allocation`
+            : s.risk_model === 'usd' ? `$${Number(s.risk_per_trade_usd || 0).toLocaleString()} per trade`
+            : s.risk_model === 'pct' ? `${Number(s.risk_per_trade_pct || 0)}% per trade`
+            : s.risk_model === 'default_pct_1' ? '1% per trade (default)'
+            : '—'
+          const deployDisabled = !!v || shares <= 0
+          const deployReason = v ? v.error : shares <= 0 ? 'Sizing returned 0 shares.' : ''
           return (
             <div key={a.broker_account_id} className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-4">
               <div className="flex items-start justify-between mb-2">
@@ -420,10 +601,17 @@ function SizingPreviewCard() {
                   <div className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">
                     {a.account_name} <span className="text-slate-500 dark:text-slate-400 font-normal">· {a.broker}</span>
                     {a.is_demo && <span className="ml-2 text-[10px] uppercase tracking-wider font-extrabold text-amber-600 dark:text-amber-400">sandbox</span>}
+                    <span className="ml-2 text-[10px] uppercase tracking-wider font-extrabold text-slate-500 dark:text-slate-400">{(a.account_type || 'cash')}</span>
                   </div>
                 </div>
                 <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold whitespace-nowrap">{modelLabel}</div>
               </div>
+
+              {v && (
+                <div className="mb-3 rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300">
+                  {v.error}
+                </div>
+              )}
 
               <div className={`text-base md:text-lg font-extrabold tabular-nums ${summaryClass}`}>
                 {s.summary || '—'}
@@ -439,17 +627,42 @@ function SizingPreviewCard() {
                   <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.account_equity_used || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
                 </div>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Buying power</div>
-                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.buying_power_used || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">{(a.account_type || 'cash') === 'cash' ? 'Cash available' : 'Buying power'}</div>
+                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                    ${Number(
+                      (a.account_type || 'cash') === 'cash'
+                        ? (s.cached_cash_used || a.cached_cash || 0)
+                        : (s.buying_power_used || 0)
+                    ).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </div>
                 </div>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Risk target</div>
-                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.risk_dollars_target || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">
+                    {s.risk_model === 'allocation' ? 'Allocation' : 'Risk target'}
+                  </div>
+                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                    ${Number(s.risk_model === 'allocation' ? (s.allocation_usd || 0) : (s.risk_dollars_target || 0))
+                       .toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </div>
                 </div>
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold">Risk/share</div>
                   <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">${Number(s.risk_per_share || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
                 </div>
+              </div>
+
+              <div className="mt-3 flex items-center justify-end">
+                <button
+                  disabled={deployDisabled}
+                  title={deployDisabled ? deployReason : ''}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold ${
+                    deployDisabled
+                      ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
+                      : 'bg-violet-600 hover:bg-violet-700 text-white shadow-md shadow-violet-900/20'
+                  }`}
+                >
+                  <Zap size={11}/> Deploy ({shares} shares)
+                </button>
               </div>
             </div>
           )
