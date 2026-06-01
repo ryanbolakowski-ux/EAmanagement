@@ -1171,9 +1171,9 @@ export default function LiveTradingV2() {
                     // Match the asset-type tab the user has selected (futures/options/stocks).
                     const tabClass: AssetClass = assetType === 'stocks' ? 'stock' : assetType
                     const groups: { label: string; assetClass: AssetClass; items: any[]; emoji: string }[] = [
-                      { label: 'Futures',  assetClass: 'futures',  items: byClass.futures,  emoji: '⚡' },
-                      { label: 'Options',  assetClass: 'options',  items: byClass.options,  emoji: '🎯' },
-                      { label: 'Stocks',   assetClass: 'stock',    items: byClass.stock,    emoji: '📈' },
+                      { label: 'Futures',  assetClass: 'futures' as const,  items: byClass.futures,  emoji: '⚡' },
+                      { label: 'Options',  assetClass: 'options' as const,  items: byClass.options,  emoji: '🎯' },
+                      { label: 'Stocks',   assetClass: 'stock' as const,    items: byClass.stock,    emoji: '📈' },
                     ].filter(g => g.assetClass === tabClass)
                     // Add Theta Scanner to the stock optgroup if the broker
                     // supports stocks. (It's the only built-in non-user
