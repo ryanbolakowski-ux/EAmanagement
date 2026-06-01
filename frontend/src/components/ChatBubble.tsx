@@ -87,7 +87,7 @@ export default function ChatBubble() {
           const copy = [...m]
           copy[copy.length - 1] = {
             role: 'assistant',
-            content: errBody.detail || `I'm having trouble right now (HTTP ${r.status}). Email theta.algos@yahoo.com and a human will help.`,
+            content: errBody.detail || `I'm having trouble right now (HTTP ${r.status}). Email support@thetaalgos.com and a human will help.`,
           }
           return copy
         })
@@ -118,7 +118,7 @@ export default function ChatBubble() {
                 return copy
               })
             } else if (payload.error) {
-              assistantText = `Sorry — ${payload.error}. Try again, or email theta.algos@yahoo.com.`
+              assistantText = `Sorry — ${payload.error}. Try again, or email support@thetaalgos.com.`
               setMsgs(m => {
                 const copy = [...m]
                 copy[copy.length - 1] = { role: 'assistant', content: assistantText }
@@ -133,7 +133,7 @@ export default function ChatBubble() {
         const copy = [...m]
         copy[copy.length - 1] = {
           role: 'assistant',
-          content: `Connection failed (${e?.message || 'unknown'}). Email theta.algos@yahoo.com.`,
+          content: `Connection failed (${e?.message || 'unknown'}). Email support@thetaalgos.com.`,
         }
         return copy
       })
@@ -210,7 +210,7 @@ export default function ChatBubble() {
             ))}
 
             {/* Starter suggestions */}
-            {showSuggestions && msgs.length === 1 && (
+            {showSuggestions && msgs.length === 1 && configured !== false && (
               <div className="space-y-1.5 pt-2">
                 <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 dark:text-slate-400 mb-1">Try asking</div>
                 {SUGGESTIONS.map(s => (
@@ -250,7 +250,7 @@ export default function ChatBubble() {
               </button>
             </div>
             <div className="text-[9px] text-slate-400 mt-1.5 text-center">
-              AI can make mistakes. For account-specific issues, email theta.algos@yahoo.com.
+              AI can make mistakes. For account-specific issues, email support@thetaalgos.com.
             </div>
           </div>
         </div>

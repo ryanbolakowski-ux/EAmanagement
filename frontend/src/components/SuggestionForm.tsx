@@ -5,7 +5,7 @@ type Category = 'feature' | 'bug' | 'ux' | 'other'
 
 /**
  * SuggestionForm — a floating "Leave a suggestion" widget mounted alongside
- * the ChatBubble. Sends to theta.algos@yahoo.com via /api/v1/support/suggestion.
+ * the ChatBubble. Sends to the platform owner via /api/v1/support/suggestion (the inbox is configured via ADMIN_NOTIFY_EMAIL).
  */
 export default function SuggestionForm() {
   const [open, setOpen] = useState(false)
@@ -66,7 +66,7 @@ export default function SuggestionForm() {
               <Lightbulb size={18} />
               <div>
                 <div className="font-bold text-sm">Leave a suggestion</div>
-                <div className="text-[10px] opacity-90">Goes straight to theta.algos@yahoo.com</div>
+                <div className="text-[10px] opacity-90">Goes straight to the Theta Algos team</div>
               </div>
             </div>
             <button onClick={() => setOpen(false)} className="opacity-80 hover:opacity-100" aria-label="Close">
