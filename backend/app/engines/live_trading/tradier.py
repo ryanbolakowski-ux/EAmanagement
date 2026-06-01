@@ -224,8 +224,14 @@ class TradierBroker(BrokerBase):
             logger.warning(f"[Tradier] get_account_history error: {e}")
             return []
 
-        history = (data or {}).get("history") or {}
-        if not history:
+        # Tradier sometimes returns a non-dict (`null`/string) when there is
+        # no history matching the filter. Guard every step so we never call
+        # .get on something that isn't a dict.
+        if not isinstance(data, dict):
+            logger.info(f"[Tradier] get_account_history: non-dict response ({type(data).__name__}); treating as empty")
+            return []
+        history = data.get("history")
+        if not isinstance(history, dict):
             return []
         events = history.get("event")
         if not events:

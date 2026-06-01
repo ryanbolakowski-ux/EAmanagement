@@ -976,7 +976,7 @@ async def get_portfolio_summary(
             ), b AS (
               SELECT ticker, entry_price, qty
                 FROM open_positions_watch
-               WHERE user_id = :uid
+               WHERE user_id = :uid AND status IN ('open','active','pending')
             )
             SELECT ticker, entry_price, qty FROM a
             UNION

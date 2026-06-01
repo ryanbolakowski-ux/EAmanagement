@@ -126,6 +126,14 @@ async def reconcile_trades_from_broker(db: AsyncSession, broker_account) -> dict
     account_id = str(broker_account.id)
 
     for fill in fills:
+        # Belt-and-suspenders: never call .get on a non-dict (would crash with
+        # 'str' object has no attribute 'get'). The Tradier normaliser should
+        # already drop these but defending here means a single bad row can't
+        # take down the whole reconcile.
+        if not isinstance(fill, dict):
+            logger.warning(f"[reconcile] skipping non-dict fill: {type(fill).__name__}: {str(fill)[:80]}")
+            counters["skipped_other_reason"] += 1
+            continue
         # Only consider true fills (trade/option). Journals/dividends/etc.
         # are accounted for elsewhere (deposits/withdrawals in the reconciliation
         # block).
