@@ -233,7 +233,7 @@ export default function SystemsCheck({ token }: { token: string | null }) {
   const [err, setErr] = useState<string | null>(null)
   const [lastFetch, setLastFetch] = useState<Date | null>(null)
 
-  const headers = token ? { Authorization: `Bearer ${token}` } : {}
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
 
   const fetchData = useCallback(async () => {
     if (!token) return
