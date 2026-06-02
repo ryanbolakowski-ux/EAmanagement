@@ -16,6 +16,18 @@ from loguru import logger
 from app.config import settings
 from app.services.email import _send, _logo_header
 
+import os  # plain os for the chat feature flag (kept separate from
+            # the lazy `_chat_os` reference further down so we never
+            # rely on an in-function import to decide flag state)
+
+# ── AI chat feature flag ────────────────────────────────────────────────
+# When false (the default), the /chat/status and /chat endpoints short-circuit
+# BEFORE importing or initializing the Anthropic SDK. This keeps us from
+# burning API spend (and from even loading the SDK into memory) while the
+# chat product is being tuned. Re-enable by setting ENABLE_AI_CHAT=true
+# in the backend .env and ENABLE_AI_CHAT=true in the frontend (Vercel).
+CHAT_ENABLED = os.environ.get("ENABLE_AI_CHAT", "false").lower() == "true"
+
 
 router = APIRouter()
 
@@ -151,15 +163,32 @@ class _ChatRequest(BaseModel):
 
 @router.get('/chat/status')
 async def chat_status(current_user: _U = Depends(_gcu)):
-    """Lets the widget decide whether to enable the input. configured=False
-    means the assistant has no provider key set, so the UI should show a clear
-    'being set up' state instead of letting users type questions that fail."""
+    """Reports widget state. When the AI chat feature flag is off (default),
+    returns disabled=true so the UI can show a calm 'FAQ instead' state and
+    skip the streaming POST entirely. When on, returns configured=True/False
+    based on whether ANTHROPIC_API_KEY is present."""
+    if not CHAT_ENABLED:
+        logger.info("[chat] disabled \u2014 feature flag off (status check)")
+        return {
+            "configured": False,
+            "disabled": True,
+            "message": "AI chat is temporarily disabled. Visit /help for the FAQ.",
+        }
     configured = bool(_chat_os.environ.get('ANTHROPIC_API_KEY', ''))
-    return {"configured": configured}
+    return {"configured": configured, "disabled": False}
 
 
 @router.post('/chat')
 async def chat(data: _ChatRequest, request: Request, current_user: _U = Depends(_gcu)):
+    # Feature-flag gate — this MUST run before any anthropic import/init.
+    # When disabled, we never construct an AsyncAnthropic client, never
+    # touch the SDK module, and never spend API credits.
+    if not CHAT_ENABLED:
+        logger.info("[chat] disabled \u2014 feature flag off")
+        raise HTTPException(
+            status_code=503,
+            detail="AI chat is disabled. See https://thetaalgos.com/help for help.",
+        )
     api_key = _chat_os.environ.get('ANTHROPIC_API_KEY', '')
     logger.info(f"[support.chat] request user={getattr(current_user, 'email', '?')} turns={len(data.messages)} configured={bool(api_key)}")
     if not api_key:

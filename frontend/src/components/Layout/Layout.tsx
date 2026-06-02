@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react'
 import { Outlet, NavLink, Link, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, TrendingUp, FlaskConical, Sliders,
-  PlayCircle, Zap, LogOut, Shield, BarChart2, BookOpen, Menu, X, Building2, Bell, LineChart, Globe, Sparkles,
+  PlayCircle, Zap, LogOut, Shield, BarChart2, BookOpen, Menu, X, Building2, Bell, LineChart, Globe, Sparkles, HelpCircle,
 } from 'lucide-react'
 import ThetaLogo from '../ThetaLogo'
 import { useAuthStore } from '../../stores/authStore'
 import { authApi } from '../../api/endpoints'
 import ChatBubble from '../ChatBubble'
+import { ENABLE_AI_CHAT } from '../../utils/featureFlags'
 import { getDevicePref } from '../DevicePicker'
 
 const traderNav: { to: string; icon: any; label: string }[] = [
@@ -163,6 +164,14 @@ export default function Layout() {
                   <Shield size={18}/>
                   Profile
                 </NavLink>
+                <Link
+                  to="/help"
+                  onClick={() => setDrawerOpen(false)}
+                  className="flex items-center gap-3 px-3 py-3 rounded-lg text-base font-medium text-slate-700 dark:text-slate-200 hover:bg-violet-100/60 dark:hover:bg-violet-900/20"
+                >
+                  <HelpCircle size={18}/>
+                  Help & FAQ
+                </Link>
               </nav>
               <div className="px-3 py-3 border-t border-slate-200 dark:border-slate-800">
                 <button
@@ -201,7 +210,7 @@ export default function Layout() {
           ))}
         </nav>
 
-        <ChatBubble/>
+        {ENABLE_AI_CHAT && <ChatBubble/>}
       </div>
     )
   }
@@ -252,6 +261,13 @@ export default function Layout() {
               <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate">{user?.email}</div>
             </div>
           </div>
+          <Link
+            to="/help"
+            className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-violet-600 dark:hover:text-violet-400 transition-colors w-full"
+          >
+            <HelpCircle size={12}/>
+            Help & FAQ
+          </Link>
           <button
             onClick={() => { logout(); navigate('/') }}
             className="flex items-center gap-1.5 text-xs text-slate-400 dark:text-slate-500 hover:text-red-500 transition-colors mt-1 w-full"
@@ -264,7 +280,7 @@ export default function Layout() {
       <main className="flex-1 overflow-auto">
         <Outlet/>
       </main>
-      <ChatBubble/>
+      {ENABLE_AI_CHAT && <ChatBubble/>}
     </div>
   )
 }

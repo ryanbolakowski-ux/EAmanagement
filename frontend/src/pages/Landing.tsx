@@ -168,6 +168,7 @@ export default function Landing() {
             <a href="#features" className="hover:text-slate-900 dark:text-slate-100 transition-colors">Features</a>
             <a href="#how-it-works" className="hover:text-slate-900 dark:text-slate-100 transition-colors">How It Works</a>
             <Link to="/pricing" className="hover:text-slate-900 dark:text-slate-100 transition-colors">Pricing</Link>
+            <Link to="/help" className="hover:text-slate-900 dark:text-slate-100 transition-colors">FAQ</Link>
           </div>
           <div className="flex items-center gap-3">
             <Link to="/login" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors px-3 py-2 dark:text-slate-300">
@@ -194,6 +195,17 @@ export default function Landing() {
           <div className="inline-flex items-center gap-2 bg-blue-50 border border-blue-200 text-blue-700 text-xs font-semibold px-3 py-1.5 rounded-full mb-6 anim-fade-up" style={{ animationDelay: '0.05s' }}>
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"/>
             Futures · Options scanner · Oracle 5-min trigger · Pre-market alerts
+          </div>
+          {/* USA-only availability chip — Stripe Identity + broker network is US-tuned. */}
+          <div className="mb-6">
+            <Link
+              to="/help"
+              title="Why USA only? See the FAQ."
+              className="inline-flex items-center gap-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-xs font-medium px-3 py-1.5 rounded-full hover:border-violet-400 hover:text-violet-700 dark:hover:text-violet-300 transition-colors"
+            >
+              <span aria-hidden="true">🇺🇸</span>
+              Currently available in the United States only
+            </Link>
           </div>
 
           <div className="max-w-3xl">
@@ -567,6 +579,7 @@ export default function Landing() {
             </div>
             <div className="flex items-center gap-6 text-sm text-slate-500 dark:text-slate-400">
               <Link to="/pricing" className="hover:text-slate-800">Pricing</Link>
+              <Link to="/help" className="hover:text-slate-800">FAQ</Link>
               <Link to="/login" className="hover:text-slate-800">Sign In</Link>
               <Link to="/register" className="hover:text-slate-800">Register</Link>
             </div>

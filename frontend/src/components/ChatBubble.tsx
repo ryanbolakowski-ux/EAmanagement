@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { X, Send, Sparkles } from 'lucide-react'
 import api from '../api/client'
+import { ENABLE_AI_CHAT } from '../utils/featureFlags'
 import ThetaLogo from './ThetaLogo'
 
 /**
@@ -48,6 +49,15 @@ export default function ChatBubble() {
   // time the panel opens, so we never present an enabled input that always fails.
   useEffect(() => {
     if (!open || configured !== null) return
+    // Defense in depth: when the AI-chat feature flag is off we never
+    // hit the status endpoint at all. The Layout already unmounts this
+    // component, so this branch only runs if someone force-mounts via
+    // devtools — in which case we still want zero API traffic.
+    if (!ENABLE_AI_CHAT) {
+      console.debug('[chat] feature flag off — skipping status check')
+      setConfigured(false)
+      return
+    }
     console.debug('[chat] open — checking /support/chat/status')
     api.get('/api/v1/support/chat/status')
       .then((r: any) => { const ok = !!r?.data?.configured; setConfigured(ok); console.debug('[chat] configured =', ok) })

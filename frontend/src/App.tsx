@@ -20,6 +20,7 @@ import Privacy from './pages/legal/Privacy'
 import Terms from './pages/legal/Terms'
 import Disclosures from './pages/legal/Disclosures'
 import Cookies from './pages/legal/Cookies'
+import Help from './pages/Help'
 import OnboardingWizard from './pages/OnboardingWizard'
 import LiveAccountDetail from './pages/LiveAccountDetail'
 import Login from './pages/Auth/Login'
@@ -70,6 +71,8 @@ const _TITLES: Record<string, string> = {
   "/terms": "Terms of Service - Theta Algos",
   "/disclosures": "Disclosures - Theta Algos",
   "/cookies": "Cookie Policy - Theta Algos",
+  "/help": "Help & FAQ - Theta Algos",
+  "/faq": "Help & FAQ - Theta Algos",
   "/app": "Dashboard - Theta Algos",
   "/app/strategies": "Strategy Builder - Theta Algos",
   "/app/plain-english": "Plain-English Builder - Theta Algos",
@@ -127,6 +130,8 @@ export default function App() {
       <Route path="/terms"           element={<Terms />} />
       <Route path="/disclosures"     element={<Disclosures />} />
       <Route path="/cookies"         element={<Cookies />} />
+      <Route path="/help"            element={<Help />} />
+      <Route path="/faq"             element={<Navigate to="/help" replace />} />
       <Route path="/onboarding"      element={<OnboardingWizard />} />
       <Route path="/reset-password"  element={<ResetPassword />} />
       <Route path="/not-available"  element={<NotAvailable />} />
