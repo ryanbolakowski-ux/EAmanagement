@@ -8,6 +8,7 @@ import {
   Gift, LayoutDashboard, FileCheck2, CreditCard, Lock, RefreshCw,
 } from 'lucide-react'
 import { fmtEntryTime, fmtHold } from '../components/TradeMetrics'
+import SystemsCheck from '../components/SystemsCheck'
 
 const API = ((import.meta as any).env?.VITE_API_URL || '') + '/api/v1/admin'
 const TIER_LABELS: Record<string, string> = {
@@ -34,7 +35,7 @@ const KYC_BADGE = (status: string) => {
   return styles[status] || styles.not_started
 }
 
-type AdminTab = 'overview' | 'users' | 'kyc' | 'subscriptions' | 'comps' | 'system'
+type AdminTab = 'overview' | 'users' | 'kyc' | 'subscriptions' | 'comps' | 'systems' | 'system'
 
 function StatCard({ icon: Icon, label, value, sub, tone = 'blue' }: any) {
   const tones: Record<string, string> = {
@@ -306,6 +307,7 @@ export default function Admin() {
               <SidebarItem id="kyc" icon={FileCheck2} label="KYC" badge={pendingKyc || undefined}/>
               <SidebarItem id="subscriptions" icon={CreditCard} label="Subscriptions" badge={subscriptions.length}/>
               <SidebarItem id="comps" icon={Gift} label="Comps" badge={comps.length}/>
+              <SidebarItem id="systems" icon={Activity} label="Systems Check"/>
               <SidebarItem id="system" icon={Lock} label="System"/>
             </nav>
             <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2">
@@ -554,6 +556,11 @@ export default function Admin() {
                 </div>
               )}
             </div>
+          </>)}
+
+          {tab === 'systems' && (<>
+            <SectionHeader title="Systems Check" subtitle="Live status of every subsystem — scanners, emails, trading, integrations, infra."/>
+            <SystemsCheck token={token}/>
           </>)}
 
           {tab === 'system' && (<>

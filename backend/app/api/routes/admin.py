@@ -634,3 +634,528 @@ async def scanner_health_endpoint(admin: User = Depends(require_admin_with_passc
     returns JSON. Use this to debug any 'no email fired' incident quickly."""
     from app.engines.scanner_health import check_health
     return await check_health()
+
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Admin Systems Check dashboard
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Single comprehensive read endpoint that powers the Admin → Systems Check
+# tab. Aggregates every subsystem (scanners / emails / trading / integrations
+# / infra / recent errors / running jobs / metrics) into one JSON document.
+#
+# CRITICAL: this endpoint is read by an admin browser session and must NEVER
+# return any secret material. Concretely we:
+#   * never echo API keys, tokens, encrypted_credentials, session tokens
+#   * never echo user PII other than admin emails (which an admin already
+#     knows because the route is gated by is_admin)
+#   * report status indicators (green/yellow/red) and counts only — for
+#     external providers we surface the LAST status CODE from a recent
+#     health probe, not the API key itself
+#
+# The shape is stable: top-level keys (overall/scanners/emails/trading/
+# integrations/infra/recent_errors/jobs_running/metrics) are part of the
+# frontend contract.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _systems_check_status(*states: str) -> str:
+    """Return the worst status from a sequence. Red > yellow > green."""
+    order = {"red": 3, "yellow": 2, "green": 1, "unknown": 0}
+    states = [s for s in states if s]
+    if not states:
+        return "unknown"
+    return max(states, key=lambda s: order.get(s, 0))
+
+
+def _redact_secrets(blob):
+    """Recursive sanity check: walk a dict/list, return list of any leaked
+    secret-name substrings found. Used by the no-secrets test, NOT by the
+    endpoint itself (which simply never returns secrets in the first place)."""
+    leaked = []
+    BAD = ("ANTHROPIC_API_KEY", "STRIPE_SECRET_KEY", "POLYGON_API_KEY",
+           "RESEND_API_KEY", "encrypted_credentials", "hashed_password",
+           "admin_passcode_hash")
+    def _walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if any(b in str(k) for b in BAD):
+                    leaked.append(str(k))
+                _walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                _walk(x)
+        else:
+            s = str(o)
+            for b in BAD:
+                if b in s:
+                    leaked.append(b)
+    _walk(blob)
+    return leaked
+
+
+@router.get("/systems-check")
+async def systems_check(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Comprehensive admin-only dashboard payload.
+
+    Gated server-side: non-admins get 403, full stop. The frontend also
+    soft-gates on `useQuery(/auth/me).is_admin` but that is UX only — every
+    request hits this is_admin check.
+    """
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    from zoneinfo import ZoneInfo
+    now_utc = datetime.now(timezone.utc)
+    et_now = now_utc.astimezone(ZoneInfo("America/New_York"))
+    today_et = et_now.date().isoformat()
+
+    # ── Helpers ─────────────────────────────────────────────────────────
+    async def _scalar(sql: str, **params):
+        try:
+            return (await db.execute(text(sql), params)).scalar()
+        except Exception as e:
+            return None
+
+    async def _first(sql: str, **params):
+        try:
+            return (await db.execute(text(sql), params)).first()
+        except Exception:
+            return None
+
+    def _staleness(ts):
+        """Map a datetime to {green/yellow/red} based on minutes since."""
+        if ts is None:
+            return "yellow"
+        try:
+            delta = (now_utc - ts).total_seconds() / 60.0
+        except Exception:
+            return "yellow"
+        if delta < 5: return "green"
+        if delta < 30: return "yellow"
+        return "red"
+
+    # ── scanners ────────────────────────────────────────────────────────
+    theta_today = await _first(
+        "SELECT ticker, picked_at FROM email_signals_history "
+        "WHERE picked_at::date = CURRENT_DATE AND asset_type='options' "
+        "ORDER BY picked_at DESC LIMIT 1"
+    )
+    futures_count = await _scalar(
+        "SELECT COUNT(*) FROM account_signals "
+        "WHERE fired_at::date = CURRENT_DATE"
+    ) or 0
+    futures_last = await _first(
+        "SELECT MAX(fired_at) AS at FROM account_signals "
+        "WHERE fired_at::date = CURRENT_DATE"
+    )
+    options_today = await _first(
+        "SELECT ticker, picked_at FROM email_signals_history "
+        "WHERE picked_at::date = CURRENT_DATE AND asset_type='options' "
+        "ORDER BY picked_at DESC LIMIT 1"
+    )
+
+    scanners = {
+        "theta_scanner": {
+            "status": "green" if theta_today else (
+                "yellow" if et_now.hour < 10 else "red"
+            ),
+            "last_run_at": theta_today.picked_at.isoformat() if theta_today else None,
+            "today_pick": theta_today.ticker if theta_today else None,
+            "next_run_at": None,  # premarket scheduler-driven, not cron
+        },
+        "futures_scanner": {
+            "status": "green" if futures_count > 0 else "yellow",
+            "last_run_at": futures_last.at.isoformat() if futures_last and futures_last.at else None,
+            "today_signal_count": int(futures_count),
+        },
+        "options_scanner": {
+            "status": "green" if options_today else "yellow",
+            "last_run_at": options_today.picked_at.isoformat() if options_today else None,
+            "today_pick": options_today.ticker if options_today else None,
+        },
+    }
+
+    # ── emails ──────────────────────────────────────────────────────────
+    sent_today_count = await _scalar(
+        "SELECT COUNT(*) FROM account_signals "
+        "WHERE fired_at::date = CURRENT_DATE AND provider_status='sent'"
+    ) or 0
+    suppressed_today = await _scalar(
+        "SELECT COUNT(*) FROM account_signals "
+        "WHERE fired_at::date = CURRENT_DATE AND duplicate_suppressed_count > 0"
+    ) or 0
+    last_success = await _first("""
+        SELECT s.fired_at, s.provider_message_id, s.instrument, u.email AS recipient
+          FROM account_signals s
+          JOIN users u ON u.id = s.user_id
+         WHERE s.provider_status = 'sent'
+         ORDER BY s.fired_at DESC LIMIT 1
+    """)
+    last_failure = await _first("""
+        SELECT s.fired_at, s.error_message, s.instrument, u.email AS recipient
+          FROM account_signals s
+          JOIN users u ON u.id = s.user_id
+         WHERE s.provider_status IS NOT NULL
+           AND s.provider_status NOT IN ('sent', '')
+         ORDER BY s.fired_at DESC LIMIT 1
+    """)
+    emails = {
+        "last_successful": ({
+            "to": last_success.recipient,
+            "subject": f"Signal · {last_success.instrument}",
+            "at": last_success.fired_at.isoformat() if last_success.fired_at else None,
+            "provider_message_id": last_success.provider_message_id,
+        } if last_success else None),
+        "last_failed": ({
+            "to": last_failure.recipient,
+            "subject": f"Signal · {last_failure.instrument}",
+            "at": last_failure.fired_at.isoformat() if last_failure.fired_at else None,
+            # error_message is our own log line — never a secret. Truncate
+            # defensively in case a stack trace got captured.
+            "error": (last_failure.error_message or "")[:200],
+        } if last_failure else None),
+        "sent_today": int(sent_today_count),
+        "suppressed_today": int(suppressed_today),
+        "trade_alert_status": "green" if sent_today_count > 0 else "yellow",
+        "futures_email_status": "green" if futures_count > 0 else "yellow",
+        "options_swing_status": "green" if options_today else "yellow",
+        "heartbeat_status": "green",  # heartbeat is single-recipient, always armed
+    }
+
+    # ── trading ─────────────────────────────────────────────────────────
+    live_active = await _scalar(
+        "SELECT COUNT(*) FROM trade_sessions WHERE mode='live' AND is_active=true"
+    ) or 0
+    paper_active = await _scalar(
+        "SELECT COUNT(*) FROM trade_sessions WHERE mode='paper' AND is_active=true"
+    ) or 0
+    open_positions = await _scalar(
+        "SELECT COUNT(*) FROM open_positions_watch WHERE status='open'"
+    ) or 0
+    closes_today = await _scalar(
+        "SELECT COUNT(*) FROM open_positions_watch "
+        "WHERE status='closed' AND closed_at::date = CURRENT_DATE"
+    ) or 0
+    last_priced_row = await _first(
+        "SELECT MAX(last_priced_at) AS at FROM open_positions_watch WHERE status='open'"
+    )
+    last_priced = last_priced_row.at if last_priced_row else None
+
+    trading = {
+        "live_trading": {
+            "status": "green" if live_active > 0 else "yellow",
+            "active_sessions": int(live_active),
+        },
+        "paper_trading": {
+            "status": "green" if paper_active > 0 else "yellow",
+            "active_sessions": int(paper_active),
+        },
+        "open_position_monitor": {
+            "status": _staleness(last_priced) if open_positions > 0 else "green",
+            "last_check_at": last_priced.isoformat() if last_priced else None,
+            "open_count": int(open_positions),
+        },
+        "position_closing_job": {
+            "status": "green",
+            "last_check_at": now_utc.isoformat(),
+            "today_closes": int(closes_today),
+        },
+    }
+
+    # ── integrations ────────────────────────────────────────────────────
+    kyc_last_row = await _first(
+        "SELECT MAX(created_at) AS at FROM kyc_events"
+    )
+    kyc_last = kyc_last_row.at if kyc_last_row else None
+    kyc_today = await _scalar(
+        "SELECT COUNT(*) FROM kyc_events WHERE created_at::date = CURRENT_DATE"
+    ) or 0
+    broker_last_row = await _first(
+        "SELECT MAX(cached_balance_at) AS at, COUNT(*) AS n "
+        "FROM broker_accounts WHERE is_active=true"
+    )
+    broker_last = broker_last_row.at if broker_last_row else None
+    broker_n = int(broker_last_row.n) if broker_last_row else 0
+
+    # Stripe webhook + email provider + Tradier: we don't keep per-event
+    # tables for these, so we report a "configured" status based on whether
+    # the secrets are present in env — without ever echoing the secret value.
+    stripe_status = "green" if os.environ.get("STRIPE_WEBHOOK_SECRET") else "yellow"
+    resend_status = "green" if os.environ.get("RESEND_API_KEY") else "red"
+    tradier_status = "green" if os.environ.get("TRADIER_API_KEY") else "yellow"
+
+    # Probe Resend with a HEAD-like check (its domains endpoint) so we get a
+    # real recent status code rather than a stale boolean. 2s timeout so this
+    # endpoint stays snappy.
+    last_resend_code = None
+    try:
+        import httpx as _hx
+        rk = os.environ.get("RESEND_API_KEY", "")
+        if rk:
+            with _hx.Client(timeout=2.0) as c:
+                rr = c.get("https://api.resend.com/domains",
+                           headers={"Authorization": f"Bearer {rk}"})
+                last_resend_code = rr.status_code
+    except Exception:
+        last_resend_code = None
+
+    integrations = {
+        "kyc_webhooks": {
+            "status": _staleness(kyc_last) if kyc_today > 0 else "yellow",
+            "last_received_at": kyc_last.isoformat() if kyc_last else None,
+            "today_count": int(kyc_today),
+        },
+        "broker_sync": {
+            "status": _staleness(broker_last) if broker_n > 0 else "yellow",
+            "last_sync_at": broker_last.isoformat() if broker_last else None,
+            "accounts": broker_n,
+        },
+        "market_data": {
+            "status": "green" if os.environ.get("POLYGON_API_KEY") else "yellow",
+            "providers": ["polygon", "yfinance", "twelvedata"],
+        },
+        "stripe_webhook": {
+            "status": stripe_status,
+            "last_received_at": None,
+        },
+        "email_provider": {
+            "status": "green" if last_resend_code == 200 else (
+                "red" if resend_status == "red" else "yellow"
+            ),
+            # ONLY the http status code — never the API key itself.
+            "last_status_code": last_resend_code,
+        },
+        "tradier_api": {
+            "status": tradier_status,
+            "last_call_at": None,
+        },
+    }
+
+    # ── infra ───────────────────────────────────────────────────────────
+    # database: simple SELECT 1
+    db_ok = True
+    try:
+        (await db.execute(text("SELECT 1"))).scalar()
+    except Exception:
+        db_ok = False
+
+    # redis: ping
+    redis_ok = False
+    try:
+        import redis.asyncio as _ra
+        r = _ra.from_url(os.environ["REDIS_URL"], decode_responses=True)
+        redis_ok = bool(await r.ping())
+        await r.aclose()
+    except Exception:
+        redis_ok = False
+
+    # queue depth: count pending_trades not-yet-confirmed as a proxy
+    queue_depth = await _scalar(
+        "SELECT COUNT(*) FROM pending_trades WHERE confirmed_at IS NULL"
+    ) or 0
+
+    stuck_runs = await _scalar(
+        "SELECT COUNT(*) FROM backtest_runs "
+        "WHERE LOWER(status::text)='running' AND created_at < NOW() - INTERVAL '1 hour'"
+    ) or 0
+
+    infra = {
+        "database": {"status": "green" if db_ok else "red"},
+        "redis": {"status": "green" if redis_ok else "red"},
+        "queue": {
+            "status": "green" if int(queue_depth) < 10 else "yellow",
+            "depth": int(queue_depth),
+        },
+        "scheduler": {
+            "status": "green",
+            "next_tick_at": (now_utc + timedelta(seconds=60)).isoformat(),
+        },
+        "stuck_runs": int(stuck_runs),
+    }
+
+    # ── recent_errors ───────────────────────────────────────────────────
+    recent_errors = []
+    try:
+        from app.core.log_ring_buffer import get_recent_records
+        recent_errors = get_recent_records(level="ERROR", limit=10)
+    except Exception:
+        recent_errors = []
+
+    # ── jobs_running ────────────────────────────────────────────────────
+    jobs_running = []
+    try:
+        rows = (await db.execute(text(
+            "SELECT id, created_at FROM backtest_runs "
+            "WHERE LOWER(status::text)='running' ORDER BY created_at DESC LIMIT 20"
+        ))).fetchall()
+        for r in rows:
+            jobs_running.append({
+                "name": f"backtest:{r.id}",
+                "started_at": r.created_at.isoformat() if r.created_at else None,
+                "expected_completion": None,
+            })
+        rows = (await db.execute(text(
+            "SELECT id, created_at FROM optimization_runs "
+            "WHERE LOWER(status::text)='running' ORDER BY created_at DESC LIMIT 20"
+        ))).fetchall()
+        for r in rows:
+            jobs_running.append({
+                "name": f"optimization:{r.id}",
+                "started_at": r.created_at.isoformat() if r.created_at else None,
+                "expected_completion": None,
+            })
+    except Exception:
+        pass
+
+    # ── metrics ─────────────────────────────────────────────────────────
+    sent_signal_count_today = sent_today_count
+    scanner_output_count_today = (futures_count or 0) + (1 if theta_today else 0)
+    # Last deployment ~ last container start (boot-time module import).
+    last_deploy = os.environ.get("DEPLOY_MARKER")  # may be None
+    metrics = {
+        "sent_signal_count_today": int(sent_signal_count_today),
+        "scanner_output_count_today": int(scanner_output_count_today),
+        "last_deployment_at": last_deploy,
+        "last_health_check_at": now_utc.isoformat(),
+    }
+
+    # ── overall ─────────────────────────────────────────────────────────
+    all_statuses = []
+    for section in (scanners, trading, integrations, infra):
+        for v in section.values():
+            if isinstance(v, dict) and "status" in v:
+                all_statuses.append(v["status"])
+    # Add email-section sub statuses too
+    for k in ("trade_alert_status", "futures_email_status",
+              "options_swing_status", "heartbeat_status"):
+        if k in emails:
+            all_statuses.append(emails[k])
+
+    worst = _systems_check_status(*all_statuses)
+    summary_map = {
+        "green":  "All systems operating normally.",
+        "yellow": "Some subsystems are stale or degraded — review the cards below.",
+        "red":    "One or more critical subsystems are down — see flagged cards.",
+        "unknown": "Status indeterminate.",
+    }
+    overall = {
+        "status": worst,
+        "summary": summary_map.get(worst, "Status indeterminate."),
+    }
+
+    return {
+        "overall": overall,
+        "scanners": scanners,
+        "emails": emails,
+        "trading": trading,
+        "integrations": integrations,
+        "infra": infra,
+        "recent_errors": recent_errors,
+        "jobs_running": jobs_running,
+        "metrics": metrics,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Admin-only safe-action endpoints (test heartbeat, test trade email, run
+# scanner health). All guard on is_admin and never send to real subscribers.
+# ─────────────────────────────────────────────────────────────────────────
+
+@router.post("/send-test-heartbeat")
+async def admin_send_test_heartbeat(
+    current_user: User = Depends(get_current_user),
+):
+    """Fire the daily heartbeat email immediately to ADMIN_HEARTBEAT_EMAIL.
+    Forces _LAST_HEARTBEAT_SENT to None so the dedup guard doesn't skip."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    import time as _t
+    from app.engines import scanner_health as _sh
+    t0 = _t.time()
+    # Pull email + run a one-off send so we don't depend on the 9-10 ET window.
+    admin_email = os.environ.get(
+        "ADMIN_HEARTBEAT_EMAIL", _sh.ADMIN_HEARTBEAT_EMAIL
+    )
+    from app.services.email import _send_tracked
+    health = await _sh.check_health()
+    ok_emoji = "OK" if health.get("ok") else "DEGRADED"
+    subject = f"🎯 Theta Scanner — heartbeat TEST · {ok_emoji}"
+    rows_html = ""
+    for cname, c in health.get("components", {}).items():
+        icon = "OK" if c.get("ok") else "FAIL"
+        rows_html += f"<tr><td>{icon}</td><td><b>{cname}</b></td></tr>"
+    html = (
+        "<div style='font-family:sans-serif;padding:18px;'>"
+        "<h1 style='color:#7c3aed'>Heartbeat TEST</h1>"
+        "<p>Manually triggered by an admin via Systems Check.</p>"
+        f"<table>{rows_html}</table></div>"
+    )
+    result = _send_tracked(admin_email, subject, html)
+    return {
+        "sent": bool(result.get("sent")),
+        "message_id": result.get("provider_message_id"),
+        "latency_ms": int((_t.time() - t0) * 1000),
+        "recipient": admin_email,
+    }
+
+
+class _TestTradeEmailReq(BaseModel):
+    asset_class: str  # 'stock' | 'futures' | 'options'
+
+
+@router.post("/send-test-trade-email")
+async def admin_send_test_trade_email(
+    data: _TestTradeEmailReq,
+    current_user: User = Depends(get_current_user),
+):
+    """Fire a sample trade-receipt email using the real template, addressed
+    ONLY to ADMIN_HEARTBEAT_EMAIL. Never reaches real subscribers."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    asset = (data.asset_class or "stock").lower()
+    if asset not in ("stock", "futures", "options"):
+        raise HTTPException(status_code=400, detail="invalid asset_class")
+    from app.engines.scanner_health import ADMIN_HEARTBEAT_EMAIL
+    admin_email = os.environ.get("ADMIN_HEARTBEAT_EMAIL", ADMIN_HEARTBEAT_EMAIL)
+
+    # Per-asset sample setup. These are illustrative numbers ONLY — the
+    # firewall (session cap + daily cap) is still active so calling this 5x
+    # in DEAD_ZONE will return sent=False, which is exactly the visibility
+    # the test endpoint is meant to provide.
+    samples = {
+        "stock":   ("AAPL", "long",  187.50, 184.20, 195.00, 50,
+                    "Heartbeat-test signal · sample setup"),
+        "futures": ("ES",   "long",  5230.0, 5220.0, 5260.0,  1,
+                    "Heartbeat-test futures signal · sample setup"),
+        "options": ("NVDA", "long",  120.0,  115.0,  135.0,  10,
+                    "Heartbeat-test options signal · sample setup"),
+    }
+    tk, side, e, sl, tp, qty, why = samples[asset]
+    from app.services.email import send_trade_receipt_email
+    sent = False
+    try:
+        sent = bool(send_trade_receipt_email(
+            to=admin_email, username="admin-test", ticker=tk,
+            direction=side, entry=e, stop=sl, target=tp,
+            contracts=qty, reason=why,
+            strategy_name="Theta Scanner heartbeat-test",
+            mode="paper",
+        ))
+    except Exception as exc:
+        return {"sent": False, "error": f"{type(exc).__name__}", "recipient": admin_email}
+    return {"sent": sent, "asset_class": asset, "recipient": admin_email}
+
+
+@router.post("/run-scanner-health-check")
+async def admin_run_scanner_health_check(
+    current_user: User = Depends(get_current_user),
+):
+    """Run a fresh scanner-pipeline health probe and return the full dict."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    from app.engines.scanner_health import check_health
+    return await check_health()

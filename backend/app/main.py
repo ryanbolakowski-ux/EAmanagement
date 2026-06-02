@@ -5,6 +5,17 @@ from loguru import logger as _lg
 _lg.remove()
 _lg.add(_sys_log.stderr, level=_os_log.environ.get("LOG_LEVEL", "INFO"))
 
+# Attach the in-memory ring-buffer sink so the Admin Systems Check endpoint
+# can surface recent error log records without shelling out to docker logs.
+# Wrapped in try/except: if the ring buffer module fails to import for any
+# reason, the backend MUST still boot — the buffer is observability, not
+# load-bearing.
+try:
+    from app.core.log_ring_buffer import install_ring_buffer_sink as _install_ring
+    _install_ring()
+except Exception as _ring_exc:
+    _lg.warning(f"[ring-buffer] sink install failed: {_ring_exc}")
+
 # Yfinance prep: just ensure the default ~/.cache/py-yfinance/ dir exists and
 # is fresh on each container start. yfinance 1.3.0's set_tz_cache_location()
 # has a regression that breaks subsequent Ticker() calls with TypeError, so

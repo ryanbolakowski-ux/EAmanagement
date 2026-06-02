@@ -65,10 +65,18 @@ def test_fails_open_when_send_tracked_raises():
     assert n == 0, "0 sends should be counted when every send raises"
 
 
-def test_returns_zero_when_no_admins():
+def test_returns_zero_when_explicit_recipients_is_empty():
+    """Caller can pass `recipients=[]` to suppress the default-recipient
+    fan-out. In that case no admins get emailed and the function returns 0.
+
+    The pre-2026-06-03 version of this test asserted that mocking
+    `_fetch_admin_emails()` to return [] caused zero sends — but that test
+    no longer reflects how the function works. The default path now uses
+    the single ADMIN_HEARTBEAT_EMAIL constant and never calls
+    `_fetch_admin_emails()` at all, so the only way to enforce a no-send
+    is via the explicit empty-list override."""
     from app.engines import pipeline_alerts as pa
-    async def fake_admins(): return []
-    with patch.object(pa, "_fetch_admin_emails", new=fake_admins):
-        n = _run(pa.send_pipeline_failure_alert("anything",
-                                                  context={"k": "v"}))
-    assert n == 0
+    n = _run(pa.send_pipeline_failure_alert("anything",
+                                              context={"k": "v"},
+                                              recipients=[]))
+    assert n == 0, f"explicit recipients=[] must short-circuit to 0; got {n}"

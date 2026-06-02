@@ -1,19 +1,23 @@
-"""Heartbeat MUST only fan out to is_admin=true users.
+"""Heartbeat MUST go to one configured admin email only.
 
-Prior to 2026-06-01 the heartbeat went to all 11 active strategy subscribers,
-leaking pipeline state to customers. The SQL is now constrained to
-`u.is_admin = TRUE`. We assert that:
-  1. The SQL the heartbeat issues contains "is_admin = true".
-  2. When the mocked DB returns mixed admin/non-admin rows, _send is invoked
-     ONLY for the admin emails.
+History
+-------
+* 2026-06-01: tightened the heartbeat from "all 11 active users with a
+  strategy subscription" to "every is_admin=true user" — this stopped the
+  leak of pipeline state to customers.
+* 2026-06-03: tightened further to a SINGLE configured admin recipient
+  (``ADMIN_HEARTBEAT_EMAIL`` env, defaulting to
+  ``ryan.bolakowski@icloud.com``). The DB-side recipient query was removed
+  entirely. This file keeps the original test name for git-log traceability
+  but its asserts now reflect the single-recipient contract; the more
+  specific single-recipient + env-override checks live in
+  ``test_heartbeat_single_recipient.py`` and ``test_heartbeat_env_var_override.py``.
 
 Run standalone:
     pytest backend/tests/test_heartbeat_admin_only.py -v -p no:cacheprovider
 """
 import asyncio
-import types
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch, MagicMock
 
 
 class _RowsResult:
@@ -21,73 +25,50 @@ class _RowsResult:
     def fetchall(self): return self._rows
     def scalar(self): return 0
     def first(self): return None
-    def mappings(self): return self
-    def all(self): return self._rows
 
 
 class FakeDB:
-    """Records every SQL execute() and lets us program the rows returned for
-    the recipient SELECT. Each non-recipient SELECT (the health-check probes)
-    returns empty so the heartbeat code-path is exercised without needing
-    real DB / Redis / Resend."""
-    def __init__(self, recipient_rows): self.recipient_rows = recipient_rows; self.sqls = []
+    """All execute() calls return empty results — heartbeat no longer queries
+    the DB for recipients, so this is just here to satisfy the health-check
+    probes that still touch the DB."""
     async def execute(self, stmt, params=None):
-        s = str(getattr(stmt, "text", stmt))
-        self.sqls.append(s)
-        if "SELECT DISTINCT u.email" in s:
-            return _RowsResult(self.recipient_rows)
         return _RowsResult([])
     async def commit(self): pass
     async def rollback(self): pass
-
     async def __aenter__(self): return self
     async def __aexit__(self, *a): return False
 
 
-def _make_admin_only_db():
-    rows = [
-        types.SimpleNamespace(email="admin1@theta.test"),
-        types.SimpleNamespace(email="admin2@theta.test"),
-    ]
-    return FakeDB(rows)
-
-
-def test_recipient_sql_filters_to_admins():
-    """Source-level regression: the recipient SELECT in send_daily_heartbeat
-    MUST contain `is_admin = true`. Previously the SQL fanned out to every
-    user with an ACTIVE strategy or watcher — leaking pipeline state to all
-    11 customers. We keep this as a literal-source assertion so accidental
-    rewrites of the SQL trigger an immediate test failure."""
+def test_recipient_is_single_admin_email():
+    """Source-level regression: the heartbeat must NOT issue a recipient
+    SELECT — the multi-admin SQL was removed in favor of a single hardcoded
+    address. We assert the function defines ADMIN_HEARTBEAT_EMAIL and does
+    NOT contain the old JOINs that previously leaked to non-admins."""
     import importlib.util as _u
     spec = _u.find_spec("app.engines.scanner_health")
     assert spec and spec.origin
     with open(spec.origin, "r") as f:
         src = f.read()
-    # The constrained SELECT lives inside send_daily_heartbeat. We verify both
-    # the column predicate AND the absence of the old strategy/watcher JOINs
-    # that previously leaked heartbeat to non-admins.
-    assert "is_admin = true" in src, \
-        "recipient SQL must filter on is_admin = true"
-    # The old SQL JOINed strategies + account_signal_watchers. Make sure the
-    # admin-only SELECT does NOT pull those tables in for recipient selection
-    # (they still appear elsewhere in the file via other queries, so the test
-    # checks the proximity of the JOINs to the recipient SELECT).
-    block = src[src.find("SELECT DISTINCT u.email"):]
-    block = block[: block.find('"""))')]
-    assert "is_admin = true" in block, \
-        f"recipient block must enforce is_admin = true; block={block!r}"
-    assert "strategies s" not in block, \
-        "recipient SELECT must not JOIN strategies (would leak to non-admins)"
-    assert "account_signal_watchers w" not in block, \
-        "recipient SELECT must not JOIN account_signal_watchers"
+    assert "ADMIN_HEARTBEAT_EMAIL" in src, \
+        "module must define ADMIN_HEARTBEAT_EMAIL constant"
+    # The old code JOINed strategies + account_signal_watchers to fan out the
+    # heartbeat to subscribers. Those JOINs must not appear inside the body
+    # of send_daily_heartbeat (still legal elsewhere in the file for the
+    # active-watchers probe, but not in the recipient-resolution block).
+    func_start = src.find("async def send_daily_heartbeat()")
+    assert func_start > 0, "send_daily_heartbeat function not found"
+    func_body = src[func_start: func_start + 4000]
+    assert "strategies s" not in func_body, \
+        "send_daily_heartbeat must not JOIN strategies (would leak to non-admins)"
+    assert "account_signal_watchers w" not in func_body, \
+        "send_daily_heartbeat must not JOIN account_signal_watchers"
 
 
-def test_send_only_invoked_for_admin_rows():
-    """When the mocked DB returns 2 admin rows, _send is called for both
-    admin emails — never for a non-admin (since the SQL would filter
-    non-admins out before they ever reach this list)."""
+def test_send_invoked_for_exactly_one_recipient():
+    """When send_daily_heartbeat runs, _send is called with one address only
+    — the single configured ADMIN_HEARTBEAT_EMAIL. No DB-derived rows allowed."""
     from app.engines import scanner_health as sh
-    db = _make_admin_only_db()
+    db = FakeDB()
     fake_factory = MagicMock(return_value=db)
     async def _fake_health():
         return {"ok": True, "components": {"redis": {"ok": True}}}
@@ -99,11 +80,13 @@ def test_send_only_invoked_for_admin_rows():
          patch("app.database.async_session_factory", new=fake_factory), \
          patch("app.services.email._send", new=_fake_send), \
          patch("app.engines.market_calendar.market_status",
-               return_value={"is_trading_day": True, "now_et": "2026-06-01 09:30:00 ET"}):
+               return_value={"is_trading_day": True, "now_et": "2026-06-03 09:30:00 ET"}):
         from datetime import datetime as _dt, timezone as _tz
-        fake_now = _dt(2026, 6, 1, 13, 30, tzinfo=_tz.utc)  # 09:30 ET
+        fake_now = _dt(2026, 6, 3, 13, 30, tzinfo=_tz.utc)  # 09:30 ET
         with patch("app.engines.scanner_health.datetime") as md:
             md.now.return_value = fake_now
             asyncio.new_event_loop().run_until_complete(sh.send_daily_heartbeat())
-    assert sorted(sent_to) == ["admin1@theta.test", "admin2@theta.test"], \
-        f"_send should be called for both admin rows; got {sent_to}"
+    assert len(sent_to) == 1, \
+        f"_send must be called exactly once (single-recipient); got {sent_to!r}"
+    assert sent_to[0] == sh.ADMIN_HEARTBEAT_EMAIL, \
+        f"recipient must be ADMIN_HEARTBEAT_EMAIL; got {sent_to[0]!r}"

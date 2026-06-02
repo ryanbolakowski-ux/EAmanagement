@@ -18,6 +18,13 @@ from loguru import logger
 _LAST_HEALTH_CHECK: dict = {"ts": None, "ok": False, "components": {}}
 _LAST_HEARTBEAT_SENT: Optional[str] = None  # date iso str
 
+# Single-recipient heartbeat target. Defaults to the platform owner.
+# Override with ADMIN_HEARTBEAT_EMAIL env var if routing needs to change.
+ADMIN_HEARTBEAT_EMAIL: str = os.environ.get(
+    "ADMIN_HEARTBEAT_EMAIL", "ryan.bolakowski@icloud.com"
+)
+
+
 
 async def check_health(verbose: bool = False) -> dict:
     """Probe every layer of the scanner pipeline. Returns dict with per-component
@@ -161,22 +168,17 @@ async def send_daily_heartbeat():
         return  # no heartbeat on weekends/holidays
 
     health = await check_health()
-    from sqlalchemy import text as _t
-    from app.database import async_session_factory
     from app.services.email import _send
 
-    async with async_session_factory() as db:
-        # ADMIN-ONLY heartbeat. The heartbeat is operational health telemetry,
-        # not a user-facing signal — only admins should receive it. Previously
-        # this fanned out to all 11 active users with strategy subscriptions,
-        # which (1) leaked internal pipeline state to customers and (2) trained
-        # them to ignore one more email per day.
-        rows = (await db.execute(_t("""
-            SELECT DISTINCT u.email
-              FROM users u
-             WHERE u.is_active = true
-               AND u.is_admin = true
-        """))).fetchall()
+    # SINGLE-RECIPIENT heartbeat. Operational health telemetry routes to one
+    # configured admin only — never to customers, and never to a fan-out of
+    # admins. To re-route, set ADMIN_HEARTBEAT_EMAIL in the environment.
+    # We re-read the env var at send time so a hot-reload (config change in
+    # docker exec) does not require a backend restart.
+    admin_email = os.environ.get("ADMIN_HEARTBEAT_EMAIL", ADMIN_HEARTBEAT_EMAIL)
+    logger.info(
+        f"[heartbeat] sending to admin={admin_email} (single-recipient)"
+    )
 
     ok_emoji = "✅" if health["ok"] else "⚠️"
     subj = f"🎯 Theta Scanner — heartbeat {ok_emoji} ({today_str})"
@@ -209,14 +211,16 @@ async def send_daily_heartbeat():
 </div>"""
 
     sent = 0
-    for r in rows:
-        try:
-            if _send(r.email, subj, html):
-                sent += 1
-        except Exception:
-            pass
+    try:
+        if _send(admin_email, subj, html):
+            sent = 1
+    except Exception as e:
+        logger.error(f"[heartbeat] send to {admin_email} crashed: {e}")
     _LAST_HEARTBEAT_SENT = today_str
-    logger.info(f"[heartbeat] sent to {sent}/{len(rows)} admins (health.ok={health['ok']})")
+    logger.info(
+        f"[heartbeat] sent={sent} to={admin_email} "
+        f"(health.ok={health['ok']}, single-recipient)"
+    )
     # If the health check itself flagged degraded pipeline, also fire a loud
     # pipeline-failure alert. Heartbeat alone is too low-signal — admins skim it.
     if not health.get("ok"):

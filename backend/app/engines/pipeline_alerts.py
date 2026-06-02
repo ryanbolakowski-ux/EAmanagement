@@ -12,10 +12,12 @@ Design constraints:
       - admins can mail-filter on it and surface as push / SMS
   * The alert dispatch itself MUST NEVER raise — every call site wraps it
     again in try/except so the alert can't crash the original error path.
-  * Recipients default to every admin user (is_admin = TRUE). Override with
-    the `recipients` kwarg for ad-hoc routing.
+  * Recipients default to a single ADMIN_HEARTBEAT_EMAIL (ENV var; falls
+    back to the platform owner's address). Override with the `recipients`
+    kwarg for ad-hoc routing (e.g., on-call fan-out).
 """
 from __future__ import annotations
+import os
 from typing import Iterable, Mapping, Any
 from datetime import datetime, timezone
 
@@ -116,7 +118,18 @@ async def send_pipeline_failure_alert(
       * sorts to the top of admin inboxes when they wake up
     """
     try:
-        to_list = list(recipients) if recipients else await _fetch_admin_emails()
+        if recipients is not None:
+            to_list = list(recipients)
+        else:
+            # SINGLE-RECIPIENT pipeline failure alerts. Defaults to the same
+            # ADMIN_HEARTBEAT_EMAIL the daily heartbeat uses — keep alerts and
+            # heartbeats routed to the same inbox so admins triage one stream,
+            # not two. Override per call with `recipients=` if you need
+            # multiple destinations (e.g., on-call rotation).
+            admin_email = os.environ.get(
+                "ADMIN_HEARTBEAT_EMAIL", "ryan.bolakowski@icloud.com"
+            )
+            to_list = [admin_email]
         if not to_list:
             logger.error(f"[pipeline-alert] NO ADMIN RECIPIENTS — reason={reason!r}")
             return 0
