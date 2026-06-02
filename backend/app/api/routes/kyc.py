@@ -87,6 +87,26 @@ STRIPE_IDENTITY_KEY = os.environ.get("STRIPE_IDENTITY_KEY") or os.environ.get("S
 MIN_AGE = 18
 
 
+def _stripe_get(o, k):
+    """Read a key from either a Stripe SDK StripeObject (attribute access) or
+    a plain dict (.get). Modern stripe-python returns StripeObject which has
+    __getitem__ AND attribute access, but dict(o) returns {}. Calling
+    .get() on it bypasses StripeObject.__getattr__ and returns None for
+    fields that ARE present. This helper handles both shapes uniformly."""
+    if o is None:
+        return None
+    if isinstance(o, dict):
+        return o.get(k)
+    # StripeObject behaves like a dict but only via attribute or [] access
+    try:
+        v = o[k]
+        return v
+    except Exception:
+        pass
+    return getattr(o, k, None)
+
+
+
 def _age_from_dob(dob_str: str) -> int | None:
     """Return age in whole years from YYYY-MM-DD, or None if unparseable."""
     try:
@@ -353,39 +373,62 @@ async def kyc_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         logger.warning(f"[kyc-webhook] could not access event.data.object: {e}")
         raw_obj = None
 
-    # Convert to a plain dict — THIS is the line that fixes the production bug.
-    if raw_obj is None:
-        obj: dict = {}
-    elif hasattr(raw_obj, "to_dict_recursive"):
-        try:
-            obj = raw_obj.to_dict_recursive()
-        except Exception as e:
-            logger.warning(f"[kyc-webhook] to_dict_recursive failed: {e}")
-            obj = {}
-    elif isinstance(raw_obj, dict):
-        obj = raw_obj
-    else:
-        try:
-            obj = dict(raw_obj)
-        except Exception:
-            obj = {}
-
-    session_id = obj.get("id")
-    metadata = obj.get("metadata") or {}
-    user_id = metadata.get("user_id")
+    # ── Field extraction — works on StripeObject AND on plain dict ──
+    # We DELIBERATELY do not try to convert StripeObject -> dict. In
+    # modern stripe-python (v8+) the conversion path is unreliable
+    # (renamed, removed, or returns {}). Attribute access is the
+    # documented contract; we use _stripe_get for both shapes.
+    session_id = _stripe_get(raw_obj, "id")
+    metadata = _stripe_get(raw_obj, "metadata") or {}
+    user_id = _stripe_get(metadata, "user_id")
     logger.info(
         f"[kyc-webhook] event_type={event_type} session={session_id} user={user_id}"
     )
+
+    # ── DB fallback: recover user_id from kyc_session_id ──────────────
+    # Defensive net for the case where Stripe sends an event whose
+    # metadata is missing user_id (older sessions, edge cases). We can
+    # always recover from kyc_session_id since /kyc/start persists it.
+    if not user_id and session_id:
+        try:
+            _r = await db.execute(
+                text("SELECT id::text AS id FROM users WHERE kyc_session_id = :sid"),
+                {"sid": session_id},
+            )
+            _row = _r.first()
+            if _row:
+                user_id = str(_row.id)
+                logger.info(
+                    f"[kyc-webhook] recovered user_id={user_id} via session_id lookup"
+                )
+            else:
+                logger.warning(
+                    f"[kyc-webhook] no user matches kyc_session_id={session_id}"
+                )
+        except Exception as _e:
+            logger.warning(f"[kyc-webhook] session->user fallback query failed: {_e}")
+
+    # ── Wrap StripeObject so the rest of the function can call obj.get(...)
+    class _SO:
+        __slots__ = ("_o",)
+        def __init__(self, o): self._o = o
+        def get(self, k, default=None):
+            v = _stripe_get(self._o, k)
+            return default if v is None else v
+    obj = _SO(raw_obj) if raw_obj is not None else _SO({})
 
     if event_type == "identity.verification_session.verified":
         # Cross-check: the document's country MUST be US. Stripe returns
         # verified_outputs.address.country once the ID has been validated.
         doc_country = None
         try:
-            verified = obj.get("verified_outputs") or {}
-            doc_country = ((verified.get("address") or {}).get("country") or "").upper() or None
+            verified = _stripe_get(raw_obj, "verified_outputs")
+            _addr = _stripe_get(verified, "address")
+            _country = _stripe_get(_addr, "country")
+            doc_country = (_country or "").upper() or None
             if not doc_country:
-                doc_country = ((verified.get("id_number") or {}).get("country") or "").upper() or None
+                _idnum = _stripe_get(verified, "id_number")
+                doc_country = (_stripe_get(_idnum, "country") or "").upper() or None
         except Exception:
             doc_country = None
 

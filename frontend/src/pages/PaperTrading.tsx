@@ -68,9 +68,14 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
   // any stock-underlying strategy (the simulator prices an option off the
   // strategy's instruments). Anything that classifies as 'futures' or
   // 'unknown' (templates) is filtered out.
+  // Paper trading is for testing — strategies in 'active', 'draft', or
+  // 'paused' should all be tradable here (only real-money trading should
+  // require status='active'). Without this, jaceford12 saw an empty
+  // dropdown after saving his strategies as drafts.
   const optStrats = strategies.filter((s: any) => {
     const cls: AssetClass = (s.asset_class as AssetClass) || classifyAssetClass(s.instruments || [])
-    return (cls === 'options' || cls === 'stock') && (s.status || '').toLowerCase() === 'active'
+    return (cls === 'options' || cls === 'stock')
+      && ['active', 'draft', 'paused'].includes((s.status || '').toLowerCase())
   })
 
   const { data: sessions = [] } = useQuery({
@@ -122,7 +127,11 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
                   the live Theta Scanner emails. Always available, no setup needed. */}
               <option value="theta_scanner">🎯 Theta Scanner (daily pick)</option>
               {optStrats.length > 0 && <option disabled>──── your strategies ────</option>}
-              {optStrats.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              {optStrats.map((s: any) => {
+                const st = (s.status || '').toLowerCase()
+                const suffix = st === 'active' ? '' : ` (${st})`
+                return <option key={s.id} value={s.id}>{s.name}{suffix}</option>
+              })}
             </select>
             {optStrats.length === 0 && (
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Theta Scanner uses the same morning pick the live scanner sends. To add your own strategies, create them on the Strategies page.</p>
@@ -516,14 +525,20 @@ export default function PaperTrading() {
                     // asset class is 'futures' (per the same rules the
                     // backend uses). Template strategies (empty
                     // instruments) classify as 'unknown' and are excluded.
+                    // Paper trading is for testing — allow draft/paused too.
                     const futuresOnly = strategies.filter((st: any) => {
                       const cls: AssetClass = (st.asset_class as AssetClass) || classifyAssetClass(st.instruments || [])
-                      return cls === 'futures' && (st.status || '').toLowerCase() === 'active'
+                      return cls === 'futures'
+                        && ['active', 'draft', 'paused'].includes((st.status || '').toLowerCase())
                     })
                     if (futuresOnly.length === 0) {
-                      return <option value="" disabled>No active futures strategies — create one on the Strategies page</option>
+                      return <option value="" disabled>No futures strategies — create one on the Strategies page</option>
                     }
-                    return futuresOnly.map((st: any) => <option key={st.id} value={st.id}>{st.name}</option>)
+                    return futuresOnly.map((st: any) => {
+                      const st2 = (st.status || '').toLowerCase()
+                      const suffix = st2 === 'active' ? '' : ` (${st2})`
+                      return <option key={st.id} value={st.id}>{st.name}{suffix}</option>
+                    })
                   })()}
                 </select>
                 <p className="text-[11px] text-slate-400 mt-1.5 dark:text-slate-500">

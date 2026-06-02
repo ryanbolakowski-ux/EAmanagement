@@ -222,6 +222,77 @@ function OpenPositionsCard() {
   )
 }
 
+function ThetaScannerCriteriaCard() {
+  const [open, setOpen] = useState(false)
+  const { data } = useQuery({
+    queryKey: ['theta-scanner-criteria'],
+    queryFn: () => api.get('/api/v1/scanner/criteria').then((r: any) => r.data),
+    refetchInterval: 5 * 60_000,
+    staleTime: 60_000,
+  })
+  const criteria: any[] = data?.criteria || []
+  const cur: any = data?.current_pick
+  return (
+    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between text-left"
+        aria-expanded={open}>
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.18em] font-bold text-violet-700 dark:text-violet-300">
+            How Theta Scanner picks
+          </div>
+          <div className="text-sm font-bold text-slate-800 dark:text-slate-100 mt-0.5">
+            {cur?.ticker
+              ? <>Today: <span className="text-violet-700 dark:text-violet-300">{cur.ticker}</span> · score {cur.score}</>
+              : 'Scoring rubric + today\'s rationale'}
+          </div>
+        </div>
+        <span className="text-violet-600 dark:text-violet-400 text-lg" aria-hidden>{open ? '−' : '+'}</span>
+      </button>
+      {open && (
+        <div className="mt-4 space-y-3">
+          {cur && (
+            <div className="rounded-xl bg-violet-50 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-900 p-3">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-violet-700 dark:text-violet-300 mb-1">Why {cur.ticker}?</div>
+              <div className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed">{cur.why_selected}</div>
+              {cur.catalyst_reason && (
+                <div className="text-[11px] mt-2 text-slate-600 dark:text-slate-300">
+                  <span className="font-semibold">Catalyst:</span> {cur.catalyst_reason}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
+                  <th className="py-2 pr-3 font-bold">Criterion</th>
+                  <th className="py-2 pr-3 font-bold">Rule</th>
+                  <th className="py-2 font-bold">Why it matters</th>
+                </tr>
+              </thead>
+              <tbody>
+                {criteria.map((c, i) => (
+                  <tr key={i} className="border-b border-slate-100 dark:border-slate-800/60 last:border-0">
+                    <td className="py-2 pr-3 font-semibold text-slate-800 dark:text-slate-100 align-top whitespace-nowrap">{c.name}</td>
+                    <td className="py-2 pr-3 text-slate-700 dark:text-slate-200 align-top font-mono text-[11px]">{c.rule}</td>
+                    <td className="py-2 text-slate-600 dark:text-slate-300 align-top leading-snug">{c.rationale}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!cur && criteria.length > 0 && (
+            <div className="text-[11px] text-slate-500 dark:text-slate-400 italic">
+              No pick today yet — scanner runs until 9:50 ET. The criteria above are what we\'re looking for.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TodayPickCard() {
   const { data } = useQuery({
     queryKey: ['theta-today-pick'],
@@ -1068,6 +1139,8 @@ export default function LiveTradingV2() {
       </div>
 
       <TodayPickCard/>
+
+      <ThetaScannerCriteriaCard/>
 
       <PendingOrdersCard/>
 

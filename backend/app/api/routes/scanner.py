@@ -210,6 +210,88 @@ async def today_pick(
         return {"pick": None, "market_status": status, "message": "Stored pick is corrupt; will refresh on next scan."}
 
 
+@router.get("/criteria")
+async def scanner_criteria(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the Theta Scanner scoring rubric + today's pick rationale."""
+    criteria = [
+        {
+            "name": "Gap %",
+            "rule": "Open vs prior close between 5% and 25%",
+            "rationale": "Below 5% lacks catalyst momentum; above 25% gaps often fade hard."
+        },
+        {
+            "name": "Price band",
+            "rule": "$2 ≤ price ≤ $200",
+            "rationale": "Cheap-stock filter (avoids penny pumps); upper bound keeps options affordable on a $1k Theta Scanner allocation."
+        },
+        {
+            "name": "Dollar volume",
+            "rule": "today_vol × price ≥ $5M",
+            "rationale": "Liquidity floor: thin tape means you cannot exit cleanly when the stop hits."
+        },
+        {
+            "name": "Relative volume",
+            "rule": "today_vol / prev_vol ≥ 2.0x (capped at 10x for scoring)",
+            "rationale": "Confirms institutional participation. 2x prior day = real flow, not just gap-and-yawn."
+        },
+        {
+            "name": "Catalyst weight (8-K item code)",
+            "rule": "Item 1.01: 2.0x | 7.01: 1.4x | 8.01: 1.5x | 2.02: 1.3x | 5.02: 1.2x | none: 1.0x",
+            "rationale": "Material agreements and Reg-FD disclosures move stocks harder than rumor-driven gaps."
+        },
+        {
+            "name": "Symbol cleanliness",
+            "rule": "skip warrants/units/rights/preferreds (W, WS, .U, .R, dotted)",
+            "rationale": "Thin options markets + unusual mechanics break the standard sizing model."
+        },
+        {
+            "name": "Score formula",
+            "rule": "score = gap_pct × ln(today_vol) × catalyst_weight × min(rel_vol, 10) / 100",
+            "rationale": "Multiplicative: ALL four factors must be present to score high. Higher = more momentum + catalyst confidence."
+        },
+        {
+            "name": "Time-tiered threshold",
+            "rule": "6:00 ET: ≥20 | 7:00: ≥18 | 7:30: ≥16 | 8:00: ≥14 | 8:30: ≥12 | 9:00: ≥10 | 9:25-9:50: any",
+            "rationale": "Earlier = stricter. Pre-market liquidity is thin so we only fire on EXCEPTIONAL setups before 7am; the bar drops as we approach the open."
+        },
+    ]
+
+    current_pick = None
+    try:
+        raw = await _r.from_url(os.environ.get("REDIS_URL", "redis://edge_redis:6379"),
+                                 decode_responses=True).get("theta:lastpick:latest")
+        if raw:
+            p = json.loads(raw)
+            n_alts = len(p.get("alternatives") or [])
+            why = (
+                f"Highest score ({p.get('score')}) among {n_alts + 1} candidates passing "
+                f"gap/volume/cleanliness filters. Gap +{p.get('gap_pct', 0):.1f}% "
+                f"within 5-25%; rel-vol {p.get('rel_vol')}x above 2.0 floor; "
+                f"catalyst weight {p.get('catalyst_weight', 1.0):.1f}x from "
+                f"{p.get('catalyst_reason') or 'no specific 8-K'}."
+            )
+            current_pick = {
+                "ticker": p.get("ticker"),
+                "score": p.get("score"),
+                "gap_pct": p.get("gap_pct"),
+                "rel_vol": p.get("rel_vol"),
+                "today_vol": p.get("today_vol"),
+                "catalyst_reason": p.get("catalyst_reason"),
+                "catalyst_weight": p.get("catalyst_weight"),
+                "entry": p.get("entry"), "stop": p.get("stop"), "target": p.get("target"),
+                "picked_at": p.get("picked_at"),
+                "why_selected": why,
+                "alternatives": p.get("alternatives") or [],
+            }
+    except Exception:
+        current_pick = None
+
+    return {"criteria": criteria, "current_pick": current_pick}
+
+
 @router.get("/history")
 async def scanner_history(
     days: int = 30,

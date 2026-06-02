@@ -891,6 +891,26 @@ async def start_premarket_scheduler():
             except Exception as _tse:
                 logger.warning(f"[ThetaScanner] check failed: {_tse}")
 
+            # ── Trail watcher (30s cadence inside the function) ──
+            # SAME BUG PATTERN as the theta scanner above: was only called in
+            # the except block, so during normal operation it never ran.
+            # That's why the 6/1 EEIQ + AIIO positions never got their
+            # trailing stops fired. The function itself debounces (>=30s).
+            try:
+                await _check_trail_watcher()
+            except Exception as _twe:
+                logger.warning(f"[TrailWatch] check failed: {_twe}")
+
+            # ── End-of-day close (3:55 PM ET, idempotent per ET date) ──
+            # Theta Scanner picks are intraday — they should NOT be carried
+            # overnight. Without this, EEIQ (entered 6/1 10:51 ET) sat as a
+            # losing position 24h+. Now: at 15:55 ET each trading day we
+            # market-sell any still-open theta_scanner row.
+            try:
+                await _check_end_of_day_close()
+            except Exception as _eod:
+                logger.warning(f"[EOD-close] check failed: {_eod}")
+
             # Intraday cadence — every 5 min within window
             await _run_scan_cycle(is_premarket=False)
             await asyncio.sleep(INTRADAY_PERIOD_SEC)
@@ -1114,6 +1134,10 @@ async def _run_trailing_stop_watcher():
              WHERE status = 'open'
              ORDER BY opened_at ASC LIMIT 100
         """))).fetchall()
+        # Visibility — explicit so we can grep prod logs and see this firing.
+        # Until 2026-06-02 this function was orphaned (only called from the
+        # except block) and prod had ZERO [TrailWatch] log entries in 5 days.
+        logger.info(f"[TrailWatch] checking {len(rows)} open positions")
         if not rows: return
         for r in rows:
             try:
@@ -1201,3 +1225,119 @@ async def _check_trail_watcher():
         await _run_trailing_stop_watcher()
     except Exception as e:
         logger.warning(f"[TrailWatch] failed: {e}")
+
+
+
+# ===== END-OF-DAY AUTO-CLOSE (3:55 PM ET) =====
+# Theta Scanner picks are intraday — flatten before close so we don't carry
+# losing positions overnight (the precipitating bug: EEIQ entered 6/1 10:51
+# ET, never closed, still open as a -$X loser on 6/2). Idempotent per ET
+# trading date via in-memory _eod_fired_for_date set.
+_eod_fired_for_date: set = set()
+
+
+def _eod_now_et():
+    """Testable seam — tests can monkeypatch this to force a specific ET time."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        import zoneinfo
+        return _dt.now(_tz.utc).astimezone(zoneinfo.ZoneInfo("America/New_York"))
+    except Exception:
+        return None
+
+
+async def _check_end_of_day_close():
+    """Fire EOD close once per US trading day at 15:55 ET. Iterates open
+    positions and submits market-sell to Tradier for each."""
+    from datetime import time as _dtime
+    et = _eod_now_et()
+    if et is None:
+        return
+
+    # Fire at 15:55 ET; allow a 5-min slop window so a sleep-blip doesn't
+    # skip us. The idempotency set keeps us from double-firing.
+    if not (_dtime(15, 55) <= et.time() <= _dtime(16, 0)):
+        return
+    # Weekdays only (Sat=5, Sun=6)
+    if et.weekday() >= 5:
+        return
+
+    today_key = et.date().isoformat()
+    if today_key in _eod_fired_for_date:
+        return
+    _eod_fired_for_date.add(today_key)
+
+    logger.info(f"[EOD-close] starting auto-close pass for {today_key} (15:55 ET)")
+
+    from app.database import async_session_factory
+    from sqlalchemy import text as _t
+
+    closed = 0
+    failed = 0
+    total = 0
+    async with async_session_factory() as db:
+        rows = (await db.execute(_t("""
+            SELECT id, user_id, broker_account_id, ticker, qty, entry_price
+              FROM open_positions_watch
+             WHERE status = 'open'
+               AND opened_at::date <= (NOW() AT TIME ZONE 'America/New_York')::date
+             ORDER BY opened_at ASC LIMIT 200
+        """))).fetchall()
+        total = len(rows)
+        logger.info(f"[EOD-close] {total} open positions eligible for EOD close")
+
+        for r in rows:
+            try:
+                from app.engines.live_trading.broker_factory import build_broker_from_account
+                from app.engines.live_trading.broker_base import OrderRequest, OrderSide, OrderType
+                from app.models.user import BrokerAccount
+                from sqlalchemy import select as _sel
+                acct = (await db.execute(
+                    _sel(BrokerAccount).where(BrokerAccount.id == r.broker_account_id)
+                )).scalar_one_or_none()
+                if not acct:
+                    logger.error(f"[EOD-close] no broker_account for {r.ticker} id={r.id} — skipping")
+                    failed += 1
+                    continue
+                broker = build_broker_from_account(acct)
+                await broker.connect()
+                logger.info(f"[EOD-close] selling {r.ticker} qty={r.qty}")
+                resp = await broker.place_order(OrderRequest(
+                    instrument=r.ticker, side=OrderSide.SELL,
+                    quantity=int(r.qty), order_type=OrderType.MARKET,
+                ))
+                fill_px = float(getattr(resp, "filled_price", None) or 0)
+                broker_order_id = getattr(resp, "broker_order_id", None)
+                logger.info(
+                    f"[EOD-close] order placed for {r.ticker} broker_order={broker_order_id} fill_px={fill_px}"
+                )
+                await db.execute(_t("""
+                    UPDATE open_positions_watch
+                       SET status='closed', exit_price=:px,
+                           exit_reason='eod_auto_close', closed_at=NOW()
+                     WHERE id = :id
+                """), {"px": fill_px or None, "id": r.id})
+                closed += 1
+            except Exception as e:
+                failed += 1
+                logger.error(f"[EOD-close] failed for {r.ticker} id={r.id}: {e}")
+                # Pipeline alert per-position so we know to manually flatten
+                try:
+                    from app.engines.pipeline_alerts import send_pipeline_failure_alert
+                    import traceback as _tb
+                    await send_pipeline_failure_alert(
+                        reason=f"EOD auto-close failed for {r.ticker}",
+                        context={
+                            "job": "premarket_scheduler._check_end_of_day_close",
+                            "ticker": r.ticker, "qty": int(r.qty),
+                            "open_position_id": str(r.id),
+                            "user_id": str(r.user_id),
+                            "error": str(e),
+                        },
+                        traceback_str=_tb.format_exc(),
+                    )
+                except Exception:
+                    pass
+
+        await db.commit()
+    logger.info(f"[EOD-close] complete: closed {closed} of {total}, failed {failed}")
