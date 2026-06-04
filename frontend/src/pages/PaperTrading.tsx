@@ -66,15 +66,25 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
 
   // Options Paper can trade either bona-fide OCC options strategies OR
   // any stock-underlying strategy (the simulator prices an option off the
-  // strategy's instruments). Anything that classifies as 'futures' or
-  // 'unknown' (templates) is filtered out.
-  // Paper trading is for testing — strategies in 'active', 'draft', or
+  // strategy's instruments). Futures setups are filtered out.
+  //
+  // 'unknown' (template strategies with empty instruments) are ALLOWED -
+  // the options simulator picks an underlying from the `underlying` input
+  // (defaults to SPY) and the universe falls back to
+  // ['SPY','QQQ','NVDA','AAPL','MSFT'] when `selected.instruments` is
+  // empty (see the `universe` line below). Without this, jaceford12's
+  // five empty-instrument stock strategies (Low-Float Squeeze, Momentum
+  // Gappers, Oracle, Pre-Market Gap Runner, 52-Week High Breakout)
+  // silently disappeared from the dropdown, leaving him with only the
+  // five options-classified setups and the complaint "I only see a few
+  // strategies".
+  //
+  // Paper trading is for testing - strategies in 'active', 'draft', or
   // 'paused' should all be tradable here (only real-money trading should
-  // require status='active'). Without this, jaceford12 saw an empty
-  // dropdown after saving his strategies as drafts.
+  // require status='active').
   const optStrats = strategies.filter((s: any) => {
     const cls: AssetClass = (s.asset_class as AssetClass) || classifyAssetClass(s.instruments || [])
-    return (cls === 'options' || cls === 'stock')
+    return (cls === 'options' || cls === 'stock' || cls === 'unknown')
       && ['active', 'draft', 'paused'].includes((s.status || '').toLowerCase())
   })
 

@@ -997,6 +997,14 @@ async def run_theta_scanner_for_all_users():
 
 _theta_fired_today = None  # in-memory cache, backed by Redis
 _theta_last_scan_min = None  # debounce: don't scan more than once per ~5 min
+# Once-per-day no-pick alert (BUG B 2026-06-04). When the scan window ends
+# (>9:50 ET) without anything firing, send ONE URGENT alert per trading
+# date so we know the scanner didn't silently fail. Cleared by date.
+_theta_no_pick_alerted_for_date: set = set()
+# Once-per-day exception alert. Same idea, but for the case where
+# find_best_premarket_pick raises — we want one alert per traceback
+# per day, not one alert every 5 minutes for an hour.
+_theta_exception_alerted_for_date: set = set()
 
 def _min_score_for_et(et) -> float:
     """Time-tiered score threshold. Earlier = stricter. As we approach 9:25
@@ -1027,6 +1035,16 @@ async def _check_and_run_theta_scanner():
 
     Once-per-day cap via Redis SETNX. If a top-tier setup never appears,
     the threshold drops every 30 min so the email still goes out by 9:25.
+
+    Visibility (added 2026-06-04 — BUG B):
+      * Every call emits `[ThetaScanner] tick ET=HH:MM window=in/out
+        fired_today=bool` so we can grep prod logs to confirm the function
+        even ran today.
+      * If the scan window closes (>9:50 ET) without a fire, send ONE
+        URGENT pipeline_failure alert per trading date (idempotent via
+        _theta_no_pick_alerted_for_date).
+      * If find_best_premarket_pick raises, attach the traceback to a
+        pipeline_failure alert (also once-per-day).
     """
     global _theta_fired_today, _theta_last_scan_min
     from datetime import datetime as _dt, date as _date, timezone as _tz
@@ -1036,9 +1054,57 @@ async def _check_and_run_theta_scanner():
     except Exception:
         return
 
-    # Skip if outside the entire premarket scan window (6:00 ET - 9:50 ET)
     et_min = et.hour * 60 + et.minute
-    if et_min < 6*60 or et_min > 9*60+50:
+    in_window = (6*60 <= et_min <= 9*60+50)
+    today_dt = _date.today()
+    today_key_visible = today_dt.isoformat()
+    fired_today_bool = (_theta_fired_today == today_dt)
+    # BUG B: heartbeat tick. INFO so it's grep-able; runs even for outside-
+    # window calls so we know the scheduler IS calling us.
+    logger.info(
+        f"[ThetaScanner] tick ET={et.strftime('%H:%M')} "
+        f"window={'in' if in_window else 'out'} fired_today={fired_today_bool} "
+        f"date={today_key_visible}"
+    )
+
+    # End-of-window no-pick guard. Fires at the first call AFTER 9:50 ET
+    # on a date that never produced a fire. We use the same Redis flag the
+    # main path uses so we don't false-alarm a worker that lost its
+    # in-memory state mid-day.
+    if (not in_window) and et_min > 9*60+50 and et.weekday() < 5:
+        if today_key_visible not in _theta_no_pick_alerted_for_date:
+            already_fired_via_redis = False
+            try:
+                import redis as _redis_alert
+                _r_alert = _redis_alert.Redis.from_url(
+                    os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+                    decode_responses=True,
+                )
+                already_fired_via_redis = bool(_r_alert.get(f"theta_fired:{today_key_visible}"))
+            except Exception:
+                already_fired_via_redis = fired_today_bool
+            if not already_fired_via_redis:
+                _theta_no_pick_alerted_for_date.add(today_key_visible)
+                try:
+                    from app.engines.pipeline_alerts import send_pipeline_failure_alert
+                    await send_pipeline_failure_alert(
+                        reason="Theta Scanner produced no pick today",
+                        context={
+                            "job": "premarket_scheduler._check_and_run_theta_scanner",
+                            "et_now": et.strftime("%H:%M ET"),
+                            "trading_date": today_key_visible,
+                            "explanation": (
+                                "Scan window 6:00-9:50 ET closed without firing. "
+                                "Either no qualifying setup, scanner threw silently, "
+                                "or upstream data was unavailable."
+                            ),
+                        },
+                    )
+                except Exception as _ae:
+                    logger.error(f"[ThetaScanner] failed to send no-pick alert: {_ae}")
+
+    # Skip if outside the entire premarket scan window (6:00 ET - 9:50 ET)
+    if not in_window:
         return
 
     # Debounce: scanner is expensive (~30s of API calls). Don't run more
@@ -1073,6 +1139,26 @@ async def _check_and_run_theta_scanner():
             pick = await find_best_premarket_pick(db)
     except Exception as e:
         logger.error(f"[ThetaScanner] find_best_premarket_pick failed: {e}")
+        # BUG B: once per trading-day, send the full traceback as an
+        # URGENT pipeline_failure alert so engineering doesn't have to
+        # grep stdout to find out the scanner was silently dying.
+        try:
+            if today_key not in _theta_exception_alerted_for_date:
+                _theta_exception_alerted_for_date.add(today_key)
+                import traceback as _tb
+                from app.engines.pipeline_alerts import send_pipeline_failure_alert
+                await send_pipeline_failure_alert(
+                    reason=f"Theta Scanner pick failed: {type(e).__name__}",
+                    context={
+                        "job": "premarket_scheduler._check_and_run_theta_scanner",
+                        "et_now": et.strftime("%H:%M ET"),
+                        "trading_date": today_key,
+                        "error": str(e),
+                    },
+                    traceback_str=_tb.format_exc(),
+                )
+        except Exception as _ae:
+            logger.error(f"[ThetaScanner] failed to send exception alert: {_ae}")
         return
 
     if not pick:
@@ -1205,6 +1291,28 @@ async def _run_trailing_stop_watcher():
                                    SET status='closed', exit_price=:p, exit_reason=:r, closed_at=NOW()
                                  WHERE id=:id
                             """), {"p": price, "r": exit_reason, "id": r.id})
+                            # CRITICAL: the trades table is the user-visible source-of-truth
+                            # for the Live Trading P&L panel and journal. open_positions_watch
+                            # is the scanner-only sidecar. Until 2026-06-04 the trail watcher
+                            # only updated the sidecar — leaving the trades row stuck open
+                            # (URG, AIIO for jaceford12). Mirror the close into trades here
+                            # using the same column order as the EOD path.
+                            await db.execute(_t("""
+                                UPDATE trades
+                                   SET status = 'closed',
+                                       exit_price = :p,
+                                       exit_reason = :r,
+                                       exit_time = NOW(),
+                                       pnl = ROUND(((:p - entry_price) * contracts)::numeric, 2),
+                                       net_pnl = ROUND(((:p - entry_price) * contracts - COALESCE(commission, 0))::numeric, 2),
+                                       broker_order_id = COALESCE(broker_order_id, :oid),
+                                       updated_at = NOW()
+                                 WHERE user_id = :uid
+                                   AND mode = 'live'
+                                   AND status = 'open'
+                                   AND instrument = :sym
+                            """), {"p": price, "r": exit_reason, "uid": str(r.user_id),
+                                   "sym": r.ticker, "oid": resp_o.broker_order_id})
                     except Exception as _e:
                         logger.error(f"[TrailWatch] exit order failed for {r.ticker}: {_e}")
             except Exception:
@@ -1317,6 +1425,41 @@ async def _check_end_of_day_close():
                            exit_reason='eod_auto_close', closed_at=NOW()
                      WHERE id = :id
                 """), {"px": fill_px or None, "id": r.id})
+                # Same mirror as the trail watcher: trades is the source-of-truth
+                # for the P&L table. Compute pnl/net_pnl in-DB so we don't
+                # double-compute it elsewhere. fill_px is whatever the broker
+                # filled at — if it's 0/None we still close the row but pnl
+                # falls back to NULL (better than a fake number).
+                if fill_px:
+                    await db.execute(_t("""
+                        UPDATE trades
+                           SET status = 'closed',
+                               exit_price = :px,
+                               exit_reason = 'eod_auto_close',
+                               exit_time = NOW(),
+                               pnl = ROUND(((:px - entry_price) * contracts)::numeric, 2),
+                               net_pnl = ROUND(((:px - entry_price) * contracts - COALESCE(commission, 0))::numeric, 2),
+                               broker_order_id = COALESCE(broker_order_id, :oid),
+                               updated_at = NOW()
+                         WHERE user_id = :uid
+                           AND mode = 'live'
+                           AND status = 'open'
+                           AND instrument = :sym
+                    """), {"px": fill_px, "uid": str(r.user_id),
+                           "sym": r.ticker, "oid": broker_order_id})
+                else:
+                    await db.execute(_t("""
+                        UPDATE trades
+                           SET status = 'closed',
+                               exit_reason = 'eod_auto_close',
+                               exit_time = NOW(),
+                               broker_order_id = COALESCE(broker_order_id, :oid),
+                               updated_at = NOW()
+                         WHERE user_id = :uid
+                           AND mode = 'live'
+                           AND status = 'open'
+                           AND instrument = :sym
+                    """), {"uid": str(r.user_id), "sym": r.ticker, "oid": broker_order_id})
                 closed += 1
             except Exception as e:
                 failed += 1

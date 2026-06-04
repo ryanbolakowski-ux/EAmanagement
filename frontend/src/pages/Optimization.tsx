@@ -53,8 +53,14 @@ export default function Optimization() {
   })
 
   const selectedRun: any = runs.find((r: any) => r.id === runId) || null
-  const activeStrategies = strategies.filter((s: any) => (s.status || 'active') === 'active')
-  const draftStrategies = strategies.filter((s: any) => s.status === 'draft')
+  const activeStrategies = strategies.filter((s: any) => (s.status || 'active').toLowerCase() === 'active')
+  const draftStrategies = strategies.filter((s: any) => (s.status || '').toLowerCase() === 'draft')
+  // BUG C 2026-06-04 - include PAUSED strategies in the dropdown so users
+  // with mostly-paused strategy libraries (e.g. jaceford12: 20 paused / 4
+  // active) can see what they have without re-toggling everything to
+  // active first. Disabled (like drafts) with a "(paused - activate first)"
+  // suffix; selecting requires reactivation.
+  const pausedStrategies = strategies.filter((s: any) => (s.status || '').toLowerCase() === 'paused')
   const selectedStrategyActive = activeStrategies.some((s: any) => s.id === form.strategy_id)
 
   const METRICS = [
@@ -233,6 +239,7 @@ export default function Optimization() {
                   <option value="">Select a strategy...</option>
                   {activeStrategies.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   {draftStrategies.map((s: any) => <option key={s.id} value={s.id} disabled>{s.name} (draft — activate first)</option>)}
+                  {pausedStrategies.map((s: any) => <option key={s.id} value={s.id} disabled>{s.name} (paused — activate first)</option>)}
                 </select>
                 {stratsLoading && <p className="text-xs text-slate-400 mt-1">Loading strategies…</p>}
                 {stratsError && <p className="text-xs text-red-500 mt-1">Could not load strategies. Try again.</p>}
