@@ -8,10 +8,11 @@ from typing import Optional
 from app.database import get_db
 from app.models.user import User, SubscriptionTier
 from app.models.strategy import Strategy, StrategyStatus
-from app.core.auth import require_tier, get_current_user
+from app.core.auth import require_tier, get_current_user, require_2fa_when_paid
 from app.engines.strategy_classification import classify_asset_class
 
 router = APIRouter()
+# 2FA gate: POST/PUT/DELETE routes here require totp_enabled if user is on paid/trial
 
 require_paid_user = require_tier(
     SubscriptionTier.FREE_TRIAL,
@@ -20,6 +21,17 @@ require_paid_user = require_tier(
     SubscriptionTier.TIER_4,
     SubscriptionTier.TIER_5,
 )
+
+
+# 2FA-gated paid-user dep. Used on write routes (POST/PUT/DELETE/PATCH).
+# Composes tier check + 2FA check: tier check first (faster); 2FA check
+# raises 403 with detail.code='requires_2fa_setup' for paid/trial users
+# who haven't enrolled TOTP yet.
+async def require_paid_user_with_2fa(
+    user: User = Depends(require_paid_user),
+    _gated: User = Depends(require_2fa_when_paid),
+) -> User:
+    return user
 
 
 class StrategyCreate(BaseModel):
@@ -93,7 +105,7 @@ async def list_strategies(
 @router.post("/", response_model=StrategyResponse, status_code=status.HTTP_201_CREATED)
 async def create_strategy(
     data: StrategyCreate,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     payload = data.model_dump()
@@ -153,7 +165,7 @@ async def get_strategy(
 async def update_strategy(
     strategy_id: str,
     data: StrategyCreate,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -192,7 +204,7 @@ async def update_strategy(
 @router.delete("/{strategy_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_strategy(
     strategy_id: str,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -242,7 +254,7 @@ async def _set_status(strategy_id, current_user, db, new_status: StrategyStatus)
 @router.post("/{strategy_id}/activate", response_model=StrategyResponse)
 async def activate_strategy(
     strategy_id: str,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     """Publish/activate a strategy. Explicit, unambiguous flow used by the UI's
@@ -254,7 +266,7 @@ async def activate_strategy(
 @router.post("/{strategy_id}/deactivate", response_model=StrategyResponse)
 async def deactivate_strategy(
     strategy_id: str,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     """Move a strategy back to draft (unpublish)."""
@@ -269,7 +281,7 @@ class StarToggle(BaseModel):
 async def toggle_strategy_star(
     strategy_id: str,
     data: StarToggle,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -324,7 +336,7 @@ class ShareTokenResponse(BaseModel):
 async def generate_share_token(
     strategy_id: str,
     regenerate: bool = False,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -365,7 +377,7 @@ async def generate_share_token(
 @router.delete("/{strategy_id}/share", status_code=204)
 async def revoke_share_token(
     strategy_id: str,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     await db.execute(
@@ -420,7 +432,7 @@ async def preview_shared_strategy(
 @router.post("/shared/{token}/import", response_model=StrategyResponse, status_code=status.HTTP_201_CREATED)
 async def import_shared_strategy(
     token: str,
-    current_user: User = Depends(require_paid_user),
+    current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
     src_res = await db.execute(

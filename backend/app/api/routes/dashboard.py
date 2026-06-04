@@ -10,10 +10,11 @@ from app.models.user import User
 from app.models.trade import Trade, TradingMode, TradeStatus
 from app.models.strategy import Strategy
 from app.models.backtest import BacktestRun
-from app.core.auth import get_current_user
+from app.core.auth import require_2fa_when_paid as get_current_user
 from app.engines.ict_bias import compute_ict_bias
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 DAILY_BIAS_INSTRUMENTS = ["ES", "NQ", "RTY", "YM"]
 

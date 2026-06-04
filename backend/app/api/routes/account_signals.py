@@ -18,11 +18,12 @@ from loguru import logger
 from app.database import get_db, async_session_factory
 from app.models.user import User
 from app.models.strategy import Strategy
-from app.core.auth import get_current_user
+from app.core.auth import require_2fa_when_paid as get_current_user
 from app.services.email import _send, _send_tracked, _logo_header
 from app.config import settings
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 
 # ─── Pydantic models ─────────────────────────────────────────────────
@@ -62,7 +63,10 @@ class SignalResponse(BaseModel):
     outcome_price: Optional[float] = None
     outcome_r: Optional[float] = None
     resolved_at: Optional[str] = None
-    # Suppressed-row diagnostics (populated only by the /suppressed endpoint)
+    # Suppressed-row diagnostics. `suppression_reason` is the underlying
+    # provider_status (e.g. "dead_zone_suppressed", "session_cap_suppressed",
+    # "duplicate_suppressed") so the UI can show *why* a signal didn't send.
+    suppression_reason: Optional[str] = None
     duplicate_suppressed_at: Optional[str] = None
     duplicate_suppressed_count: Optional[int] = None
     error_message: Optional[str] = None
@@ -95,6 +99,8 @@ async def list_signals(
             SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
                    s.take_profit, s.bias, s.fired_at, s.status,
                    s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
+                   s.provider_status, s.error_message,
+                   s.duplicate_suppressed_at, s.duplicate_suppressed_count,
                    st.name AS strategy_name
               FROM account_signals s
               JOIN strategies st ON st.id = s.strategy_id
@@ -108,6 +114,8 @@ async def list_signals(
             SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
                    s.take_profit, s.bias, s.fired_at, s.status,
                    s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
+                   s.provider_status, s.error_message,
+                   s.duplicate_suppressed_at, s.duplicate_suppressed_count,
                    st.name AS strategy_name
               FROM account_signals s
               JOIN strategies st ON st.id = s.strategy_id
@@ -133,6 +141,10 @@ async def list_signals(
             outcome_price=float(r.outcome_price) if r.outcome_price is not None else None,
             outcome_r=float(r.outcome_r) if r.outcome_r is not None else None,
             resolved_at=r.resolved_at.isoformat() if r.resolved_at else None,
+            suppression_reason=getattr(r, "provider_status", None) if r.status == "suppressed" else None,
+            duplicate_suppressed_at=getattr(r, "duplicate_suppressed_at", None).isoformat() if getattr(r, "duplicate_suppressed_at", None) else None,
+            duplicate_suppressed_count=int(r.duplicate_suppressed_count) if getattr(r, "duplicate_suppressed_count", None) is not None else None,
+            error_message=getattr(r, "error_message", None),
         )
         for r in rows
     ]

@@ -6,13 +6,14 @@ from sqlalchemy import select, text
 from typing import Optional
 
 from app.database import get_db, async_session_factory
-from app.core.auth import get_current_user, require_tier
+from app.core.auth import require_2fa_when_paid as get_current_user, require_tier
 from app.models.user import User, SubscriptionTier
 from app.models.strategy import Strategy
 from app.models.trade import TradeSession, TradingMode
 
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 eligible_tiers = (
     SubscriptionTier.FREE_TRIAL, SubscriptionTier.TIER_2, SubscriptionTier.TIER_3,

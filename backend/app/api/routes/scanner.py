@@ -2,7 +2,7 @@
 import os, json
 from datetime import date
 from fastapi import APIRouter, Depends
-from app.core.auth import get_current_user
+from app.core.auth import require_2fa_when_paid as get_current_user
 from app.models.user import User
 import redis.asyncio as _r
 
@@ -11,6 +11,7 @@ from sqlalchemy import text
 from app.database import get_db
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 
 def _market_session_flags() -> dict:

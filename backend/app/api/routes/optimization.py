@@ -9,10 +9,11 @@ from app.database import get_db
 from app.models.user import User, SubscriptionTier
 from app.models.strategy import Strategy
 from app.models.optimization import OptimizationRun, OptimizationStatus, OptimizationResult
-from app.core.auth import get_current_user, require_tier
+from app.core.auth import require_2fa_when_paid as get_current_user, require_tier
 from loguru import logger
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 live_tiers = [SubscriptionTier.TIER_3, SubscriptionTier.TIER_4, SubscriptionTier.TIER_5]
 

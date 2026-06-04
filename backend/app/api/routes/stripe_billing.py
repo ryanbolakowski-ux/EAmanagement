@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.models.user import User, SubscriptionTier
 from app.core.auth import get_current_user
+from loguru import logger
 
 router = APIRouter()
 
@@ -168,6 +169,14 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     user.subscription_tier = tier_map[tier]
                     user.stripe_subscription_id = subscription_id
                     await db.commit()
+                    # 2FA gate: a paid subscription just started. If the user
+                    # has not enrolled TOTP yet, gated routes will return
+                    # 403 detail.code='requires_2fa_setup' starting now.
+                    if not user.totp_enabled:
+                        logger.info(
+                            f"[stripe] 2FA-required for user={user.email} "
+                            f"tier={tier} totp_enabled=False at subscription start"
+                        )
 
     elif event.get("type") == "customer.subscription.updated":
         sub = event["data"]["object"]

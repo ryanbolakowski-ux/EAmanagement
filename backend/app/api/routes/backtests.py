@@ -12,7 +12,7 @@ from app.database import get_db
 from app.models.user import User
 from app.models.strategy import Strategy
 from app.models.backtest import BacktestRun, BacktestStatus, BacktestMetrics, BacktestTrade
-from app.core.auth import get_current_user
+from app.core.auth import require_2fa_when_paid as get_current_user
 
 
 def _safe_float(v):
@@ -56,6 +56,7 @@ def _assess_quality(pf, win_rate, max_dd_pct, total_trades, expectancy):
 
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 
 class BacktestRequest(BaseModel):

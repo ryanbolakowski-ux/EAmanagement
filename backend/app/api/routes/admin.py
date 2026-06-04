@@ -8,10 +8,11 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.models.user import User, SubscriptionTier
-from app.core.auth import get_current_user
+from app.core.auth import require_2fa_when_paid as get_current_user
 from app.services.email import send_tier_change_email, send_comp_granted_email, send_comp_revoked_email
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 # ── Admin safe-word gate ─────────────────────────────────────────────────
 #

@@ -33,6 +33,8 @@ import PropFirms from './pages/PropFirms'
 import SharedStrategy from './pages/SharedStrategy'
 import AIStrategyBuilder from './pages/AIStrategyBuilder'
 import AccountSignals from './pages/AccountSignals'
+import TwoFactorSetup from './pages/TwoFactorSetup'
+import TwoFactorRequiredModal from './components/TwoFactorRequiredModal'
 import OptionsSessions from './pages/OptionsSessions'
 import OptionsSessionDetail from './pages/OptionsSessionDetail'
 import PendingTrades from './pages/PendingTrades'
@@ -86,6 +88,7 @@ const _TITLES: Record<string, string> = {
   "/app/options": "Options - Theta Algos",
   "/app/bias": "Daily Bias - Theta Algos",
   "/app/profile": "Profile - Theta Algos",
+  "/app/settings/2fa": "Set up 2FA - Theta Algos",
   "/app/kyc": "Identity Verification - Theta Algos",
   "/app/prop-firms": "Prop Firms - Theta Algos",
   "/app/admin": "Admin - Theta Algos",
@@ -115,6 +118,9 @@ export default function App() {
       <DevicePicker />
     </AuthenticatedOnly>
     <VersionBanner />
+    <AuthenticatedOnly>
+      <TwoFactorRequiredModal />
+    </AuthenticatedOnly>
     <RouteTitle />
     <AuthenticatedOnly>
       <SuggestionForm />
@@ -171,6 +177,7 @@ export default function App() {
         <Route path="live/:id"          element={<LiveAccountDetail />} />
         <Route path="kyc"               element={<Kyc />} />
         <Route path="profile"           element={<Profile />} />
+        <Route path="settings/2fa"      element={<TwoFactorSetup />} />
       </Route>
 
       {/* Fallback */}

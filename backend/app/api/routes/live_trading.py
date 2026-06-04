@@ -10,7 +10,7 @@ from app.models.strategy import Strategy
 from app.models.user import BrokerAccount
 from app.models.trade import TradeSession, TradingMode, Trade, TradeStatus
 from app.api.routes.legal import require_current_ack
-from app.core.auth import get_current_user, require_live_trading
+from app.core.auth import require_2fa_when_paid as get_current_user, require_live_trading
 from app.core.security import encrypt_credentials, decrypt_credentials
 from app.api.routes.kyc import require_kyc_verified
 from app.engines.strategy_classification import (
@@ -20,6 +20,7 @@ from app.engines.strategy_classification import (
 )
 
 router = APIRouter()
+# 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 
 async def _account_daily_pnl(db: AsyncSession, account_id) -> float:
