@@ -105,10 +105,10 @@ async def _apply_backfill(db, user_email: str | None) -> int:
                AND w.closed_at IS NOT NULL
              WHERE t.mode = 'live'
                AND t.status = 'open'
-               -- when user_email is null, the bind below is NULL and the
-               -- clause is true for every row (NULL=NULL is unknown, but
-               -- :email IS NULL → all)
-               AND (:email IS NULL OR u.email = :email)
+               -- Cast :email to text so asyncpg can infer the parameter
+               -- type even when we pass None (NULL). Without the cast,
+               -- asyncpg blows up with AmbiguousParameterError.
+               AND (CAST(:email AS text) IS NULL OR u.email = CAST(:email AS text))
              ORDER BY t.id, w.closed_at DESC
         )
         UPDATE trades t
