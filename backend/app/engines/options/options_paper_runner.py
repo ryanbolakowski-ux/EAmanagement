@@ -178,6 +178,10 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
         )
         trader.start()
         logger.info(f"[OptionsPaperRunner] session {session_id} started | {underlying} | spot=${spot:.2f}")
+        logger.info(
+            f"[options-paper-runner] session_id={session_id} strategy={strat.name} "
+            f"underlying={underlying} watchlist={watchlist} — running"
+        )
 
         # Strategy-level config knobs
         delta_band = (float(getattr(strat, "options_target_delta_min", 0.30) or 0.30),
@@ -190,6 +194,7 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
         closes_buffer: list[float] = []
         last_processed_minute = None
         completed_count = 0
+        last_heartbeat = datetime.now(timezone.utc)
 
         while True:
             try:
@@ -198,6 +203,16 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                     sess = (await db.execute(select(TradeSession).where(TradeSession.id == session_id))).scalar_one_or_none()
                     if not sess or not sess.is_active:
                         logger.info(f"[OptionsPaperRunner] session {session_id} stopped"); break
+
+                # Heartbeat — every ~60s emit visible proof the runner is alive
+                now = datetime.now(timezone.utc)
+                if (now - last_heartbeat).total_seconds() >= 60:
+                    pos = "open" if trader._position else "flat"
+                    logger.info(
+                        f"[options-paper-runner] sid={session_id} alive — "
+                        f"{completed_count} fills today · pos={pos} · underlying={underlying}"
+                    )
+                    last_heartbeat = now
 
                 # Pull recent bars
                 df = yf.Ticker(underlying).history(period="2d", interval="1m")
@@ -242,7 +257,6 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                 logger.error(f"[OptionsPaperRunner] loop err: {e}")
                 await asyncio.sleep(60)
     except Exception as e:
-        logger.error(f"[OptionsPaperRunner] fatal: {e}")
-        import traceback; traceback.print_exc()
+        logger.exception(f"[options-paper-runner] session={session_id} CRASHED: {e}")
     finally:
         _active.pop(session_id, None)

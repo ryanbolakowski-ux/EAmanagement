@@ -10,6 +10,8 @@ from app.core.auth import require_2fa_when_paid as get_current_user, require_tie
 from app.models.user import User, SubscriptionTier
 from app.models.strategy import Strategy
 from app.models.trade import TradeSession, TradingMode
+from app.engines.strategy_classification import classify_asset_class
+from loguru import logger
 
 
 router = APIRouter()
@@ -47,22 +49,44 @@ async def start_options_paper(
     current_user: User = Depends(require_tier(*eligible_tiers)),
     db: AsyncSession = Depends(get_db),
 ):
-    """Start an options paper-trading session. The strategy must be an
-    options strategy (options_mode set, or trades on options tickers).
-    Underlying is the ticker to trade options against."""
+    """Start an options paper-trading session. Accepts any non-futures
+    strategy — stock-only, options (options_mode/OCC), or empty templates
+    (which use DEFAULT_WATCH). Futures-only setups are rejected with a
+    clear message pointing the user to the Futures Paper panel."""
+    logger.info(
+        f"[options-paper-start] user={current_user.email} "
+        f"strategy_id={data.strategy_id} requested_underlying={data.underlying}"
+    )
     strat = (await db.execute(
         select(Strategy).where(Strategy.id == data.strategy_id, Strategy.user_id == current_user.id)
     )).scalar_one_or_none()
     if not strat:
+        logger.warning(
+            f"[options-paper-start] REJECTED user={current_user.email} "
+            f"strategy_id={data.strategy_id} reason='strategy not found'"
+        )
         raise HTTPException(status_code=404, detail="Strategy not found.")
 
-    is_options = bool(getattr(strat, "options_mode", None)) or bool(
-        set(strat.instruments or []) & OPT_TICKERS
+    asset_class = classify_asset_class(strat.instruments or [])
+    _status_val = strat.status.value if hasattr(strat.status, "value") else strat.status
+    logger.info(
+        f"[options-paper-start] strategy={strat.name} status={_status_val} "
+        f"instruments={strat.instruments} options_mode={getattr(strat, 'options_mode', None)} "
+        f"class={asset_class}"
     )
-    if not is_options:
+
+    if asset_class == "futures":
+        reason = "futures-only strategy cannot run on options paper"
+        logger.warning(
+            f"[options-paper-start] REJECTED user={current_user.email} "
+            f"strategy={strat.name} reason='{reason}'"
+        )
         raise HTTPException(
             status_code=400,
-            detail="Options paper trading requires an options strategy. Pick a strategy with an options_mode set, or use the regular futures paper trading.",
+            detail=(
+                "Cannot start an options paper session on a futures-only strategy. "
+                "Use the Futures Paper panel instead."
+            ),
         )
 
     # Multi-underlying watchlist by default. Use strategy's instruments,
@@ -76,6 +100,9 @@ async def start_options_paper(
              or (strat.instruments if strat.instruments and len(strat.instruments) > 0 else None)
              or DEFAULT_WATCH)
     underlying = (data.underlying or watch[0]).upper()
+    logger.info(
+        f"[options-paper-start] watch={watch} chosen_underlying={underlying}"
+    )
 
     # Check for an existing active session on the same (strategy, underlying)
     existing = await db.execute(
@@ -88,6 +115,10 @@ async def start_options_paper(
         )
     )
     if existing.scalar_one_or_none():
+        logger.warning(
+            f"[options-paper-start] REJECTED user={current_user.email} "
+            f"strategy={strat.name} reason='duplicate session for {underlying}'"
+        )
         raise HTTPException(
             status_code=400,
             detail=f"An options paper session for {strat.name} on {underlying} is already running. Stop it first.",
@@ -104,6 +135,9 @@ async def start_options_paper(
     db.add(sess)
     await db.commit()
     await db.refresh(sess)
+    logger.info(
+        f"[options-paper-start] session_id={sess.id} created — dispatching runner"
+    )
 
     # Spawn the runner
     try:
@@ -111,9 +145,9 @@ async def start_options_paper(
         import asyncio
         # Pass the full watchlist so the runner can rotate through it
         asyncio.create_task(_start(str(sess.id), str(strat.id), str(current_user.id), underlying, watchlist=watch))
+        logger.info(f"[options-paper-start] runner dispatched OK for session={sess.id}")
     except Exception as e:
-        from loguru import logger
-        logger.error(f"[options_paper] runner dispatch failed: {e}")
+        logger.exception(f"[options-paper-start] runner dispatch failed for session={sess.id}: {e}")
 
     return OptionsPaperSessionResponse(
         id=str(sess.id), strategy_id=str(strat.id), strategy_name=strat.name,

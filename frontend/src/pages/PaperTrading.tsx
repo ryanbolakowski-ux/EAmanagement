@@ -63,6 +63,11 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
   const [strategyId, setStrategyId] = useState('')
   const [underlying, setUnderlying] = useState('SPY')
   const [error, setError] = useState<string | null>(null)
+  // Phase machine for the start button: idle → validating → creating → activating → idle
+  // Driven manually so the user sees explicit steps instead of a silent spinner.
+  type StartPhase = 'idle' | 'validating' | 'creating' | 'activating'
+  const [phase, setPhase] = useState<StartPhase>('idle')
+  const [newSessionId, setNewSessionId] = useState<string | null>(null)
 
   // Options Paper can trade either bona-fide OCC options strategies OR
   // any stock-underlying strategy (the simulator prices an option off the
@@ -95,12 +100,47 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
   })
 
   const startMut = useMutation({
-    mutationFn: () => optionsPaperApi.startSession({ strategy_id: strategyId, underlying }),
-    onSuccess: () => {
+    mutationFn: async () => {
+      // Phase 1: client-side validation (cheap)
+      setPhase('validating')
+      // Phase 2: POST → server creates the session row
+      setPhase('creating')
+      const resp = await optionsPaperApi.startSession({ strategy_id: strategyId, underlying })
+      // Phase 3: server dispatched the runner; show activating briefly
+      setPhase('activating')
+      return resp
+    },
+    onSuccess: (resp: any) => {
       qc.invalidateQueries({ queryKey: ['options-paper-sessions'] })
       setError(null)
+      const sid = resp?.data?.id || null
+      setNewSessionId(sid)
+      // Scroll to the new session card once it renders
+      if (sid) {
+        setTimeout(() => {
+          const el = document.getElementById(`options-paper-session-${sid}`)
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }, 400)
+      }
+      // Reset phase after a short beat so user sees "Activating…" land
+      setTimeout(() => setPhase('idle'), 600)
     },
-    onError: (e: any) => setError(e?.response?.data?.detail || 'Failed to start.'),
+    onError: (e: any) => {
+      const detail = e?.response?.data?.detail
+      const status = e?.response?.status
+      // 403 with requires_2fa_setup is handled by the global axios interceptor →
+      // suppress local error so we don't double-render the modal + a red banner.
+      if (status === 403 && typeof detail === 'object' && detail?.code === 'requires_2fa_setup') {
+        setError(null)
+        setPhase('idle')
+        return
+      }
+      // Surface the actual server detail when it's a string; otherwise generic fallback.
+      const msg = typeof detail === 'string' ? detail
+                  : (detail?.message || `HTTP ${status || '???'} — failed to start.`)
+      setError(msg)
+      setPhase('idle')
+    },
   })
 
   const stopMut = useMutation({
@@ -158,7 +198,10 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
         <button onClick={() => startMut.mutate()}
           disabled={!strategyId || startMut.isPending}
           className="w-full bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white py-2 rounded-xl text-sm font-bold">
-          {startMut.isPending ? 'Starting…' : 'Start Options Paper Session'}
+          {phase === 'validating' && 'Validating strategy…'}
+          {phase === 'creating' && 'Creating session…'}
+          {phase === 'activating' && 'Activating runner…'}
+          {phase === 'idle' && (startMut.isPending ? 'Starting…' : 'Start Options Paper Session')}
         </button>
       </div>
 
@@ -171,7 +214,7 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
         ) : (
           <div className="space-y-2">
             {sessions.map((s: any) => (
-              <div key={s.id} className="flex items-center justify-between rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3">
+              <div key={s.id} id={`options-paper-session-${s.id}`} className={`flex items-center justify-between rounded-xl border bg-white dark:bg-slate-900 p-3 transition-colors ${newSessionId === s.id ? "border-violet-400 dark:border-violet-500 ring-2 ring-violet-200 dark:ring-violet-800" : "border-slate-200 dark:border-slate-700"}`}>
                 <div className="min-w-0">
                   <div className="font-bold text-sm text-slate-900 dark:text-slate-100 truncate">{s.strategy_name} · <span className="text-violet-600 dark:text-violet-400">{s.underlying}</span></div>
                   <div className="text-[11px] text-slate-500 dark:text-slate-400">
