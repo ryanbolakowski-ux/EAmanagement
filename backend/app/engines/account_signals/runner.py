@@ -378,27 +378,40 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         logger.warning(f"[Signals] geometry warning watcher={watcher_id} {instrument} {direction}: {_w}")
 
     # ── Bug 4: content idempotency key + cooldown-window suppression ──
+    # NOTE: bar_ts is intentionally NOT part of the idem key — the key now
+    # encodes only the SETUP SHAPE (watcher/strategy/instrument/direction +
+    # tick-banded entry/stop/tp). Two consecutive bars on the same setup
+    # produce the SAME key, so the cooldown query below catches the duplicate.
+    # The bar_ts is still passed for logging compatibility.
     idem = make_idempotency_key(watcher_id, strategy_id, instrument, direction, bar_ts, entry, stop, tp)
     cooldown_min = int(_os.environ.get("SIGNAL_DUP_COOLDOWN_MIN", "15"))
 
     async with async_session_factory() as db:
-        dup = (await db.execute(text("""
-            SELECT id FROM account_signals
+        dup_row = (await db.execute(text("""
+            SELECT id, fired_at FROM account_signals
              WHERE idempotency_key = :k
                AND fired_at > NOW() - make_interval(mins => :cool)
              ORDER BY fired_at DESC LIMIT 1
         """), {"k": idem, "cool": cooldown_min})).fetchone()
-        if dup:
+        # [signal-dedup] log line — makes the dedup decision visible in logs
+        # so an operator can confirm the cooldown is firing.
+        logger.info(
+            f"[signal-dedup] idem={idem[:12]} cooldown_check={cooldown_min}m "
+            f"within={dup_row is not None} watcher={watcher_id} {instrument} {direction} "
+            f"entry={entry} stop={stop} tp={tp}"
+        )
+        if dup_row:
             await db.execute(text("""
                 UPDATE account_signals
                    SET duplicate_suppressed_at = :now,
                        duplicate_suppressed_count = duplicate_suppressed_count + 1
                  WHERE id = :id
-            """), {"now": now, "id": dup[0]})
+            """), {"now": now, "id": dup_row[0]})
             await db.commit()
             logger.info(
                 f"[Signals] DUPLICATE suppressed idem={idem[:12]} watcher={watcher_id} "
-                f"{instrument} {direction} @ {entry} (cooldown {cooldown_min}m)"
+                f"{instrument} {direction} @ {entry} (cooldown {cooldown_min}m, "
+                f"original fired_at={dup_row[1]})"
             )
             return
 

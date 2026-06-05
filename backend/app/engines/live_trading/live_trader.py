@@ -51,11 +51,20 @@ class LiveTrader:
         broker: BrokerBase,
         instrument: str,
         commission_per_side: float = 2.25,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
     ):
         self.strategy   = strategy
         self.broker     = broker
         self.instrument = instrument.upper()
         self.commission = commission_per_side
+        # Identifiers used by the shared entry-guard + downstream DB writes.
+        # Previously the live runner passed session_id but __init__ didn't
+        # accept it → constructor raised. We accept them all here.
+        self.session_id  = session_id
+        self.user_id     = user_id
+        self.strategy_id = strategy_id
 
         self._position: Optional[LivePosition] = None
         self._is_running: bool = False
@@ -122,6 +131,30 @@ class LiveTrader:
         if not self._position and self.strategy.check_risk_controls():
             signal = self.strategy.on_bar(bars_dict)
             if signal and signal.signal != SignalType.NONE:
+                # ── Overtrade guard (cooldown / max-trades / max-positions / dup) ──
+                # Same rules as paper. For live we pass an in-memory snapshot
+                # built from self._position — sibling instruments in the same
+                # session would each have their own LiveTrader instance, so
+                # any caller wanting cross-instrument enforcement should pass
+                # in a session-level position dict instead.
+                try:
+                    from app.engines.entry_guard import can_enter
+                    snap = []
+                    if self._position:
+                        snap.append({"session_id": str(self.session_id or ""),
+                                      "instrument": self._position.instrument})
+                    decision = await can_enter(
+                        session_id=str(self.session_id) if self.session_id else "",
+                        strategy_id=str(self.strategy_id) if self.strategy_id else "",
+                        instrument=self.instrument,
+                        direction=signal.signal.value,
+                        mode="live",
+                        open_positions_snapshot=snap,
+                    )
+                    if not decision.allowed:
+                        return
+                except Exception as _ge:
+                    logger.error(f"[LiveTrader] entry-guard error (failing open): {_ge}")
                 await self._execute_entry(signal)
 
     async def on_tick(self, tick: dict):
@@ -239,6 +272,10 @@ class LiveTrader:
             metadata=signal.metadata,
         )
         logger.info(f"[LiveTrader] LIVE POSITION OPEN | {side.value.upper()} {signal.contracts}x {self.instrument} @ {signal.entry_price:.2f}")
+        logger.info(
+            f"[paper-runner] sid={self.session_id} ENTERED inst={traded_instrument} "
+            f"dir={signal.signal.value} entry={signal.entry_price:.2f} contracts={contracts} mode=live"
+        )
 
     async def _cancel_bracket_and_close(self, price: float, reason: ExitReason):
         p = self._position

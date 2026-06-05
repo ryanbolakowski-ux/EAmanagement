@@ -62,6 +62,12 @@ class Strategy(Base):
     max_daily_loss: Mapped[float | None] = mapped_column(nullable=True)
     max_trades_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     kill_switch_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Overtrade-prevention knobs (default 5 min, 1 position). The runtime
+    # ALTER TABLE in app.engines.entry_guard.ensure_strategy_columns adds
+    # these to the live DB; this declaration keeps the ORM in sync so
+    # writes via the Strategy model work.
+    cooldown_min: Mapped[int | None] = mapped_column(Integer, nullable=True, default=5)
+    max_open_positions: Mapped[int | None] = mapped_column(Integer, nullable=True, default=1)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)

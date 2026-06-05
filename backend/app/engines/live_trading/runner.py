@@ -78,6 +78,8 @@ async def _run_session(session_id, strategy_id, user_id, broker_account_id, inst
             broker=broker,
             instrument=instrument,
             session_id=session_id,
+            user_id=user_id,
+            strategy_id=strategy_id,
         )
         trader._is_running = True
         logger.info(f"[LiveRunner] Started session {session_id} | {instrument}")

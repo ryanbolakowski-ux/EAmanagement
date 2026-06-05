@@ -186,6 +186,39 @@ class PaperTrader:
         if not self._position and self.strategy.check_risk_controls():
             signal = self.strategy.on_bar(bars_dict)
             if signal and signal.signal != SignalType.NONE:
+                # ── Overtrade guard (cooldown / max-trades / max-positions / dup) ──
+                # Centralized rules so paper/live/options-paper enforce identically.
+                # Reads strategy.cooldown_min, strategy.max_trades_per_day,
+                # strategy.max_open_positions. Open-position checks use an
+                # in-memory snapshot of sibling traders in the same session
+                # (the paper runner only persists CLOSED trades, so a DB query
+                # on status='open' would always return zero).
+                try:
+                    from app.engines.entry_guard import can_enter
+                    from app.engines.paper_trading.runner import _active_traders as _at_map
+                    snap = []
+                    sid_str = str(self.session_id) if self.session_id else ""
+                    for _k, _tr in list(_at_map.items()):
+                        if not _k.startswith(sid_str + ":") and _k != sid_str:
+                            continue
+                        _pos = getattr(_tr, "_position", None)
+                        if _pos:
+                            snap.append({"session_id": sid_str,
+                                          "instrument": getattr(_pos, "instrument", "")})
+                    decision = await can_enter(
+                        session_id=sid_str,
+                        strategy_id=str(self.strategy_id) if self.strategy_id else "",
+                        instrument=self.instrument,
+                        direction=signal.signal.value,
+                        mode="paper",
+                        open_positions_snapshot=snap,
+                    )
+                    if not decision.allowed:
+                        # Guard already logged the reason; release any lock we may have
+                        return
+                except Exception as _ge:
+                    logger.error(f"[PaperTrader] entry-guard error (failing open): {_ge}")
+
                 # Cross-session signal lock: only one trader for this user's
                 # (strategy, instrument) can hold a position at a time. If
                 # another runner already opened the same setup we skip silently.
@@ -308,6 +341,12 @@ class PaperTrader:
             f"[Paper] OPEN {signal.signal.value.upper()} {contracts}x {traded_instrument} "
             f"@ {signal.entry_price:.2f} | SL={signal.stop_loss:.2f} | TP={signal.take_profit:.2f} "
             f"| equity=${self._equity:,.0f} risk={self._risk_per_trade_pct}%"
+        )
+        # Audit line matching the [paper-runner] decision log format so
+        # an operator can see the full ALLOWED → ENTERED chain in one grep.
+        logger.info(
+            f"[paper-runner] sid={self.session_id} ENTERED inst={traded_instrument} "
+            f"dir={signal.signal.value} entry={signal.entry_price:.2f} contracts={contracts}"
         )
 
         # Email a signal receipt to the user — they want to know when paper

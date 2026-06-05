@@ -86,22 +86,51 @@ def validate_geometry(direction: str, entry: float, stop: float,
             "direction": d}
 
 
+# Tick size per instrument family — used to quantize entry/stop/tp into
+# bands so two signals on the same setup ~1 tick apart collapse to ONE key.
+# Without this the watcher would generate a fresh key every minute when the
+# next bar's micro-price-drift shifts entry/stop by 0.1pt.
+TICK_SIZES_KEY = {
+    "ES": 0.25, "NQ": 0.25, "RTY": 0.10, "YM": 1.0,
+    "MES": 0.25, "MNQ": 0.25, "M2K": 0.10, "MYM": 1.0,
+}
+
+
+def _tick_band(price: float, tick: float = 0.25) -> str:
+    """Round to nearest tick band so prices within 1 tick → same key.
+
+    Example (tick=0.25): 7540.13 → 7540.25, 7540.31 → 7540.25, 7540.49 → 7540.50.
+    Two signals where every price differs by < 1 tick produce identical bands.
+    """
+    if tick <= 0:
+        tick = 0.25
+    banded = round(float(price) / tick) * tick
+    return f"{banded:.2f}"
+
+
 def make_idempotency_key(watcher_id, strategy_id, instrument: str, direction: str,
                          bar_ts, entry: float, stop: float, take_profit: float) -> str:
-    """Stable content hash. Same setup on the same bar -> same key, regardless
-    of how many scanner ticks observe it. Prices are quantized to 2dp so float
-    jitter does not split a single setup into multiple keys."""
+    """Stable content hash. Same SETUP SHAPE -> same key, no matter how many
+    times the scanner re-detects it on consecutive bars.
+
+    The key intentionally OMITS the bar timestamp and quantizes prices into
+    tick bands. Previous version included `bar_ts` (whole-second ISO) and
+    2dp prices, so a setup that stayed valid for 60 bars produced 60 distinct
+    keys → dedup window was bypassed → user got 60 signals/hour.
+
+    Cooldown is the dedup mechanism (handled by the caller's query), not
+    timestamp variance.
+    """
     d = (direction or "").lower()
     if d in ("buy",): d = "long"
     if d in ("sell",): d = "short"
-    # Normalize the bar timestamp to whole-second ISO.
-    try:
-        ts = bar_ts.replace(microsecond=0).isoformat()
-    except Exception:
-        ts = str(bar_ts)
+    inst = (instrument or "").upper()
+    tick = TICK_SIZES_KEY.get(inst, 0.25)
     parts = [
-        str(watcher_id), str(strategy_id), (instrument or "").upper(), d, ts,
-        f"{float(entry):.2f}", f"{float(stop):.2f}", f"{float(take_profit):.2f}",
+        str(watcher_id), str(strategy_id), inst, d,
+        _tick_band(entry, tick),
+        _tick_band(stop, tick),
+        _tick_band(take_profit, tick),
     ]
     raw = "|".join(parts)
     return hashlib.sha256(raw.encode()).hexdigest()

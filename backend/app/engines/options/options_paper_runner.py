@@ -239,6 +239,28 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                 if not trader._position and not trader._kill_switch:
                     side = _ema_signal(closes_buffer)
                     if side:
+                        # ── Overtrade guard ────────────────────────────────
+                        # Options-paper persists open trades via _persist_close
+                        # only on close, so use in-memory snapshot just like
+                        # the futures paper runner.
+                        try:
+                            from app.engines.entry_guard import can_enter
+                            snap = []
+                            if trader._position:
+                                snap.append({"session_id": session_id,
+                                              "instrument": underlying})
+                            decision = await can_enter(
+                                session_id=session_id, strategy_id=strategy_id,
+                                instrument=underlying, direction=side,
+                                mode="options_paper",
+                                open_positions_snapshot=snap,
+                            )
+                            if not decision.allowed:
+                                # Guard already logged reason; skip this tick
+                                await asyncio.sleep(60); continue
+                        except Exception as _ge:
+                            logger.error(f"[OptionsPaperRunner] entry-guard error (failing open): {_ge}")
+
                         opened = trader.on_signal(
                             side=side, spot=latest_close, today=today,
                             delta_band=delta_band, dte_band=dte_band,
@@ -249,6 +271,10 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                         if opened:
                             logger.info(f"[OptionsPaperRunner] opened: {side} {opened.contract.option_type} "
                                          f"{opened.contract.strike} exp {opened.contract.expiration} @ ${opened.entry_premium:.2f}")
+                            logger.info(
+                                f"[paper-runner] sid={session_id} ENTERED inst={underlying} "
+                                f"dir={side} entry={opened.entry_premium:.2f} contracts={opened.contracts} mode=options_paper"
+                            )
 
                 await asyncio.sleep(60)
             except asyncio.CancelledError:

@@ -55,16 +55,21 @@ def test_idempotency_key_stable():
     assert a == b
 
 
-def test_idempotency_key_differs_on_price():
+def test_idempotency_key_differs_on_price_outside_tick():
+    """Prices that fall in DIFFERENT tick bands produce different keys."""
     ts = datetime(2026, 5, 28, 14, 30, tzinfo=timezone.utc)
-    a = make_idempotency_key("w1", "s1", "NQ", "long", ts, 30043.5, 30033.5, 30073.5)
-    b = make_idempotency_key("w1", "s1", "NQ", "long", ts, 30044.0, 30033.5, 30073.5)
+    # NQ tick = 0.25 → 30043.5 and 30043.75 are different bands
+    a = make_idempotency_key("w1", "s1", "NQ", "long", ts, 30043.50, 30033.5, 30073.5)
+    b = make_idempotency_key("w1", "s1", "NQ", "long", ts, 30043.75, 30033.5, 30073.5)
     assert a != b
 
 
-def test_idempotency_key_differs_on_bar():
+def test_idempotency_key_same_across_bars():
+    """REGRESSION: the same setup detected on a later bar must produce the
+    SAME key so the cooldown query catches the duplicate. Previously bar_ts
+    was part of the key → every minute fired a fresh signal."""
     ts1 = datetime(2026, 5, 28, 14, 30, tzinfo=timezone.utc)
     ts2 = datetime(2026, 5, 28, 14, 35, tzinfo=timezone.utc)
     a = make_idempotency_key("w1", "s1", "NQ", "long", ts1, 30043.5, 30033.5, 30073.5)
     b = make_idempotency_key("w1", "s1", "NQ", "long", ts2, 30043.5, 30033.5, 30073.5)
-    assert a != b
+    assert a == b, "bar_ts must NOT be part of the idempotency key"
