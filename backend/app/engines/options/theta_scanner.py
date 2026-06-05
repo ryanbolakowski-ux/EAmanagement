@@ -55,7 +55,7 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
                 continue
             gap_pct = (price - prev_close) / prev_close * 100.0
             if not (5.0 <= gap_pct <= 25.0): continue
-            if price < 2 or price > 200: continue
+            if price < 10 or price > 200: continue  # raised floor to skip micro-caps (was 2)
             if today_vol * price < 5_000_000: continue
             if prev_vol > 0 and today_vol / prev_vol < 2.0: continue
             rel_vol = today_vol / max(prev_vol, 1)
@@ -74,9 +74,37 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
         logger.info("[ThetaScanner] no candidate passed quality filters")
         return None
     candidates.sort(key=lambda c: c["score"], reverse=True)
+    # Per-candidate visibility (every candidate, not just the winner) so we can
+    # audit why a setup did/didn't make the cut on any given day.
+    for c in candidates[:8]:
+        logger.info(
+            f"[stock-scanner] candidate {c['ticker']} score={c['score']:.2f} "
+            f"gap={c['gap_pct']:.1f}% rel_vol={c['rel_vol']} "
+            f"catalyst={c.get('catalyst_reason') or 'none'}"
+        )
     best = candidates[0]
+    # MIN_SCORE floor (added 2026-06-05): only fire if the top candidate clears
+    # the quality bar. After 4 losing micro-cap stop-outs in 5 days, the bar
+    # is non-negotiable. Reject sub-floor days entirely.
+    MIN_SCORE = 15.0
+    if best["score"] < MIN_SCORE:
+        logger.info(
+            f"[stock-scanner] no pick \u2014 best candidate {best['ticker']} "
+            f"score={best['score']:.2f} below MIN_SCORE={MIN_SCORE}"
+        )
+        for c in candidates[:5]:
+            logger.info(
+                f"[stock-scanner] rejected candidate: {c['ticker']} "
+                f"score={c['score']:.2f} gap={c['gap_pct']:.1f}% rel_vol={c['rel_vol']}"
+            )
+        return None
     best["entry"] = best["price"]
-    best["stop"] = round(best["price"] * 0.97, 2)
+    # Stop is now computed at order-placement time from the ICT Oracle 5-min
+    # opening candle (or pre-market session low for pre-mkt confirmed entries).
+    # The blanket -3% stop was triggering 7%+ losses on micro-caps. Leave a
+    # placeholder so email + email_signals_history can still render something.
+    best["stop"] = round(best["price"] * 0.97, 2)  # placeholder; runner overrides
+    best["stop_is_placeholder"] = True
     best["target"] = round(best["price"] * 1.10, 2)
     best["projected_move_pct"] = 10.0
     best["alternatives"] = [{"ticker": c["ticker"], "score": c["score"],
@@ -124,9 +152,21 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     </div>"""
     ok = _send(user.email, subject, html)
 
-    # Fire Tradier order if user has a linked broker account
+    # === Entry timing gate (2026-06-05) ===
+    # The blind 15-min auto-execute caused SPRC to enter 2.5h after pick at
+    # a price that was ALREADY below the stop. Per the user spec, the
+    # broker-fire path is now ROUTED through _execute_stock_pick_with_timing_gate
+    # which checks (a) pre-market VWAP + higher-highs between 08:30-09:25 ET,
+    # or (b) places a market-on-open order at 09:30+. Stop is computed at
+    # order-placement time from the ICT Oracle 5-min opening candle (or the
+    # pre-market session low for pre-mkt-confirmed entries) instead of the
+    # blanket -3% which was triggering 7%+ losses on micro-caps.
+    #
+    # Implementation: enqueue the pick to Redis. The scheduler tick
+    # (_check_pending_stock_entries) picks it up each cycle and asks the
+    # timing gate whether to fire now, wait, or defer.
     try:
-        from app.engines.options.premarket_scheduler import _resolve_user_broker, _place_intraday_broker_order
+        from app.engines.options.premarket_scheduler import _resolve_user_broker
         broker_account_id, trade_mode = await _resolve_user_broker(user.id)
         # Honor per-account trading_enabled toggle (TradeSyncer-style)
         if broker_account_id:
@@ -137,69 +177,40 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 logger.info(f"[ThetaScanner] {user.email}: trading_enabled=False on broker account — skipping Tradier fire")
                 broker_account_id = None
         if trade_mode == "live" and broker_account_id:
+            from datetime import date as _date
             qty = max(1, int(1000 / pick["price"]))  # $1000 position
-            logger.info(f"[ThetaScanner] FIRING Tradier for {user.email}: {pick['ticker']} long qty={qty}")
-            broker_order_id, status, err = await _place_intraday_broker_order(
-                broker_account_id=broker_account_id,
-                ticker=pick["ticker"], direction="long", qty=qty,
-            )
-            if status == "executed":
-                logger.info(f"[ThetaScanner] ✅ Tradier ACCEPTED {pick['ticker']} order_id={broker_order_id}")
-                # Insert position-watch row for trailing-stop tracking
-                try:
-                    from sqlalchemy import text as _t
-                    await db.execute(_t("""
-                        INSERT INTO open_positions_watch
-                          (user_id, broker_account_id, ticker, qty, entry_price,
-                           trail_pct, trail_high, hard_stop, target, source, broker_order_id)
-                        VALUES (CAST(:uid AS uuid), CAST(:bid AS uuid), :tk, :q, :ep,
-                                3.0, :ep, :stop, :tgt, 'theta_scanner', :oid)
-                    """), {
-                        "uid": str(user.id), "bid": broker_account_id, "tk": pick["ticker"],
-                        "q": qty, "ep": pick["entry"], "stop": pick["stop"],
-                        "tgt": pick["target"], "oid": broker_order_id,
-                    })
-                    # Also insert into trades table so portfolio P&L week/month/ytd reflects this
-                    try:
-                        from sqlalchemy import text as _t
-                        # Find or create a theta-scanner trade_session for this user
-                        sess_row = (await db.execute(_t("""
-                            SELECT id FROM trade_sessions
-                             WHERE user_id = CAST(:uid AS uuid) AND mode='live'
-                               AND label = 'Theta Scanner'
-                             ORDER BY started_at DESC LIMIT 1
-                        """), {"uid": str(user.id)})).first()
-                        if sess_row:
-                            sess_id = sess_row.id
-                        else:
-                            ins = await db.execute(_t("""
-                                INSERT INTO trade_sessions (user_id, strategy_id, mode, label, broker_account_id, started_at, is_active)
-                                VALUES (CAST(:uid AS uuid), NULL, 'live', 'Theta Scanner', CAST(:bid AS uuid), NOW(), TRUE)
-                                RETURNING id
-                            """), {"uid": str(user.id), "bid": broker_account_id})
-                            sess_id = ins.scalar()
-                        await db.execute(_t("""
-                            INSERT INTO trades (session_id, user_id, instrument, direction,
-                                entry_price, stop_loss, take_profit, contracts, entry_time,
-                                mode, status, broker_account_id, broker_order_id)
-                            VALUES (:sid, CAST(:uid AS uuid), :inst, :dir,
-                                :ep, :sl, :tp, :q, NOW(), 'live', 'open', CAST(:bid AS uuid), :oid)
-                        """), {
-                            "sid": sess_id, "uid": str(user.id), "inst": pick["ticker"],
-                            "dir": "long", "ep": pick["entry"], "sl": pick["stop"],
-                            "tp": pick["target"], "q": qty, "bid": broker_account_id, "oid": broker_order_id,
-                        })
-                        await db.commit()
-                        logger.info(f"[ThetaScanner] trade row inserted in trades table for {pick['ticker']}")
-                    except Exception as _e2:
-                        logger.warning(f"[ThetaScanner] trades-table insert failed: {_e2}")
-                    logger.info(f"[ThetaScanner] tracking position {pick['ticker']} for trailing stop")
-                except Exception as _e:
-                    logger.warning(f"[ThetaScanner] position-watch insert failed: {_e}")
-            else:
-                logger.error(f"[ThetaScanner] ❌ Tradier {status}: {err}")
+            entry_payload = {
+                "user_id": str(user.id),
+                "user_email": user.email,
+                "broker_account_id": broker_account_id,
+                "ticker": pick["ticker"],
+                "direction": "long",
+                "qty": qty,
+                "pick_price": pick["price"],  # snapshot at scan time — not the entry
+                "target": pick["target"],
+                "pick_date": _date.today().isoformat(),
+                "score": pick.get("score"),
+                "gap_pct": pick.get("gap_pct"),
+            }
+            try:
+                import redis.asyncio as _ra
+                import json as _j2
+                _redis = _ra.from_url(os.environ.get("REDIS_URL", "redis://edge_redis:6379"), decode_responses=True)
+                entry_key = f"theta:pending_entry:{entry_payload['pick_date']}:{user.id}"
+                # Only queue if not already queued (idempotent — the daily
+                # fire-slot already ensures one pick per day, but in case
+                # emit_theta_pick re-fires for any reason we do not want dupes).
+                if await _redis.set(entry_key, _j2.dumps(entry_payload), ex=36*3600, nx=True):
+                    logger.info(
+                        f"[stock-entry] QUEUED ticker={pick['ticker']} user={user.email} "
+                        f"qty={qty} pick_price=${pick['price']:.2f} — waiting for timing gate"
+                    )
+                else:
+                    logger.info(f"[stock-entry] already queued for {user.email} {pick['ticker']} today — skip")
+            except Exception as _qe:
+                logger.error(f"[ThetaScanner] failed to enqueue pending entry: {_qe}")
     except Exception as e:
-        logger.error(f"[ThetaScanner] Tradier fire failed: {e}")
+        logger.error(f"[ThetaScanner] entry-queue failed: {e}")
 
     # Persist to email_signals_history so the Email Signals page can show
     # today's pick + the running 30-day log.

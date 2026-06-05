@@ -891,6 +891,14 @@ async def start_premarket_scheduler():
             except Exception as _tse:
                 logger.warning(f"[ThetaScanner] check failed: {_tse}")
 
+            # ── Pending stock-entry timing gate (2026-06-05) ──
+            # Iterates Redis-queued picks and decides per the ICT timing
+            # gate whether to fire pre-mkt, MOO, or defer.
+            try:
+                await _check_pending_stock_entries()
+            except Exception as _pe:
+                logger.warning(f"[stock-entry] check failed: {_pe}")
+
             # ── Trail watcher (30s cadence inside the function) ──
             # SAME BUG PATTERN as the theta scanner above: was only called in
             # the except block, so during normal operation it never ran.
@@ -1484,3 +1492,550 @@ async def _check_end_of_day_close():
 
         await db.commit()
     logger.info(f"[EOD-close] complete: closed {closed} of {total}, failed {failed}")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# ENTRY TIMING GATE FOR STOCK PICKS  (2026-06-05)
+# ════════════════════════════════════════════════════════════════════════
+# The four losing stock-picks in early June 2026 had two failure modes:
+#   1. Micro-cap junk getting picked (URG, AIIO, EEIQ) — addressed by the
+#      $10 price floor + MIN_SCORE in theta_scanner.py.
+#   2. Late entries via blind 15-min auto-execute. SPRC was filled 2.5h
+#      after the pick at a price already below the protective stop.
+#
+# This module fixes problem (2) with a deterministic gate:
+#   • Pre-market window (08:30-09:25 ET): enter only when BOTH
+#       - current price > pre-market session VWAP
+#       - latest 5-min bar high > previous 5-min bar high (higher highs)
+#     If either fails, wait — the scheduler ticks every 5 min so we re-check.
+#   • Market-on-open (09:30+ ET): place a plain market order, no further
+#     confirmation. Tradier delivers at the open print.
+#   • Before 08:30 ET: defer — too thin to trust either signal.
+#
+# Stops are computed at the moment of order placement, NOT at pick time:
+#   • Pre-mkt confirmed entry: stop = pre-market session LOW (lowest trade
+#     between 04:00 ET and now).
+#   • MOO entry (placed 09:30+): stop = first 5-min bar low (the ICT Oracle
+#     opening candle, 09:30-09:35 ET). Computed at 09:35 ET on first
+#     post-open tick.
+#   • Shorts (rare): symmetric — high of session / opening candle.
+
+_PENDING_STOCK_ENTRY_PREFIX = "theta:pending_entry:"
+# In-process double-fire guard (the daily Redis flag also covers this but
+# we want fast-path skip without round-tripping Redis on every tick).
+_pick_executed_today: set = set()
+
+
+def _polygon_key() -> str:
+    return os.environ.get("POLYGON_API_KEY", "")
+
+
+def _today_et_date_str() -> str:
+    """Return today's ET date as YYYY-MM-DD for Polygon range queries."""
+    et = _eod_now_et()
+    return et.date().isoformat() if et else ""
+
+
+async def _poly_get(url: str, params: dict, timeout: float = 4.0):
+    """Tiny async wrapper around requests.get. We use requests because the
+    rest of this module already uses it and the call rate is low (a couple
+    per tick at most)."""
+    import requests as _rq
+    import asyncio as _aio
+    try:
+        loop = _aio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: _rq.get(url, params=params, timeout=timeout),
+        )
+    except Exception:
+        return None
+
+
+async def _polygon_5min_bars(ticker: str, date_et: str) -> list:
+    """Fetch 5-minute aggregate bars from Polygon for a given ticker + date.
+    Returns a list of dicts: [{'t': epoch_ms, 'o': float, 'h': float,
+                                'l': float, 'c': float, 'v': int}, ...]
+    Sorted ascending by time. Empty list on any failure."""
+    key = _polygon_key()
+    if not key or not ticker or not date_et:
+        return []
+    url = (
+        f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}/"
+        f"range/5/minute/{date_et}/{date_et}"
+    )
+    resp = await _poly_get(url, {
+        "adjusted": "false", "sort": "asc", "apiKey": key,
+    }, timeout=4.0)
+    if not resp or resp.status_code != 200:
+        return []
+    try:
+        return (resp.json() or {}).get("results", []) or []
+    except Exception:
+        return []
+
+
+async def _polygon_1min_bars(ticker: str, date_et: str) -> list:
+    """Fetch 1-minute bars for VWAP / pre-mkt-low computation."""
+    key = _polygon_key()
+    if not key or not ticker or not date_et:
+        return []
+    url = (
+        f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}/"
+        f"range/1/minute/{date_et}/{date_et}"
+    )
+    resp = await _poly_get(url, {
+        "adjusted": "false", "sort": "asc", "apiKey": key,
+    }, timeout=6.0)
+    if not resp or resp.status_code != 200:
+        return []
+    try:
+        return (resp.json() or {}).get("results", []) or []
+    except Exception:
+        return []
+
+
+def _bar_is_premarket_et(bar_t_ms: int) -> bool:
+    """A 1-min bar's start-time is in the 04:00-09:29 ET pre-market window."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        import zoneinfo
+        et = _dt.fromtimestamp(bar_t_ms / 1000.0, tz=_tz.utc).astimezone(
+            zoneinfo.ZoneInfo("America/New_York")
+        )
+    except Exception:
+        return False
+    mins = et.hour * 60 + et.minute
+    return (4 * 60) <= mins < (9 * 60 + 30)
+
+
+def _bar_is_rth_et(bar_t_ms: int) -> bool:
+    """A bar's start-time is in regular trading hours 09:30-16:00 ET."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        import zoneinfo
+        et = _dt.fromtimestamp(bar_t_ms / 1000.0, tz=_tz.utc).astimezone(
+            zoneinfo.ZoneInfo("America/New_York")
+        )
+    except Exception:
+        return False
+    mins = et.hour * 60 + et.minute
+    return (9 * 60 + 30) <= mins <= (16 * 60)
+
+
+def _bar_et_minutes(bar_t_ms: int) -> int:
+    """Return the bar-open ET hour*60+min, or -1 on failure."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        import zoneinfo
+        et = _dt.fromtimestamp(bar_t_ms / 1000.0, tz=_tz.utc).astimezone(
+            zoneinfo.ZoneInfo("America/New_York")
+        )
+        return et.hour * 60 + et.minute
+    except Exception:
+        return -1
+
+
+def compute_premarket_vwap(bars_1m: list) -> Optional[float]:
+    """Volume-weighted average price across all pre-market 1-min bars.
+
+    Polygon includes a 'vw' field on each bar = vwap of that minute. We
+    aggregate to a session VWAP using sum(vw_i * v_i) / sum(v_i)."""
+    num = 0.0
+    den = 0.0
+    for b in bars_1m or []:
+        try:
+            if not _bar_is_premarket_et(int(b.get("t", 0))):
+                continue
+            v = float(b.get("v", 0) or 0)
+            vw = b.get("vw")
+            if vw is None:
+                # Fall back to (h+l+c)/3
+                h = float(b.get("h", 0) or 0)
+                l = float(b.get("l", 0) or 0)
+                c = float(b.get("c", 0) or 0)
+                vw = (h + l + c) / 3.0
+            else:
+                vw = float(vw)
+            if v <= 0 or vw <= 0:
+                continue
+            num += vw * v
+            den += v
+        except Exception:
+            continue
+    if den <= 0:
+        return None
+    return num / den
+
+
+def compute_premarket_low(bars_1m: list) -> Optional[float]:
+    """Lowest trade price between 04:00 ET and 09:30 ET."""
+    lows = []
+    for b in bars_1m or []:
+        try:
+            if not _bar_is_premarket_et(int(b.get("t", 0))):
+                continue
+            l = float(b.get("l", 0) or 0)
+            if l > 0:
+                lows.append(l)
+        except Exception:
+            continue
+    return min(lows) if lows else None
+
+
+def compute_premarket_high(bars_1m: list) -> Optional[float]:
+    """Highest trade price between 04:00 ET and 09:30 ET."""
+    highs = []
+    for b in bars_1m or []:
+        try:
+            if not _bar_is_premarket_et(int(b.get("t", 0))):
+                continue
+            h = float(b.get("h", 0) or 0)
+            if h > 0:
+                highs.append(h)
+        except Exception:
+            continue
+    return max(highs) if highs else None
+
+
+def compute_oracle_5min_candle(bars_5m: list) -> Optional[dict]:
+    """Find the first RTH 5-min bar (09:30-09:35 ET) — the ICT Oracle
+    opening candle. Returns {'h': float, 'l': float, 'o': float, 'c': float}
+    or None if not yet available."""
+    for b in bars_5m or []:
+        m = _bar_et_minutes(int(b.get("t", 0)))
+        # Polygon 5-min bars are aligned to 5-min boundaries. The first
+        # RTH bar should open exactly at minute 570 (09:30).
+        if m == 9 * 60 + 30:
+            return {
+                "h": float(b.get("h", 0) or 0),
+                "l": float(b.get("l", 0) or 0),
+                "o": float(b.get("o", 0) or 0),
+                "c": float(b.get("c", 0) or 0),
+                "v": int(b.get("v", 0) or 0),
+            }
+    return None
+
+
+def has_higher_high(bars_5m: list, now_et_min: int) -> bool:
+    """Pre-market higher-highs check: latest fully-closed 5-min bar's high
+    is strictly greater than the bar before it. Uses pre-market 5-min bars
+    (04:00-09:29 ET). Returns False if fewer than 2 bars available."""
+    pre_bars = []
+    for b in bars_5m or []:
+        m = _bar_et_minutes(int(b.get("t", 0)))
+        # only consider bars whose CLOSE is <= now (i.e., bar fully closed)
+        if 4 * 60 <= m < 9 * 60 + 30 and m + 5 <= now_et_min:
+            pre_bars.append(b)
+    if len(pre_bars) < 2:
+        return False
+    last = float(pre_bars[-1].get("h", 0) or 0)
+    prev = float(pre_bars[-2].get("h", 0) or 0)
+    return last > 0 and prev > 0 and last > prev
+
+
+async def _polygon_last_trade_price(ticker: str) -> Optional[float]:
+    """Fetch the most recent trade price for live pre-market gating."""
+    key = _polygon_key()
+    if not key or not ticker:
+        return None
+    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker.upper()}"
+    resp = await _poly_get(url, {"apiKey": key}, timeout=4.0)
+    if not resp or resp.status_code != 200:
+        return None
+    try:
+        t = (resp.json() or {}).get("ticker") or {}
+        for fld, sub in (("lastTrade", "p"), ("min", "c"), ("day", "c"), ("prevDay", "c")):
+            v = (t.get(fld) or {}).get(sub)
+            if v and float(v) > 0:
+                return float(v)
+    except Exception:
+        return None
+    return None
+
+
+def compute_oracle_stop_long(*, entry_method: str, premarket_low: Optional[float],
+                              oracle_candle: Optional[dict], fallback_price: float) -> tuple:
+    """Compute stop for a LONG entry. Returns (stop_price, label)."""
+    if entry_method == "pre-mkt" and premarket_low and premarket_low > 0:
+        return round(premarket_low - 0.01, 2), "pre-mkt-low"
+    if entry_method == "MOO" and oracle_candle and oracle_candle.get("l", 0) > 0:
+        return round(oracle_candle["l"] - 0.01, 2), "oracle-bar"
+    # Fallback if Polygon failed — use 3% to keep us safe-ish.
+    return round(fallback_price * 0.97, 2), "fallback-3pct"
+
+
+def compute_oracle_stop_short(*, entry_method: str, premarket_high: Optional[float],
+                               oracle_candle: Optional[dict], fallback_price: float) -> tuple:
+    """Compute stop for a SHORT entry. Returns (stop_price, label)."""
+    if entry_method == "pre-mkt" and premarket_high and premarket_high > 0:
+        return round(premarket_high + 0.01, 2), "pre-mkt-high"
+    if entry_method == "MOO" and oracle_candle and oracle_candle.get("h", 0) > 0:
+        return round(oracle_candle["h"] + 0.01, 2), "oracle-bar"
+    return round(fallback_price * 1.03, 2), "fallback-3pct"
+
+
+async def _execute_stock_pick_with_timing_gate(pending_entry: dict) -> bool:
+    """Decide whether to fire the broker order for a queued stock pick.
+
+    Three time windows, ET clock:
+      • <08:30 ET — DEFER. Don't enter.
+      • 08:30-09:25 ET — PRE-MKT path. Enter only if (a) live price > pre-mkt
+        VWAP AND (b) the latest closed 5-min pre-mkt bar high > the previous
+        one. Stop = pre-market session low (lowest trade since 04:00 ET).
+      • 09:30+ ET — MOO path. Place a plain market order (Tradier fills at
+        the open). Compute stop after 09:35 ET from the first 5-min bar low.
+
+    Returns True if an order was placed (or pre-existing fill detected),
+    False if we are still waiting / deferring."""
+    from datetime import datetime as _dt, timezone as _tz, date as _date
+    try:
+        import zoneinfo
+        now_et = _dt.now(_tz.utc).astimezone(zoneinfo.ZoneInfo("America/New_York"))
+    except Exception:
+        return False
+
+    ticker = pending_entry["ticker"]
+    direction = pending_entry.get("direction", "long")
+    user_id = pending_entry["user_id"]
+    user_email = pending_entry.get("user_email", "(unknown)")
+    broker_account_id = pending_entry["broker_account_id"]
+    qty = int(pending_entry["qty"])
+    pick_price = float(pending_entry["pick_price"])
+    target = float(pending_entry.get("target") or pick_price * 1.10)
+    pick_date = pending_entry["pick_date"]
+
+    now_et_min = now_et.hour * 60 + now_et.minute
+    today_et_str = now_et.date().isoformat()
+
+    # Window classification
+    if now_et_min < (8 * 60 + 30):
+        window = "too-early"
+    elif now_et_min <= (9 * 60 + 25):
+        window = "pre-mkt"
+    elif now_et_min < (9 * 60 + 30):
+        # 09:25-09:30 dead zone — wait for the open
+        window = "dead-zone"
+    else:
+        window = "MOO"
+
+    logger.info(
+        f"[stock-entry] timing-gate ticker={ticker} time_et={now_et.strftime('%H:%M')} "
+        f"window={window}"
+    )
+
+    if window == "too-early":
+        logger.info(f"[stock-entry] DEFER ticker={ticker} — too early for confirmation (<08:30 ET)")
+        return False
+    if window == "dead-zone":
+        logger.info(f"[stock-entry] DEFER ticker={ticker} — 09:25-09:30 dead zone, waiting for open")
+        return False
+
+    # Compute Oracle stop bits
+    bars_5m = await _polygon_5min_bars(ticker, today_et_str)
+    bars_1m = []
+    pm_vwap = None
+    pm_low = None
+    pm_high = None
+    oracle_candle = None
+    if window == "pre-mkt":
+        bars_1m = await _polygon_1min_bars(ticker, today_et_str)
+        pm_vwap = compute_premarket_vwap(bars_1m)
+        pm_low = compute_premarket_low(bars_1m)
+        pm_high = compute_premarket_high(bars_1m)
+        # Live price for gating
+        live_px = await _polygon_last_trade_price(ticker)
+        vwap_pass = bool(live_px and pm_vwap and live_px > pm_vwap)
+        hh_pass = has_higher_high(bars_5m, now_et_min)
+        logger.info(
+            f"[stock-entry] WAITING pre-mkt confirmation — "
+            f"vwap_pass={vwap_pass} higher_high_pass={hh_pass} "
+            f"live_px={live_px} pm_vwap={pm_vwap}"
+        )
+        if not (vwap_pass and hh_pass):
+            return False
+        entry_method = "pre-mkt"
+        entry_price = float(live_px or pick_price)
+    else:
+        # MOO. After 09:35 ET the Oracle candle exists.
+        oracle_candle = compute_oracle_5min_candle(bars_5m)
+        entry_method = "MOO"
+        # Use latest snapshot as estimated fill — Tradier will give us the
+        # real fill price asynchronously.
+        live_px = await _polygon_last_trade_price(ticker)
+        entry_price = float(live_px or pick_price)
+
+    # Compute stop
+    if direction == "long":
+        stop_price, stop_label = compute_oracle_stop_long(
+            entry_method=entry_method,
+            premarket_low=pm_low,
+            oracle_candle=oracle_candle,
+            fallback_price=entry_price,
+        )
+    else:
+        stop_price, stop_label = compute_oracle_stop_short(
+            entry_method=entry_method,
+            premarket_high=pm_high,
+            oracle_candle=oracle_candle,
+            fallback_price=entry_price,
+        )
+
+    # Sanity: if live price already <= stop on a long, don't enter — we'd
+    # be stopping out immediately. This is the SPRC failure mode.
+    if direction == "long" and stop_price > 0 and entry_price <= stop_price:
+        logger.error(
+            f"[stock-entry] FAILED ticker={ticker} reason=entry_below_stop "
+            f"entry={entry_price:.2f} stop={stop_price:.2f} ({stop_label}) "
+            f"— skipping order, would stop out instantly"
+        )
+        # Clear the pending entry so we don't keep retrying — the day is lost.
+        await _clear_pending_entry(pick_date, user_id)
+        return False
+    if direction == "short" and stop_price > 0 and entry_price >= stop_price:
+        logger.error(
+            f"[stock-entry] FAILED ticker={ticker} reason=entry_above_stop "
+            f"entry={entry_price:.2f} stop={stop_price:.2f}"
+        )
+        await _clear_pending_entry(pick_date, user_id)
+        return False
+
+    # Place the order
+    try:
+        broker_order_id, status, err = await _place_intraday_broker_order(
+            broker_account_id=broker_account_id,
+            ticker=ticker, direction=direction, qty=qty,
+        )
+    except Exception as e:
+        logger.error(f"[stock-entry] FAILED ticker={ticker} reason=broker_exception err={e}")
+        return False
+
+    if status != "executed":
+        logger.error(
+            f"[stock-entry] FAILED ticker={ticker} reason=broker_{status} err={err}"
+        )
+        # Do NOT clear — next tick may succeed (transient broker error).
+        return False
+
+    logger.info(
+        f"[stock-entry] ENTERED ticker={ticker} method={entry_method} "
+        f"entry={entry_price:.2f} stop={stop_price:.2f} ({stop_label}) "
+        f"target={target:.2f} order_id={broker_order_id} user={user_email}"
+    )
+
+    # Persist position-watch + trades row, mirroring what emit_theta_pick
+    # used to do before the refactor.
+    try:
+        from app.database import async_session_factory as _asf
+        from sqlalchemy import text as _t
+        async with _asf() as db:
+            await db.execute(_t("""
+                INSERT INTO open_positions_watch
+                  (user_id, broker_account_id, ticker, qty, entry_price,
+                   trail_pct, trail_high, hard_stop, target, source, broker_order_id)
+                VALUES (CAST(:uid AS uuid), CAST(:bid AS uuid), :tk, :q, :ep,
+                        3.0, :ep, :stop, :tgt, 'theta_scanner', :oid)
+            """), {
+                "uid": str(user_id), "bid": broker_account_id, "tk": ticker,
+                "q": qty, "ep": entry_price, "stop": stop_price,
+                "tgt": target, "oid": broker_order_id,
+            })
+            # Find or create the Theta Scanner trade_session
+            sess_row = (await db.execute(_t("""
+                SELECT id FROM trade_sessions
+                 WHERE user_id = CAST(:uid AS uuid) AND mode='live'
+                   AND label = 'Theta Scanner'
+                 ORDER BY started_at DESC LIMIT 1
+            """), {"uid": str(user_id)})).first()
+            if sess_row:
+                sess_id = sess_row.id
+            else:
+                ins = await db.execute(_t("""
+                    INSERT INTO trade_sessions (user_id, strategy_id, mode, label, broker_account_id, started_at, is_active)
+                    VALUES (CAST(:uid AS uuid), NULL, 'live', 'Theta Scanner', CAST(:bid AS uuid), NOW(), TRUE)
+                    RETURNING id
+                """), {"uid": str(user_id), "bid": broker_account_id})
+                sess_id = ins.scalar()
+            await db.execute(_t("""
+                INSERT INTO trades (session_id, user_id, instrument, direction,
+                    entry_price, stop_loss, take_profit, contracts, entry_time,
+                    mode, status, broker_account_id, broker_order_id)
+                VALUES (:sid, CAST(:uid AS uuid), :inst, :dir,
+                    :ep, :sl, :tp, :q, NOW(), 'live', 'open', CAST(:bid AS uuid), :oid)
+            """), {
+                "sid": sess_id, "uid": str(user_id), "inst": ticker,
+                "dir": direction, "ep": entry_price, "sl": stop_price,
+                "tp": target, "q": qty, "bid": broker_account_id, "oid": broker_order_id,
+            })
+            await db.commit()
+    except Exception as e:
+        logger.error(f"[stock-entry] position-persist failed for {ticker}: {e}")
+        # Don't return False — the order DID fire. Just log.
+
+    # Mark the in-process guard + clear Redis pending entry so we don't
+    # double-fire on the next tick.
+    _pick_executed_today.add(f"{pick_date}:{user_id}")
+    await _clear_pending_entry(pick_date, user_id)
+    return True
+
+
+async def _clear_pending_entry(pick_date: str, user_id: str):
+    """Delete the Redis pending-entry key for a (date, user) pair."""
+    try:
+        import redis.asyncio as _ra
+        _redis = _ra.from_url(os.environ.get("REDIS_URL", "redis://edge_redis:6379"), decode_responses=True)
+        await _redis.delete(f"{_PENDING_STOCK_ENTRY_PREFIX}{pick_date}:{user_id}")
+    except Exception as e:
+        logger.warning(f"[stock-entry] failed to clear pending entry: {e}")
+
+
+async def _check_pending_stock_entries():
+    """Scheduler-tick: iterate Redis pending entries and run the timing
+    gate on each. Called every 5-min cycle by start_premarket_scheduler.
+
+    Time-window guard: outside 08:30-10:00 ET we skip the scan — the gate
+    can't do anything useful and we don't want unnecessary Polygon calls."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        import zoneinfo
+        et = _dt.now(_tz.utc).astimezone(zoneinfo.ZoneInfo("America/New_York"))
+    except Exception:
+        return
+    et_min = et.hour * 60 + et.minute
+    if et_min < (8 * 60 + 0) or et_min > (10 * 60 + 30):
+        return  # outside any relevant window — no point polling
+
+    pick_date = et.date().isoformat()
+    if et.weekday() >= 5:
+        return  # weekends — nothing to do
+
+    try:
+        import redis.asyncio as _ra
+        import json as _j
+        _redis = _ra.from_url(os.environ.get("REDIS_URL", "redis://edge_redis:6379"), decode_responses=True)
+        # SCAN pattern instead of KEYS to avoid blocking
+        cursor = 0
+        pending_keys = []
+        while True:
+            cursor, keys = await _redis.scan(cursor=cursor, match=f"{_PENDING_STOCK_ENTRY_PREFIX}{pick_date}:*", count=100)
+            pending_keys.extend(keys)
+            if cursor == 0:
+                break
+        if not pending_keys:
+            return
+        logger.info(f"[stock-entry] tick {et.strftime('%H:%M ET')}: {len(pending_keys)} pending entries to gate")
+        for key in pending_keys:
+            try:
+                raw = await _redis.get(key)
+                if not raw:
+                    continue
+                pending = _j.loads(raw)
+                # Double-fire guard
+                guard_key = f"{pending.get('pick_date')}:{pending.get('user_id')}"
+                if guard_key in _pick_executed_today:
+                    continue
+                await _execute_stock_pick_with_timing_gate(pending)
+            except Exception as e:
+                logger.error(f"[stock-entry] tick failed for key={key}: {e}")
+    except Exception as e:
+        logger.warning(f"[stock-entry] _check_pending_stock_entries top-level fail: {e}")
