@@ -117,13 +117,17 @@ async def register(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    existing = await db.execute(select(User).where(User.email == data.email))
+    # Emails are case-insensitive — normalize on store and check uniqueness
+    # against the lowercased form so Ryan.bolakowski@ and ryan.bolakowski@
+    # can never become two different accounts.
+    _email = (data.email or "").lower().strip()
+    existing = await db.execute(select(User).where(func.lower(User.email) == _email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered.")
 
     trial_end = datetime.utcnow() + timedelta(days=30)
     user = User(
-        email=data.email,
+        email=_email,
         username=data.username,
         hashed_password=hash_password(data.password),
         subscription_tier="free_trial",
@@ -257,7 +261,7 @@ async def forgot_password(
     db: AsyncSession = Depends(get_db),
 ):
     """Always returns 200 to avoid leaking which emails are registered."""
-    user = (await db.execute(select(User).where(User.email == data.email))).scalar_one_or_none()
+    user = (await db.execute(select(User).where(func.lower(User.email) == (data.email or "").lower().strip()))).scalar_one_or_none()
     if user and user.is_active:
         token = secrets.token_urlsafe(32)
         _redis.setex(f"pwreset:{token}", PWRESET_TTL, str(user.id))
