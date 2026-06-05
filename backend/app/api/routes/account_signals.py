@@ -566,14 +566,24 @@ async def _resolve_signal_outcomes(db, max_age_hours: int = 168):
                         outcome, outcome_price, outcome_r = "loss", stop, -1.0; break
                     if hi >= target:
                         outcome, outcome_price = "win", target
-                        outcome_r = abs(target - entry) / risk if risk > 0 else 0
+                        _raw_r = abs(target - entry) / risk if risk > 0 else 0
+                        if _raw_r > 50:
+                            outcome, outcome_price, outcome_r = "data_error", None, None
+                            logger.warning(f"[signals] data-error: signal id={r.id} computed R={_raw_r:.1f} (entry={entry} stop={stop} target={target}); marking as data_error")
+                            break
+                        outcome_r = _raw_r
                         break
                 else:  # short
                     if hi >= stop:
                         outcome, outcome_price, outcome_r = "loss", stop, -1.0; break
                     if lo <= target:
                         outcome, outcome_price = "win", target
-                        outcome_r = abs(entry - target) / risk if risk > 0 else 0
+                        _raw_r = abs(entry - target) / risk if risk > 0 else 0
+                        if _raw_r > 50:
+                            outcome, outcome_price, outcome_r = "data_error", None, None
+                            logger.warning(f"[signals] data-error: signal id={r.id} computed R={_raw_r:.1f} (entry={entry} stop={stop} target={target}); marking as data_error")
+                            break
+                        outcome_r = _raw_r
                         break
             # If signal is older than max_age and never hit, mark expired
             if outcome is None and (now - fired_at) > timedelta(hours=max_age_hours):
@@ -606,6 +616,11 @@ async def signals_stats(
     except Exception as e:
         logger.warning(f"[signals] stats resolve pass failed: {e}")
 
+    # R:R aggregation guard: exclude |outcome_r| > 20 from totals/averages so a
+    # single bad signal (e.g. near-zero risk → exploded R) can't poison the avg.
+    # 20R is already extreme — real-world R:R signals top out around 10-15. The
+    # excluded_outliers count is surfaced to the UI so users see when this fires.
+    BAD_R_THRESHOLD = 20.0
     rows = (await db.execute(text("""
         SELECT
             COUNT(*) AS total,
@@ -613,11 +628,17 @@ async def signals_stats(
             COUNT(*) FILTER (WHERE outcome = 'loss') AS losses,
             COUNT(*) FILTER (WHERE outcome = 'expired') AS expired,
             COUNT(*) FILTER (WHERE outcome IS NULL) AS pending,
-            COALESCE(SUM(outcome_r) FILTER (WHERE outcome IN ('win','loss')), 0) AS total_r,
-            COALESCE(AVG(outcome_r) FILTER (WHERE outcome IN ('win','loss')), 0) AS avg_r
+            COALESCE(SUM(outcome_r) FILTER (WHERE outcome IN ('win','loss')
+                                              AND ABS(outcome_r) <= :rmax), 0) AS total_r,
+            COALESCE(AVG(outcome_r) FILTER (WHERE outcome IN ('win','loss')
+                                              AND ABS(outcome_r) <= :rmax), 0) AS avg_r,
+            COUNT(*) FILTER (WHERE outcome IN ('win','loss')
+                              AND ABS(outcome_r) > :rmax) AS excluded_outliers
           FROM account_signals
          WHERE user_id = :uid
-    """), {"uid": str(current_user.id)})).first()
+    """), {"uid": str(current_user.id), "rmax": BAD_R_THRESHOLD})).first()
+    if rows and int(rows.excluded_outliers or 0) > 0:
+        logger.warning(f"[signals/stats] user={current_user.email} excluded {rows.excluded_outliers} outlier signals with |outcome_r|>{BAD_R_THRESHOLD} from aggregates")
 
     total = int(rows.total or 0)
     wins = int(rows.wins or 0)
@@ -631,4 +652,5 @@ async def signals_stats(
         "win_rate": round(win_rate, 1),
         "total_r": round(float(rows.total_r or 0), 2),
         "avg_r": round(float(rows.avg_r or 0), 2),
+        "excluded_outliers": int(rows.excluded_outliers or 0),
     }

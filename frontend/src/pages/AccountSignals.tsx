@@ -415,7 +415,7 @@ export default function AccountSignals() {
   })
   const { data: watchers = [] }  = useQuery({ queryKey: ['signal-watchers'],   queryFn: () => accountSignalsApi.listWatchers().then(r => r.data) })
   const { data: strategies = [] }= useQuery({ queryKey: ['strategies'],         queryFn: () => strategiesApi.list().then(r => r.data) })
-  const { data: stats } = useQuery<{ total: number; wins: number; losses: number; expired: number; pending: number; resolved: number; win_rate: number; total_r: number; avg_r: number }>({ queryKey: ['signals-stats'], queryFn: () => api.get('/api/v1/account-signals/stats').then(r => r.data), refetchInterval: 60000 })
+  const { data: stats } = useQuery<{ total: number; wins: number; losses: number; expired: number; pending: number; resolved: number; win_rate: number; total_r: number; avg_r: number; excluded_outliers: number }>({ queryKey: ['signals-stats'], queryFn: () => api.get('/api/v1/account-signals/stats').then(r => r.data), refetchInterval: 60000 })
 
   const startMutation = useMutation({
     mutationFn: () => accountSignalsApi.startWatcher({
@@ -473,11 +473,14 @@ export default function AccountSignals() {
           <div className="text-2xl font-extrabold text-red-500 tabular-nums mt-1">{stats?.losses ?? 0}</div>
         </div>
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4">
-          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Total R</div>
+          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400" title="Sum of R-multiples (outcome / planned risk) across ALL resolved trades — accumulates over time, not an average">Total R-multiple <span className="text-slate-300">(sum)</span></div>
           <div className={`text-2xl font-extrabold tabular-nums mt-1 ${(stats?.total_r ?? 0) >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
             {(stats?.total_r ?? 0) >= 0 ? '+' : ''}{stats?.total_r?.toFixed(2) ?? '0.00'}R
           </div>
-          <div className="text-[10px] text-slate-400 mt-0.5">avg {stats?.avg_r?.toFixed(2) ?? '0.00'}R/trade</div>
+          <div className="text-[10px] text-slate-400 mt-0.5" title="Average R per resolved trade. Healthy range: 0.5–3.0. Above 5 may indicate an outlier signal — see exclusions.">Average R: <span className="font-semibold text-slate-700 dark:text-slate-300">{stats?.avg_r?.toFixed(2) ?? '0.00'}</span> per resolved trade</div>
+          {(stats?.excluded_outliers ?? 0) > 0 && (
+            <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5" title="Signals with |outcome_r| > 20 were excluded from these aggregates as likely data errors (near-zero risk or wrong stop/target).">⚠ {stats?.excluded_outliers} outlier{stats?.excluded_outliers === 1 ? '' : 's'} excluded</div>
+          )}
         </div>
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4">
           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Pending</div>
