@@ -267,6 +267,7 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                             prefer_itm=prefer_itm,
                             spread_width=int(spread_width) if spread_width else None,
                             default_iv=0.30,
+                            bar_ts=latest_ts,
                         )
                         if opened:
                             logger.info(f"[OptionsPaperRunner] opened: {side} {opened.contract.option_type} "

@@ -301,6 +301,7 @@ async def _run_session_loop(session_id: str, strategy_id: str, user_id: str,
                                 prefer_itm=prefer_itm,
                                 spread_width=spread_width,
                                 default_iv=0.30,
+                                bar_ts=latest_ts,
                             )
 
                 # Mark-to-model — every cycle

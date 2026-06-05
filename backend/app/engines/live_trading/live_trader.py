@@ -5,7 +5,7 @@ position management, and risk enforcement.
 """
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta as _td
 from typing import Optional
 from loguru import logger
 
@@ -73,6 +73,9 @@ class LiveTrader:
         self._daily_trades: int = 0
         self._current_date: Optional[date] = None
         self._bars_buffer: dict[str, list] = {}
+        # Wall-clock instant trading went live. Bars closing before this are
+        # catch-up/replayed history and must never open a real-money position.
+        self._session_started_at: Optional[datetime] = None
 
     async def start(self):
         if not self.broker.is_connected:
@@ -82,6 +85,8 @@ class LiveTrader:
 
         self._is_running = True
         self.strategy.reset_daily_counters()
+        self._session_started_at = datetime.now(timezone.utc)
+        logger.info(f"[LiveTrader] session_started_at={self._session_started_at.isoformat()}")
 
         # Subscribe to market data
         await self.broker.subscribe_quotes(self.instrument, self.on_tick)
@@ -127,6 +132,22 @@ class LiveTrader:
             self._daily_pnl    = 0.0
             self._daily_trades = 0
             self.strategy.reset_daily_counters()
+
+        # Never OPEN a real-money position on a bar that closed before this
+        # session went live. On startup the broker/data feed can replay recent
+        # historical bars; those must seed indicators only, never trade.
+        _bar_ts = bar.get("timestamp")
+        if self._session_started_at is not None and _bar_ts is not None:
+            try:
+                import pandas as _pd
+                _bts = _pd.Timestamp(_bar_ts)
+                if _bts.tzinfo is None:
+                    _bts = _bts.tz_localize("UTC")
+                if _bts.to_pydatetime() < (self._session_started_at - _td(seconds=90)):
+                    logger.info(f"[LiveTrader] SKIP entry — bar ts={_bts.isoformat()} predates session_start={self._session_started_at.isoformat()} (catch-up bar, seed-only)")
+                    return
+            except Exception:
+                pass
 
         if not self._position and self.strategy.check_risk_controls():
             signal = self.strategy.on_bar(bars_dict)

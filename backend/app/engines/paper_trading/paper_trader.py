@@ -6,7 +6,7 @@ Tracks PnL, open positions, and session metrics identically to live trading.
 """
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta as _td
 from typing import Optional
 from loguru import logger
 import redis as redis_lib
@@ -118,6 +118,10 @@ class PaperTrader:
         # The runner sets this during the activation catch-up burst so we don't
         # retroactively fire on bars that printed minutes-to-hours ago.
         self._warmup: bool = False
+        # Wall-clock instant the trader was activated. Bars whose CLOSE timestamp
+        # predates this are catch-up/replayed history and must never open a
+        # position (belt-and-suspenders on top of _warmup). Set in start().
+        self._session_started_at: Optional[datetime] = None
 
     # ─────────────────────────────────────────────────────────────────────────
     # Lifecycle
@@ -126,7 +130,8 @@ class PaperTrader:
     async def start(self):
         self._is_running = True
         self.strategy.reset_daily_counters()
-        logger.info(f"[PaperTrader] Started | {self.instrument} | Strategy: {self.strategy.config.name}")
+        self._session_started_at = datetime.now(timezone.utc)
+        logger.info(f"[PaperTrader] Started | {self.instrument} | Strategy: {self.strategy.config.name} | session_started_at={self._session_started_at.isoformat()}")
 
     async def stop(self):
         self._is_running = False
@@ -174,6 +179,24 @@ class PaperTrader:
         # Manage open position SL/TP
         if self._position:
             await self._check_position_exits(bar)
+
+        # Never OPEN a position on a bar that closed before this session was
+        # activated. The data feed can replay recent historical 1-min bars as
+        # "live" on startup; those must seed indicators only, never trade.
+        # (Existing-position exit management above still runs so a position can close.)
+        _bar_ts = bar.get("timestamp")
+        if self._session_started_at is not None and _bar_ts is not None:
+            try:
+                import pandas as _pd
+                _bts = _pd.Timestamp(_bar_ts)
+                if _bts.tzinfo is None:
+                    _bts = _bts.tz_localize("UTC")
+                # grace = 90s so the bar that's mid-formation at activation still counts
+                if _bts.to_pydatetime() < (self._session_started_at - _td(seconds=90)):
+                    logger.info(f"[PaperTrader] SKIP entry — bar ts={_bts.isoformat()} predates session_start={self._session_started_at.isoformat()} (catch-up bar, seed-only)")
+                    return
+            except Exception:
+                pass
 
         # During warmup we only want to seed the buffer with recent bars; we
         # must not open positions on stale signals (e.g. an FVG that printed

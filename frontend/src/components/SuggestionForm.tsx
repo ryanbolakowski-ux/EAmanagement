@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Lightbulb, Send, X, Bug, Palette, MessageSquare } from 'lucide-react'
+import api from '../api/client'
 
 type Category = 'feature' | 'bug' | 'ux' | 'other'
 
@@ -20,22 +21,16 @@ export default function SuggestionForm() {
     if (msg.length < 5) { setError('Just a bit more — at least a few words.'); return }
     setBusy(true); setError(null)
     try {
-      const token = localStorage.getItem('access_token')
-      const apiBase = (import.meta as any).env?.VITE_API_URL || ''
-      const r = await fetch(`${apiBase}/api/v1/support/suggestion`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ message: msg, category }),
-      })
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}))
-        throw new Error(j.detail || `HTTP ${r.status}`)
-      }
+      // Route through the shared axios client (correct baseURL + auth
+      // interceptor + working CORS). The previous raw fetch resolved
+      // VITE_API_URL differently and its requests never reached the backend.
+      await api.post('/api/v1/support/suggestion', { message: msg, category })
+      // success path — axios throws on non-2xx, so reaching here means sent
       setDone(true)
       setMessage('')
       setTimeout(() => { setDone(false); setOpen(false) }, 2200)
     } catch (e: any) {
-      setError(e?.message || 'Failed to send')
+      setError(e?.response?.data?.detail || e?.message || 'Failed to send')
     } finally { setBusy(false) }
   }
 

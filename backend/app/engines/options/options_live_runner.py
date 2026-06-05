@@ -240,6 +240,7 @@ async def _run_session_loop(session_id: str, strategy_id: str, user_id: str,
                                 dte_band=(dte_min, dte_max),
                                 prefer_itm=prefer_itm,
                                 spread_width=spread_width,
+                                bar_ts=latest_ts,
                             )
 
                 if trader._position:

@@ -25,7 +25,7 @@ and the position is marked errored — we don't blind-flip-flop orders.
 import asyncio
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta as _td
 from typing import Optional
 from loguru import logger
 
@@ -108,6 +108,10 @@ class OptionsLiveTrader:
         self._current_date: Optional[date] = None
         self._kill_switch: bool = False
         self._is_running: bool = False
+        # Wall-clock instant trading went live. Signals whose source bar closed
+        # before this are catch-up/replayed history and must never open a
+        # real-money position. Set in start().
+        self._session_started_at: Optional[datetime] = None
 
     # ── Sizing — same math as paper ─────────────────────────────────────────
 
@@ -128,8 +132,9 @@ class OptionsLiveTrader:
             if not ok:
                 raise RuntimeError("[OptionsLive] broker.connect() failed — refusing to start")
         self._is_running = True
+        self._session_started_at = datetime.now(timezone.utc)
         logger.info(f"[OptionsLive] Started | {self.underlying} | account={self.broker.account_id} | "
-                     f"equity=${self._equity:,.0f}")
+                     f"equity=${self._equity:,.0f} | session_started_at={self._session_started_at.isoformat()}")
 
     async def stop(self):
         self._is_running = False
@@ -175,9 +180,25 @@ class OptionsLiveTrader:
                          dte_band: tuple[int, int] = (30, 60),
                          prefer_itm: bool = False,
                          spread_width: Optional[int] = None,
-                         default_iv: float = 0.30) -> Optional[OptionLivePosition]:
+                         default_iv: float = 0.30,
+                         bar_ts=None) -> Optional[OptionLivePosition]:
         if not self._is_running or self._kill_switch or self._position:
             return None
+
+        # Never OPEN a real-money position on a signal whose source bar closed
+        # before this session went live (catch-up/replayed history seeds the
+        # indicator only). belt-and-suspenders consistent with paper traders.
+        if self._session_started_at is not None and bar_ts is not None:
+            try:
+                import pandas as _pd
+                _bts = _pd.Timestamp(bar_ts)
+                if _bts.tzinfo is None:
+                    _bts = _bts.tz_localize("UTC")
+                if _bts.to_pydatetime() < (self._session_started_at - _td(seconds=90)):
+                    logger.info(f"[OptionsLive] SKIP entry — bar ts={_bts.isoformat()} predates session_start={self._session_started_at.isoformat()} (catch-up bar, seed-only)")
+                    return None
+            except Exception:
+                pass
 
         option_side = "call" if side in ("long", "bullish") else "put"
         pick = pick_strike(

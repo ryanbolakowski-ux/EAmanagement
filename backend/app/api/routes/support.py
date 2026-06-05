@@ -231,6 +231,7 @@ async def suggestion(data: SuggestionRequest, request: Request,
     theta.algos@yahoo.com. Rate-limited (10/hour per user) so a frustrated
     user can't bury the inbox."""
     msg = (data.message or "").strip()
+    logger.info(f"[suggestion] received from user={current_user.email} category={data.category} len={len(msg)}")
     if len(msg) < 5:
         raise HTTPException(status_code=400, detail="Please write at least a few words.")
     if len(msg) > 5000:
@@ -265,11 +266,13 @@ async def suggestion(data: SuggestionRequest, request: Request,
     try:
         from app.services.email import _send as _send_em
         ok = _send_em(admin_to, subject, html)
+        logger.info(f"[suggestion] forwarded to admin inbox — provider_status={'ok' if ok else 'failed'}")
         if not ok:
+            logger.warning(f"[suggestion] send FAILED for user={current_user.email}: provider returned falsy")
             raise HTTPException(status_code=502, detail="Failed to send — please try again later.")
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[suggestion] send failed: {e}")
+        logger.warning(f"[suggestion] send FAILED for user={current_user.email}: {e}")
         raise HTTPException(status_code=502, detail="Failed to send. We'll fix it.")
-    return {"status": "sent", "message": "Got it — thanks for the suggestion. We read every one."}
+    return {"status": "sent", "message": "Sent! The Theta team will see it."}

@@ -11,7 +11,7 @@ can do without live IV from Polygon's snapshot endpoint — for paper this is
 fine; for live we'd swap in the broker's actual quote.
 """
 from dataclasses import dataclass, field
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta as _td
 from typing import Optional
 from loguru import logger
 
@@ -96,6 +96,10 @@ class OptionsPaperTrader:
         self._current_date: Optional[date] = None
         self._kill_switch: bool = False
         self._is_running: bool = False
+        # Wall-clock instant the trader was activated. Signals whose source bar
+        # closed before this are catch-up/replayed history and must never open
+        # a position. Set in start().
+        self._session_started_at: Optional[datetime] = None
 
     # ── Sizing ──────────────────────────────────────────────────────────────
 
@@ -120,8 +124,10 @@ class OptionsPaperTrader:
 
     def start(self):
         self._is_running = True
+        self._session_started_at = datetime.now(timezone.utc)
         logger.info(f"[OptionsPaper] Started | {self.underlying} | "
-                     f"chain_size={len(self.chain)} | equity=${self._equity:,.0f}")
+                     f"chain_size={len(self.chain)} | equity=${self._equity:,.0f} | "
+                     f"session_started_at={self._session_started_at.isoformat()}")
 
     def stop(self):
         self._is_running = False
@@ -135,14 +141,36 @@ class OptionsPaperTrader:
                    dte_band: tuple[int, int] = (30, 60),
                    prefer_itm: bool = False,
                    spread_width: Optional[int] = None,
-                   default_iv: float = 0.30) -> Optional[OptionPaperPosition]:
+                   default_iv: float = 0.30,
+                   bar_ts=None) -> Optional[OptionPaperPosition]:
         """Translate a directional signal into an option entry. `side` is
         'long' or 'short' — long bullish → call, long bearish → put. We
         don't currently sell premium in paper (short calls/puts) because
         the user's framework doesn't include naked-short strategies.
-        Returns the opened position or None if the trade was skipped."""
+        Returns the opened position or None if the trade was skipped.
+
+        `bar_ts` is the close timestamp of the bar that produced this signal;
+        when provided, a signal sourced from a bar that closed before the
+        session was activated is skipped (catch-up/replayed history must seed
+        indicators only, never trade)."""
         if not self._is_running or self._kill_switch or self._position:
             return None
+
+        # Never OPEN a position on a signal whose source bar closed before this
+        # session was activated. On startup the data feed seeds the EMA buffer
+        # from recent history; the first qualifying cross must not retroactively
+        # fire on a bar that printed before the user opened the session.
+        if self._session_started_at is not None and bar_ts is not None:
+            try:
+                import pandas as _pd
+                _bts = _pd.Timestamp(bar_ts)
+                if _bts.tzinfo is None:
+                    _bts = _bts.tz_localize("UTC")
+                if _bts.to_pydatetime() < (self._session_started_at - _td(seconds=90)):
+                    logger.info(f"[OptionsPaper] SKIP entry — bar ts={_bts.isoformat()} predates session_start={self._session_started_at.isoformat()} (catch-up bar, seed-only)")
+                    return None
+            except Exception:
+                pass
 
         # Bullish signal → call; bearish signal → put. (Short selling
         # premium is a separate strategy mode handled by the wheel/spread paths.)
