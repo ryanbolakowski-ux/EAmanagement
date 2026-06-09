@@ -151,6 +151,13 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
   const selected = optStrats.find((s: any) => s.id === strategyId)
   const universe = selected?.instruments || ['SPY','QQQ','NVDA','AAPL','MSFT']
 
+  // Strategy ids that currently have a running options-paper session, so the
+  // dropdown can flag them with " · Active" instead of cluttering the label
+  // with the strategy's draft/paused status.
+  const activeStrategyIds = new Set<string>(
+    sessions.filter((x: any) => x.is_active).map((x: any) => String(x.strategy_id))
+  )
+
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border border-violet-200 dark:border-violet-800 bg-gradient-to-br from-violet-50 to-fuchsia-50 dark:from-violet-900/20 dark:to-fuchsia-900/20 p-5">
@@ -178,9 +185,15 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
               <option value="theta_scanner">🎯 Theta Scanner (daily pick)</option>
               {optStrats.length > 0 && <option disabled>──── your strategies ────</option>}
               {optStrats.map((s: any) => {
-                const st = (s.status || '').toLowerCase()
-                const suffix = st === 'active' ? '' : ` (${st})`
-                return <option key={s.id} value={s.id}>{s.name}{suffix}</option>
+                // Clean strategy name only. If a session is currently running
+                // for this strategy, flag it with " · Active"; otherwise show
+                // no status clutter (draft/paused suffixes removed per design).
+                const running = activeStrategyIds.has(String(s.id))
+                return (
+                  <option key={s.id} value={s.id}>
+                    {s.name}{running ? ' · Active 🟢' : ''}
+                  </option>
+                )
               })}
             </select>
             {optStrats.length === 0 && (
@@ -587,10 +600,18 @@ export default function PaperTrading() {
                     if (futuresOnly.length === 0) {
                       return <option value="" disabled>No futures strategies — create one on the Strategies page</option>
                     }
+                    // Strategy ids with a live paper session → flag " · Active".
+                    // Clean strategy names only; draft/paused suffixes removed.
+                    const runningIds = new Set<string>(
+                      activeSessions.map((s: any) => String(s.strategy_id))
+                    )
                     return futuresOnly.map((st: any) => {
-                      const st2 = (st.status || '').toLowerCase()
-                      const suffix = st2 === 'active' ? '' : ` (${st2})`
-                      return <option key={st.id} value={st.id}>{st.name}{suffix}</option>
+                      const running = runningIds.has(String(st.id))
+                      return (
+                        <option key={st.id} value={st.id}>
+                          {st.name}{running ? ' · Active 🟢' : ''}
+                        </option>
+                      )
                     })
                   })()}
                 </select>
