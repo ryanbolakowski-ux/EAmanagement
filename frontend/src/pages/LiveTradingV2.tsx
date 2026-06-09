@@ -1458,6 +1458,10 @@ export default function LiveTradingV2() {
                     }
                     const accountClasses = supportedClasses(acct.broker) as ReadonlyArray<AssetClass>
                     const cls = (st: any): AssetClass => (st.asset_class as AssetClass) || classifyAssetClass(st.instruments || [])
+                    // Strategy ids with a running live session → flagged " · Active".
+                    const runningIds = new Set<string>(
+                      liveSessions.filter((s: any) => s.is_active).map((s: any) => String(s.strategy_id))
+                    )
                     const active = strategies.filter((st: any) => (st.status || '').toLowerCase() === 'active')
                     // Group active strategies by (broker-supported) asset class.
                     const byClass: Record<AssetClass, any[]> = { futures: [], options: [], stock: [], unknown: [] }
@@ -1482,15 +1486,47 @@ export default function LiveTradingV2() {
                     if (!tabGroup || !accountClasses.includes(tabClass)) {
                       return <option value="">No {tabClass === 'stock' ? 'stock' : tabClass} support on {acct.broker} ({accountClasses.join(', ') || 'unknown broker'}).</option>
                     }
-                    if (tabGroup.items.length === 0) {
+                    // Strategies that match this tab's asset class but are
+                    // draft/paused: not deployable live (live requires status
+                    // = active), but show them DISABLED with a reason instead
+                    // of silently dropping them, so the user can see why their
+                    // strategy isn't selectable.
+                    const ineligible = strategies.filter((st: any) =>
+                      cls(st) === tabClass
+                      && accountClasses.includes(tabClass)
+                      && ['draft', 'paused'].includes((st.status || '').toLowerCase())
+                    )
+                    if (tabGroup.items.length === 0 && ineligible.length === 0) {
                       return <option value="">No {tabClass === 'stock' ? 'stock' : tabClass} strategies yet — create one at /app/strategies.</option>
                     }
                     return (
                       <>
                         <option value="">Select a strategy… ({tabGroup.items.length} available)</option>
-                        <optgroup label={`${tabGroup.emoji} ${tabGroup.label}`}>
-                          {tabGroup.items.map((st: any) => <option key={st.id} value={st.id}>{st.name}</option>)}
-                        </optgroup>
+                        {tabGroup.items.length > 0 && (
+                          <optgroup label={`${tabGroup.emoji} ${tabGroup.label}`}>
+                            {tabGroup.items.map((st: any) => {
+                              const running = runningIds.has(String(st.id))
+                              return (
+                                <option key={st.id} value={st.id}>
+                                  {st.name}{running ? ' · Active 🟢' : ''}
+                                </option>
+                              )
+                            })}
+                          </optgroup>
+                        )}
+                        {ineligible.length > 0 && (
+                          <optgroup label="Not deployable (activate first)">
+                            {ineligible.map((st: any) => {
+                              const status = (st.status || '').toLowerCase()
+                              return (
+                                <option key={st.id} value={st.id} disabled
+                                  title={`${status} — set this strategy to Active on the Strategies page before deploying live`}>
+                                  {st.name} — {status}, activate first
+                                </option>
+                              )
+                            })}
+                          </optgroup>
+                        )}
                       </>
                     )
                   })()}
