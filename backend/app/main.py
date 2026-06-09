@@ -381,6 +381,25 @@ async def health_full():
     except Exception as e:
         components["worker"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
 
+    # Alpaca IEX real-time feed (PREFERRED futures source). Free tier, penny-
+    # accurate for SPY/QQQ. configured = both env keys present; reachable = a
+    # test SPY bar fetch succeeded. Never exposes the secret; never fatal.
+    try:
+        import os as _os_a
+        configured = bool(_os_a.environ.get("ALPACA_API_KEY") and _os_a.environ.get("ALPACA_API_SECRET"))
+        reachable = False
+        if configured:
+            try:
+                from app.engines.data_feeds.alpaca_feed import fetch_alpaca_bars
+                _df = fetch_alpaca_bars("SPY", timeframe="1Min", limit=1)
+                reachable = _df is not None and not _df.empty
+            except Exception:
+                reachable = False
+        components["alpaca"] = {"configured": configured, "feed": "iex", "reachable": reachable}
+    except Exception as e:
+        components["alpaca"] = {"configured": False, "feed": "iex", "reachable": False,
+                                "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
     # Critical deps that gate overall health (email/polygon flakiness is not fatal).
     critical = ["database", "redis", "auth", "worker"]
     ok = all(components.get(k, {}).get("ok", False) for k in critical if k in components)
