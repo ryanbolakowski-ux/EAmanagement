@@ -100,6 +100,9 @@ export default function LiveTrading() {
 
   const { data: accounts = [] }   = useQuery({ queryKey: ['broker-accounts'], queryFn: () => liveTradingApi.listAccounts().then(r => r.data) })
   const { data: strategies = [] } = useQuery({ queryKey: ["strategies"], queryFn: () => strategiesApi.list().then(r => r.data), staleTime: 30000, refetchOnMount: "always" })
+  // Live sessions — used by the Deploy Strategy selector to flag strategies
+  // that already have a running session with " · Active".
+  const { data: liveSessions = [] } = useQuery({ queryKey: ['live-sessions'], queryFn: () => (liveTradingApi as any).listSessions().then((r: any) => r.data), refetchInterval: 30000 })
   const { data: liveTrades = [] } = useQuery({ queryKey: ['live-trades'],     queryFn: () => tradesApi.list({ mode: 'live', limit: 1000 }).then(r => r.data) })
   const { data: liveChartData }   = useQuery({ queryKey: ['live-chart'],      queryFn: () => tradesApi.getChartData('live', 'ES').then(r => r.data), refetchInterval: 30000 })
 
@@ -579,6 +582,10 @@ export default function LiveTrading() {
                     }
                     const accountClasses = supportedClasses(acct.broker) as ReadonlyArray<AssetClass>
                     const cls = (st: any): AssetClass => (st.asset_class as AssetClass) || classifyAssetClass(st.instruments || [])
+                    // Strategy ids with a running live session → flagged " · Active".
+                    const runningIds = new Set<string>(
+                      liveSessions.filter((s: any) => s.is_active).map((s: any) => String(s.strategy_id))
+                    )
                     const active = strategies.filter((st: any) => (st.status || "").toLowerCase() === "active")
                     const byClass: Record<AssetClass, any[]> = { futures: [], options: [], stock: [], unknown: [] }
                     for (const st of active) {
@@ -594,7 +601,15 @@ export default function LiveTrading() {
                       { label: "Stocks",  emoji: "📈", items: byClass.stock },
                     ].filter(g => g.items.length > 0)
                     const total = groups.reduce((s, g) => s + g.items.length, 0)
-                    if (total === 0) {
+                    // Strategies whose asset class the broker supports but that
+                    // are draft/paused: not deployable live (live requires
+                    // active), but shown DISABLED with a reason instead of being
+                    // silently dropped.
+                    const ineligible = strategies.filter((st: any) =>
+                      accountClasses.includes(cls(st))
+                      && ["draft", "paused"].includes((st.status || "").toLowerCase())
+                    )
+                    if (total === 0 && ineligible.length === 0) {
                       return <option value="">No compatible strategies for {acct.broker} — create one at /app/strategies.</option>
                     }
                     return (
@@ -602,9 +617,29 @@ export default function LiveTrading() {
                         <option value="">Select a strategy… ({total} available for {acct.broker})</option>
                         {groups.map(g => (
                           <optgroup key={g.label} label={`${g.emoji} ${g.label}`}>
-                            {g.items.map((st: any) => <option key={st.id} value={st.id}>{st.name}</option>)}
+                            {g.items.map((st: any) => {
+                              const running = runningIds.has(String(st.id))
+                              return (
+                                <option key={st.id} value={st.id}>
+                                  {st.name}{running ? ' · Active 🟢' : ''}
+                                </option>
+                              )
+                            })}
                           </optgroup>
                         ))}
+                        {ineligible.length > 0 && (
+                          <optgroup label="Not deployable (activate first)">
+                            {ineligible.map((st: any) => {
+                              const status = (st.status || "").toLowerCase()
+                              return (
+                                <option key={st.id} value={st.id} disabled
+                                  title={`${status} — set this strategy to Active on the Strategies page before deploying live`}>
+                                  {st.name} — {status}, activate first
+                                </option>
+                              )
+                            })}
+                          </optgroup>
+                        )}
                       </>
                     )
                   })()}
