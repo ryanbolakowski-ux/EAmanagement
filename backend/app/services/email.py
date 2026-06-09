@@ -5,6 +5,7 @@ flows (registration, password reset request) don't fall over when Resend is
 flaky or rate-limited.
 """
 import os
+import base64
 import resend
 from loguru import logger
 
@@ -99,7 +100,7 @@ def _send(to: str, subject: str, html: str) -> bool:
     return _send_tracked(to, subject, html)["sent"]
 
 
-def _send_tracked(to: str, subject: str, html: str, signal_id: str | None = None) -> dict:
+def _send_tracked(to: str, subject: str, html: str, signal_id: str | None = None, inline_png: bytes | None = None, inline_cid: str = "tradechart") -> dict:
     """Public entry point. Records a single [trade-audit] line for every
     decision so we never again have to grep 5 different log patterns to
     reconstruct what happened to a signal email.
@@ -108,7 +109,7 @@ def _send_tracked(to: str, subject: str, html: str, signal_id: str | None = None
     one (Theta Scanner emit path). Transactional emails (welcome, reset,
     2FA) call this with signal_id=None and the audit line still fires.
     """
-    result = _send_tracked_impl(to, subject, html)
+    result = _send_tracked_impl(to, subject, html, inline_png=inline_png, inline_cid=inline_cid)
     try:
         decision = "sent" if result.get("sent") else "dropped"
         provider_status = result.get("provider_status") or ""
@@ -125,7 +126,7 @@ def _send_tracked(to: str, subject: str, html: str, signal_id: str | None = None
     return result
 
 
-def _send_tracked_impl(to: str, subject: str, html: str) -> dict:
+def _send_tracked_impl(to: str, subject: str, html: str, inline_png: bytes | None = None, inline_cid: str = "tradechart") -> dict:
     """Send via Resend's REST API with a hard 8s timeout + 1 retry on
     transient errors (timeout, 429, 5xx). Returns True on success.
 
@@ -191,6 +192,15 @@ def _send_tracked_impl(to: str, subject: str, html: str) -> dict:
         "subject": subject,
         "html": html,
     }
+    # Inline trade-chart attachment (Resend `content_id` → referenced in
+    # the HTML as <img src="cid:tradechart">). base64-encode the PNG bytes.
+    if inline_png:
+        payload["attachments"] = [{
+            "filename": "trade.png",
+            "content": base64.b64encode(inline_png).decode(),
+            "content_id": inline_cid,
+        }]
+        logger.info(f"[email] inline chart attached ({len(inline_png)} bytes)")
     headers = {
         "Authorization": f"Bearer {settings.RESEND_API_KEY}",
         "Content-Type": "application/json",
