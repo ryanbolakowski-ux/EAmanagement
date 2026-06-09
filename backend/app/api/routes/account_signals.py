@@ -96,6 +96,8 @@ class SignalResponse(BaseModel):
     duplicate_suppressed_at: Optional[str] = None
     duplicate_suppressed_count: Optional[int] = None
     error_message: Optional[str] = None
+    # Annotated trade-chart PNG (base64) for inline render in the expanded row.
+    chart_b64: Optional[str] = None
 
 
 # ─── Routes ──────────────────────────────────────────────────────────
@@ -128,6 +130,7 @@ async def list_signals(
                    s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
                    s.provider_status, s.error_message,
                    s.duplicate_suppressed_at, s.duplicate_suppressed_count,
+                   s.chart_b64,
                    st.name AS strategy_name
               FROM account_signals s
               JOIN strategies st ON st.id = s.strategy_id
@@ -143,6 +146,7 @@ async def list_signals(
                    s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
                    s.provider_status, s.error_message,
                    s.duplicate_suppressed_at, s.duplicate_suppressed_count,
+                   s.chart_b64,
                    st.name AS strategy_name
               FROM account_signals s
               JOIN strategies st ON st.id = s.strategy_id
@@ -172,6 +176,7 @@ async def list_signals(
             duplicate_suppressed_at=getattr(r, "duplicate_suppressed_at", None).isoformat() if getattr(r, "duplicate_suppressed_at", None) else None,
             duplicate_suppressed_count=int(r.duplicate_suppressed_count) if getattr(r, "duplicate_suppressed_count", None) is not None else None,
             error_message=getattr(r, "error_message", None),
+            chart_b64=getattr(r, "chart_b64", None),
         )
         for r in rows
     ]
@@ -197,6 +202,7 @@ async def list_suppressed_signals(
                s.outcome, s.outcome_price, s.outcome_r, s.resolved_at,
                s.duplicate_suppressed_at, s.duplicate_suppressed_count,
                s.error_message,
+               s.chart_b64,
                st.name AS strategy_name
           FROM account_signals s
           JOIN strategies st ON st.id = s.strategy_id
@@ -220,6 +226,7 @@ async def list_suppressed_signals(
             duplicate_suppressed_at=r.duplicate_suppressed_at.isoformat() if r.duplicate_suppressed_at else None,
             duplicate_suppressed_count=int(r.duplicate_suppressed_count) if r.duplicate_suppressed_count is not None else None,
             error_message=r.error_message,
+            chart_b64=getattr(r, "chart_b64", None),
         )
         for r in rows
     ]

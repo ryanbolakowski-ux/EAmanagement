@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useState, Fragment } from 'react'
 import { Bell, Mail, Smartphone, PlayCircle, ShieldCheck, Plus, AlertTriangle, Info, ShieldAlert } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { strategiesApi, paperTradingApi } from '../api/endpoints'
@@ -26,6 +26,8 @@ type Signal = {
   duplicate_suppressed_count?: number | null
   error_message?: string | null
   notes?: string
+  // Annotated trade-chart PNG (base64), rendered inline in the expanded row.
+  chart_b64?: string | null
 }
 
 // ── Outcome dot ────────────────────────────────────────────────────────────
@@ -395,6 +397,7 @@ export default function AccountSignals() {
   const isAdmin = !!(user as any)?.is_admin
   const [showSetup, setShowSetup] = useState(false)
   const [showSuppressed, setShowSuppressed] = useState(false)
+  const [expandedSignalId, setExpandedSignalId] = useState<string | null>(null)
   const [form, setForm] = useState({
     account_label: '',
     strategy_id: '',
@@ -570,8 +573,14 @@ export default function AccountSignals() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {signals.map((s: Signal) => (
-                  <tr key={s.id}>
+                {signals.map((s: Signal) => {
+                  const isOpen = expandedSignalId === s.id
+                  return (
+                  <Fragment key={s.id}>
+                  <tr
+                    className="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                    onClick={() => setExpandedSignalId(isOpen ? null : s.id)}
+                  >
                     <td className="px-3 py-2.5 align-middle"><OutcomeDot outcome={s.outcome}/></td>
                     <td className="px-3 py-2.5 text-slate-700 dark:text-slate-200 whitespace-nowrap">{fmtEntryTime(s.fired_at)}</td>
                     <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300 truncate max-w-[180px]">{s.strategy_name}</td>
@@ -590,7 +599,24 @@ export default function AccountSignals() {
                       )}
                     </td>
                   </tr>
-                ))}
+                  {isOpen && (
+                    <tr className="bg-slate-50 dark:bg-slate-900/60">
+                      <td colSpan={9} className="px-4 pb-4 pt-1">
+                        {s.chart_b64 ? (
+                          <img
+                            src={`data:image/png;base64,${s.chart_b64}`}
+                            className="rounded-lg mt-2 max-w-full"
+                            alt="trade setup"
+                          />
+                        ) : (
+                          <div className="text-xs text-slate-400 dark:text-slate-500 mt-2">No chart was captured for this signal.</div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  )
+                })}
               </tbody>
             </table>
           </div>
