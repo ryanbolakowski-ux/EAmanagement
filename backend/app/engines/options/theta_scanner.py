@@ -308,7 +308,7 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
 
 
 async def emit_theta_pick(db, user, pick: dict) -> bool:
-    from app.services.email import _send
+    from app.services.email import _send, _send_tracked
     qty = max(1, int(1000 / pick["price"]))
     _watch = bool(pick.get("watch_only"))
     _qr = pick.get("quality_reasons") or []
@@ -327,6 +327,46 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
         "<p style=\"font-size:11px;color:#475569;margin:0 0 14px;\">Quality: "
         + " \u00b7 ".join(_qr) + "</p>"
     ) if _qr else ""
+    # ── Annotated trade-chart PNG (best-effort) ──────────────────────────
+    # Render the TradingView-style position chart from the same pre-market
+    # 1-min Polygon bars the quality filters use (_polygon_1min_bars). Attach
+    # it inline (<img src="cid:tradechart">) and stash base64 for the Email
+    # Signals history. Even a watch_only pick gets a chart (informative); the
+    # banner already says WATCH ONLY. Any failure -> no-chart email.
+    _chart_png = None
+    _chart_b64 = None
+    _chart_img_html = ""
+    try:
+        from app.engines.options.premarket_scheduler import _polygon_1min_bars, _today_et_date_str
+        from app.services.trade_chart import generate_trade_chart
+        import pandas as _pd_ch
+        _raw_bars = await _polygon_1min_bars(pick["ticker"], _today_et_date_str())
+        _bars_df = None
+        if _raw_bars:
+            _bars_df = _pd_ch.DataFrame([{
+                "timestamp": _pd_ch.to_datetime(int(b.get("t", 0)), unit="ms", utc=True),
+                "open": float(b.get("o", 0) or 0), "high": float(b.get("h", 0) or 0),
+                "low": float(b.get("l", 0) or 0), "close": float(b.get("c", 0) or 0),
+                "volume": int(b.get("v", 0) or 0),
+            } for b in _raw_bars if float(b.get("c", 0) or 0) > 0])
+        _chart_png = generate_trade_chart(
+            symbol=pick["ticker"], timeframe="1m", bars_df=_bars_df,
+            entry=float(pick["entry"]), stop=float(pick["stop"]),
+            target=float(pick["target"]), direction="long", key_levels=None,
+        )
+    except Exception as _ch_e:
+        logger.warning(f"[ThetaScanner] chart gen errored {pick.get('ticker')}: {type(_ch_e).__name__}: {_ch_e}")
+        _chart_png = None
+    if _chart_png:
+        import base64 as _b64_ch
+        _chart_b64 = _b64_ch.b64encode(_chart_png).decode()
+        _chart_img_html = (
+            '<img src="cid:tradechart" alt="trade setup" '
+            'style="display:block;width:100%;max-width:520px;border-radius:12px;'
+            'border:1px solid #e2e8f0;margin:14px 0;"/>'
+        )
+    else:
+        logger.info(f"[ThetaScanner] chart skipped (invalid geometry) {pick.get('ticker')} e={pick.get('entry')} s={pick.get('stop')} t={pick.get('target')}")
     html = f"""<div style="font-family:-apple-system,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
       <h1 style="margin:0 0 8px;color:#7c3aed;">🎯 Theta Scanner pick</h1>
       {watch_banner}{reasons_html}
@@ -341,11 +381,12 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
         <tr><td style="padding:8px;color:#475569;">Catalyst</td><td style="text-align:right;">{pick['catalyst_reason']}</td></tr>
         <tr><td style="padding:8px;color:#475569;">Score</td><td style="text-align:right;">{pick['score']}</td></tr>
       </table>
+      {_chart_img_html}
       <p style="margin:16px 0;font-size:12px;color:#64748b;">Picked by <b>Theta Scanner</b> — your sole auto-pick source. All 22 ICT/options strategies remain in your Live Trading library for manual trades.</p>
       {alt_html}
       <p style="font-size:10px;color:#94a3b8;margin-top:24px;">Risk: 10% target is historical median for setups matching this profile. Not a guarantee. Confirm size + stop before adding.</p>
     </div>"""
-    ok = _send(user.email, subject, html)
+    ok = _send_tracked(user.email, subject, html, inline_png=_chart_png).get("sent")
 
     # === Entry timing gate (2026-06-05) ===
     # The blind 15-min auto-execute caused SPRC to enter 2.5h after pick at
@@ -416,12 +457,17 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
         await db.execute(_t(
             "ALTER TABLE email_signals_history ADD COLUMN IF NOT EXISTS quality_reasons text"
         ))
+        await db.execute(_t(
+            "ALTER TABLE email_signals_history ADD COLUMN IF NOT EXISTS chart_b64 text"
+        ))
         import json as _qj
         await db.execute(_t("""
             INSERT INTO email_signals_history
               (picked_at, ticker, asset_type, direction, entry, stop, target,
-               gap_pct, rel_vol, today_vol, score, catalyst_reason, quality_reasons)
-            VALUES (NOW(), :tk, :at, 'long', :en, :st, :tg, :gp, :rv, :tv, :sc, :cr, :qr)
+               gap_pct, rel_vol, today_vol, score, catalyst_reason, quality_reasons,
+               chart_b64)
+            VALUES (NOW(), :tk, :at, 'long', :en, :st, :tg, :gp, :rv, :tv, :sc, :cr, :qr,
+                    :chart)
         """), {
             "tk": pick["ticker"], "at": pick.get("asset_type", "options"),
             "en": pick["entry"], "st": pick["stop"], "tg": pick["target"],
@@ -429,6 +475,7 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
             "tv": pick["today_vol"], "sc": pick["score"],
             "cr": pick["catalyst_reason"],
             "qr": _qj.dumps(pick.get("quality_reasons", [])),
+            "chart": _chart_b64,
         })
         await db.commit()
         logger.info(f"[ThetaScanner] persisted to email_signals_history: {pick['ticker']}")
