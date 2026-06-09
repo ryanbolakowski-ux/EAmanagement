@@ -46,6 +46,15 @@ async def _ensure_chart_columns(db) -> None:
             await db.execute(text(
                 f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS chart_b64 TEXT"
             ))
+            # Human-readable level reasons shown next to the stop/target
+            # price (e.g. "swing low", "London high"). Added alongside
+            # chart_b64 so a single migration pass covers both.
+            await db.execute(text(
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS stop_reason TEXT"
+            ))
+            await db.execute(text(
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS target_reason TEXT"
+            ))
         await db.commit()
         _chart_cols_ensured = True
     except Exception as _e:
@@ -430,6 +439,30 @@ def send_signal_email(
     # (<img src="cid:tradechart">) and stash base64 for the Email Signals page.
     # Any failure (no bars, bad geometry, matplotlib hiccup) degrades to a
     # no-chart email — a chart must NEVER block the signal.
+    # ── Level-reason inference (best-effort, never blank) ────────────────
+    # Label WHY the stop/target sit where they do (swing low, London high,
+    # FVG invalidation, ...) so the email reads e.g. "Stop Loss: 29,895
+    # (swing low)". Falls back to strategy stop / strategy target.
+    stop_reason = "strategy stop"
+    target_reason = "strategy target"
+    try:
+        from app.engines.account_signals.runner import _fetch_bars_sync as _fb_lr
+        from app.engines.level_reasons import infer_stop_target_reasons as _infer_lr
+        import pandas as _pd_lr
+        _lr_bars = _fb_lr(instrument, "5m", 60) or []
+        _lr_df = _pd_lr.DataFrame(_lr_bars) if _lr_bars else None
+        _reasons = _infer_lr(
+            direction=direction, entry=entry, stop=stop, target=target,
+            bars_df=_lr_df, instrument=instrument, now_utc=_now_utc,
+        )
+        stop_reason = _reasons.get("stop_reason") or stop_reason
+        target_reason = _reasons.get("target_reason") or target_reason
+        _lg.info(
+            f"[signal-email] level-reasons sym={instrument} dir={direction} "
+            f"stop={stop} ({stop_reason}) target={target} ({target_reason})"
+        )
+    except Exception as _lr_e:
+        _lg.warning(f"[signal-email] reason inference errored sym={instrument}: {type(_lr_e).__name__}: {_lr_e}")
     _chart_png = None
     _chart_b64 = None
     _chart_img_html = ""
@@ -446,6 +479,7 @@ def send_signal_email(
             symbol=instrument, timeframe=_tf, bars_df=_bars_df,
             entry=entry, stop=stop, target=target, direction=direction,
             key_levels=None,
+            stop_reason=stop_reason, target_reason=target_reason,
         )
     except Exception as _ch_e:
         _lg.warning(f"[signal-email] chart gen errored sym={instrument}: {type(_ch_e).__name__}: {_ch_e}")
@@ -468,7 +502,7 @@ def send_signal_email(
       <p style="margin:0 0 18px;color:#94a3b8;font-size:13px;">{strategy_name} · {fired_at}</p>
 
       <p style="margin:0 0 18px;font-size:15px;line-height:1.55;color:#0f172a;">
-        Theta Algos has logged an internal {side_word.lower()} position in <strong>{instrument}</strong> at <strong>{entry:.2f}</strong>, with stop loss price <strong style="color:#dc2626;">{stop:.2f}</strong> and take profit price <strong style="color:#16a34a;">{target:.2f}</strong>. This message is a record of our system's activity. Whether you replicate any portion of it in your own account is entirely your decision and your responsibility.
+        Theta Algos has logged an internal {side_word.lower()} position in <strong>{instrument}</strong> at <strong>{entry:.2f}</strong>, with stop loss price <strong style="color:#dc2626;">{stop:.2f}</strong> ({stop_reason}) and take profit price <strong style="color:#16a34a;">{target:.2f}</strong> ({target_reason}). This message is a record of our system's activity. Whether you replicate any portion of it in your own account is entirely your decision and your responsibility.
       </p>
 
       <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:18px;margin-bottom:14px;">
@@ -478,8 +512,8 @@ def send_signal_email(
         </div>
         <table style="width:100%;font-size:14px;border-collapse:collapse;">
           <tr><td style="padding:6px 0;color:#475569;">Entry price</td><td style="text-align:right;font-weight:700;color:#2563eb;font-size:16px;">{entry:.2f}</td></tr>
-          <tr><td style="padding:6px 0;color:#475569;">Stop loss price</td><td style="text-align:right;font-weight:700;color:#dc2626;font-size:16px;">{stop:.2f}</td></tr>
-          <tr><td style="padding:6px 0;color:#475569;">Take profit price</td><td style="text-align:right;font-weight:700;color:#16a34a;font-size:16px;">{target:.2f}</td></tr>
+          <tr><td style="padding:6px 0;color:#475569;">Stop loss price</td><td style="text-align:right;font-weight:700;color:#dc2626;font-size:16px;">{stop:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({stop_reason})</span></td></tr>
+          <tr><td style="padding:6px 0;color:#475569;">Take profit price</td><td style="text-align:right;font-weight:700;color:#16a34a;font-size:16px;">{target:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({target_reason})</span></td></tr>
           {f'<tr><td style="padding:6px 0;color:#475569;">Bias (HTF)</td><td style="text-align:right;color:#0f172a;text-transform:capitalize;">{bias}</td></tr>' if bias else ''}
         </table>
       </div>
@@ -511,6 +545,8 @@ def send_signal_email(
         "suppressed": False,
         "provider_sent_at": _sent_iso if _ok else None,
         "chart_b64": _chart_b64,
+        "stop_reason": stop_reason,
+        "target_reason": target_reason,
     }
 """Patch — add device-registration + push helpers. Append to account_signals.py."""
 

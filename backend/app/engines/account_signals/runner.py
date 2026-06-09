@@ -685,6 +685,12 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         # chart_b64: annotated trade-chart PNG (base64) produced by
         # send_signal_email so the Email Signals page can render it inline.
         _chart_b64 = result.get("chart_b64")
+        # Level reasons (e.g. "swing low", "London high") inferred in
+        # send_signal_email so the Email Signals page can show WHY each
+        # stop/target sits where it does. Never blank (falls back to
+        # "strategy stop"/"strategy target").
+        _stop_reason = result.get("stop_reason")
+        _target_reason = result.get("target_reason")
         async with async_session_factory() as db:
             from app.api.routes.account_signals import _ensure_chart_columns
             await _ensure_chart_columns(db)
@@ -697,14 +703,18 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
                        provider_status = :pstatus,
                        latency_seconds = :lat,
                        error_message = :err,
-                       chart_b64 = :chart
+                       chart_b64 = :chart,
+                       stop_reason = :stop_reason,
+                       target_reason = :target_reason
                  WHERE id = :id
             """), {
                 "st": final_status, "psa": provider_sent_at,
                 "pid": result.get("provider_message_id"),
                 "pstatus": result.get("provider_status"),
                 "lat": latency, "err": result.get("error"),
-                "chart": _chart_b64, "id": sid,
+                "chart": _chart_b64,
+                "stop_reason": _stop_reason, "target_reason": _target_reason,
+                "id": sid,
             })
             await db.commit()
         elapsed_ms = int((datetime.now(timezone.utc) - queued_at).total_seconds() * 1000)
