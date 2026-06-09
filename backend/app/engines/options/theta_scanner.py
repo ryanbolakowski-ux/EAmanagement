@@ -30,6 +30,150 @@ async def _get_8k_catalyst(db, ticker: str):
         return 1.0, ""
 
 
+# ── Quality filters (added 2026-06-09) ──────────────────────────────────────
+# Reuse the battle-tested Polygon 1-min helpers already living in
+# premarket_scheduler so we have ONE implementation of VWAP / pre-mkt windowing.
+def _session_vwap(bars_1m: list) -> Optional[float]:
+    """Session VWAP = Sum(typical_price * vol) / Sum(vol) across all available
+    1-min bars (pre-market + any RTH so far). typical = (h+l+c)/3, or Polygon's
+    per-minute 'vw' when present. Returns None if no volume."""
+    num = 0.0
+    den = 0.0
+    for b in bars_1m or []:
+        try:
+            v = float(b.get("v", 0) or 0)
+            if v <= 0:
+                continue
+            vw = b.get("vw")
+            if vw is None:
+                h = float(b.get("h", 0) or 0)
+                l = float(b.get("l", 0) or 0)
+                c = float(b.get("c", 0) or 0)
+                vw = (h + l + c) / 3.0
+            else:
+                vw = float(vw)
+            if vw <= 0:
+                continue
+            num += vw * v
+            den += v
+        except Exception:
+            continue
+    return (num / den) if den > 0 else None
+
+
+def _premarket_dollar_volume(bars_1m: list) -> float:
+    """Sum(close * volume) over the 04:00-09:29 ET pre-market 1-min bars."""
+    from app.engines.options.premarket_scheduler import _bar_is_premarket_et
+    total = 0.0
+    for b in bars_1m or []:
+        try:
+            if not _bar_is_premarket_et(int(b.get("t", 0))):
+                continue
+            c = float(b.get("c", 0) or 0)
+            v = float(b.get("v", 0) or 0)
+            if c > 0 and v > 0:
+                total += c * v
+        except Exception:
+            continue
+    return total
+
+
+def _last3_higher_highs(bars_1m: list) -> bool:
+    """Anti-fade: the last 3 (non-empty) 1-min bars make strictly higher highs.
+    Returns False if fewer than 3 usable bars (caller treats as continuation
+    fail → watch-only, not a hard reject)."""
+    highs = []
+    for b in bars_1m or []:
+        try:
+            h = float(b.get("h", 0) or 0)
+            if h > 0:
+                highs.append(h)
+        except Exception:
+            continue
+    if len(highs) < 3:
+        return False
+    a, bb, c = highs[-3], highs[-2], highs[-1]
+    return c > bb > a
+
+
+async def _apply_quality_filters(db, c: dict) -> tuple:
+    """Run the new long-side quality gate on a candidate dict (must have
+    'ticker' and 'price'). Returns (verdict, reasons) where verdict is one of
+    'accept' | 'watch' | 'reject' and reasons is list[str].
+
+    Filters:
+      1. VWAP — reject if price < session VWAP (long below VWAP).
+      2. Pre-mkt liquidity — reject if pre-mkt $-vol < $1M.
+      3. Continuation — last 3 1-min bars must make higher highs.
+      4. Anti-overextension — reject if price > 8% above VWAP.
+    Degrades gracefully: if Polygon bars are unavailable for the ticker we SKIP
+    the bar-dependent filters (log it) rather than crashing the scan. VWAP /
+    continuation failures are SOFT (watch-only); liquidity / overextension are
+    HARD rejects.
+    """
+    from app.engines.options.premarket_scheduler import (
+        _polygon_1min_bars, _today_et_date_str,
+    )
+    ticker = c["ticker"]
+    price = float(c["price"])
+    reasons: list[str] = []
+    # Base reasons that always apply (passed gap+vol+score upstream).
+    reasons.append(f"gap {c.get('gap_pct', 0):.0f}%")
+    reasons.append(f"rel-vol {c.get('rel_vol', 0)}x")
+    if c.get("catalyst_reason") and c["catalyst_reason"] != "high rel-vol gap":
+        reasons.append(f"catalyst: {c['catalyst_reason']}")
+
+    date_et = _today_et_date_str()
+    try:
+        bars_1m = await _polygon_1min_bars(ticker, date_et)
+    except Exception as e:
+        logger.info(f"[ThetaScanner] {ticker}: 1-min bar fetch errored ({type(e).__name__}: {e}) — skipping bar filters")
+        bars_1m = None
+
+    if not bars_1m:
+        # No intraday data pre-market for this ticker — degrade gracefully.
+        logger.info(f"[ThetaScanner] {ticker}: no Polygon intraday bars — quality bar-filters skipped (graceful)")
+        reasons.append("bars n/a (filters skipped)")
+        return "accept", reasons
+
+    soft_fail = False  # VWAP-below or continuation fail → watch-only
+
+    # 2. Pre-market liquidity (HARD)
+    pm_dollar_vol = _premarket_dollar_volume(bars_1m)
+    if pm_dollar_vol < 1_000_000:
+        logger.info(f"[ThetaScanner] reject {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1M")
+        return "reject", reasons
+    reasons.append(f"pm $-vol ${pm_dollar_vol/1e6:.1f}M")
+
+    # 1 + 4. VWAP-relative checks
+    vwap = _session_vwap(bars_1m)
+    if vwap and vwap > 0:
+        dist_pct = (price - vwap) / vwap * 100.0
+        if dist_pct > 8.0:
+            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} is {dist_pct:.1f}% above VWAP ${vwap:.2f} (>8% overextended)")
+            return "reject", reasons
+        if price < vwap:
+            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} below VWAP ${vwap:.2f} (long-below-VWAP) — watch-only")
+            soft_fail = True
+            reasons.append(f"below VWAP ${vwap:.2f}")
+        else:
+            reasons.append(f"above VWAP (+{dist_pct:.1f}%)")
+    else:
+        logger.info(f"[ThetaScanner] {ticker}: VWAP unavailable — skipping VWAP filter (graceful)")
+        reasons.append("VWAP n/a")
+
+    # 3. Continuation / anti-fade (SOFT)
+    if _last3_higher_highs(bars_1m):
+        reasons.append("HH x3")
+    else:
+        logger.info(f"[ThetaScanner] reject {ticker}: last 3 1-min bars NOT making higher highs (fading) — watch-only")
+        soft_fail = True
+        reasons.append("fading (no HH x3)")
+
+    return ("watch" if soft_fail else "accept"), reasons
+
+
+
 async def find_best_premarket_pick(db) -> Optional[dict]:
     from app.engines.options.momentum_scanner import _fetch_market_snapshot
     rows = await _fetch_market_snapshot()
@@ -82,15 +226,14 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
             f"gap={c['gap_pct']:.1f}% rel_vol={c['rel_vol']} "
             f"catalyst={c.get('catalyst_reason') or 'none'}"
         )
-    best = candidates[0]
     # MIN_SCORE floor (added 2026-06-05): only fire if the top candidate clears
     # the quality bar. After 4 losing micro-cap stop-outs in 5 days, the bar
     # is non-negotiable. Reject sub-floor days entirely.
     MIN_SCORE = 15.0
-    if best["score"] < MIN_SCORE:
+    if candidates[0]["score"] < MIN_SCORE:
         logger.info(
-            f"[stock-scanner] no pick \u2014 best candidate {best['ticker']} "
-            f"score={best['score']:.2f} below MIN_SCORE={MIN_SCORE}"
+            f"[stock-scanner] no pick \u2014 best candidate {candidates[0]['ticker']} "
+            f"score={candidates[0]['score']:.2f} below MIN_SCORE={MIN_SCORE}"
         )
         for c in candidates[:5]:
             logger.info(
@@ -98,6 +241,45 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
                 f"score={c['score']:.2f} gap={c['gap_pct']:.1f}% rel_vol={c['rel_vol']}"
             )
         return None
+
+    # ── Quality gate (added 2026-06-09) ──────────────────────────────────
+    # Walk candidates best-score-first. A "clean" candidate (accept) wins
+    # immediately. Otherwise remember the best watch-only candidate so that on
+    # a day with no clean setup we still surface the strongest gapper, flagged
+    # watch_only=True so the email reads "WATCH ONLY — not a trade."
+    best = None
+    best_watch = None
+    for c in candidates:
+        if c["score"] < MIN_SCORE:
+            break  # remaining are weaker; below floor
+        try:
+            verdict, reasons = await _apply_quality_filters(db, c)
+        except Exception as e:
+            logger.error(f"[ThetaScanner] quality-filter crashed for {c['ticker']}: {e} — skipping candidate")
+            continue
+        c["quality_reasons"] = reasons
+        if verdict == "accept":
+            c["watch_only"] = False
+            best = c
+            break
+        if verdict == "watch" and best_watch is None:
+            c["watch_only"] = True
+            best_watch = c
+        # verdict == "reject" → drop silently (already logged)
+
+    if best is None:
+        if best_watch is not None:
+            best = best_watch
+            logger.info(
+                f"[stock-scanner] no CLEAN pick \u2014 surfacing WATCH-ONLY {best['ticker']} "
+                f"score={best['score']:.2f} reasons={best.get('quality_reasons')}"
+            )
+        else:
+            logger.info("[stock-scanner] no pick \u2014 all candidates rejected by quality filters")
+            return None
+
+    best.setdefault("watch_only", False)
+    best.setdefault("quality_reasons", [])
     best["entry"] = best["price"]
     # Stop is now computed at order-placement time from the ICT Oracle 5-min
     # opening candle (or pre-market session low for pre-mkt confirmed entries).
@@ -128,13 +310,26 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
 async def emit_theta_pick(db, user, pick: dict) -> bool:
     from app.services.email import _send
     qty = max(1, int(1000 / pick["price"]))
+    _watch = bool(pick.get("watch_only"))
+    _qr = pick.get("quality_reasons") or []
     subject = f"🎯 Theta Scanner: {pick['ticker']} +{pick['projected_move_pct']:.0f}% target ({pick['catalyst_reason']})"
+    if _watch:
+        subject = f"👀 WATCH ONLY — {pick['ticker']} (no clean setup today)"
     alt_html = ""
     if pick.get("alternatives"):
         alt_html = "<p style='font-size:11px;color:#94a3b8;'>Runners-up: " + ", ".join(
             f"{a['ticker']} (gap {a['gap_pct']}%)" for a in pick["alternatives"][:3]) + "</p>"
+    watch_banner = (
+        "<div style=\"background:#fef3c7;border:1px solid #f59e0b;color:#92400e;padding:10px 12px;border-radius:8px;font-size:13px;font-weight:700;margin:0 0 14px;\">\u26a0\ufe0f WATCH ONLY \u2014 not a trade. No setup cleared the VWAP / continuation filters today; this is the strongest gapper for context only.</div>"
+        if _watch else ""
+    )
+    reasons_html = (
+        "<p style=\"font-size:11px;color:#475569;margin:0 0 14px;\">Quality: "
+        + " \u00b7 ".join(_qr) + "</p>"
+    ) if _qr else ""
     html = f"""<div style="font-family:-apple-system,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
       <h1 style="margin:0 0 8px;color:#7c3aed;">🎯 Theta Scanner pick</h1>
+      {watch_banner}{reasons_html}
       <p style="color:#64748b;font-size:12px;margin:0 0 20px;">STT-style single highest-conviction setup for {datetime.now(timezone.utc).date()}</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <tr><td style="padding:8px;color:#475569;">Ticker</td><td style="text-align:right;font-weight:700;font-size:18px;">{pick['ticker']}</td></tr>
@@ -216,17 +411,24 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     # today's pick + the running 30-day log.
     try:
         from sqlalchemy import text as _t
+        # quality_reasons column is added lazily (ADD COLUMN IF NOT EXISTS) so
+        # this path is safe even on a DB that predates the migration script.
+        await db.execute(_t(
+            "ALTER TABLE email_signals_history ADD COLUMN IF NOT EXISTS quality_reasons text"
+        ))
+        import json as _qj
         await db.execute(_t("""
             INSERT INTO email_signals_history
               (picked_at, ticker, asset_type, direction, entry, stop, target,
-               gap_pct, rel_vol, today_vol, score, catalyst_reason)
-            VALUES (NOW(), :tk, :at, 'long', :en, :st, :tg, :gp, :rv, :tv, :sc, :cr)
+               gap_pct, rel_vol, today_vol, score, catalyst_reason, quality_reasons)
+            VALUES (NOW(), :tk, :at, 'long', :en, :st, :tg, :gp, :rv, :tv, :sc, :cr, :qr)
         """), {
             "tk": pick["ticker"], "at": pick.get("asset_type", "options"),
             "en": pick["entry"], "st": pick["stop"], "tg": pick["target"],
             "gp": pick["gap_pct"], "rv": pick.get("rel_vol", 0),
             "tv": pick["today_vol"], "sc": pick["score"],
             "cr": pick["catalyst_reason"],
+            "qr": _qj.dumps(pick.get("quality_reasons", [])),
         })
         await db.commit()
         logger.info(f"[ThetaScanner] persisted to email_signals_history: {pick['ticker']}")
