@@ -333,6 +333,9 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     # it inline (<img src="cid:tradechart">) and stash base64 for the Email
     # Signals history. Even a watch_only pick gets a chart (informative); the
     # banner already says WATCH ONLY. Any failure -> no-chart email.
+    # Level reasons shown next to the stop/target price (never blank).
+    stop_reason = "strategy stop"
+    target_reason = "strategy target"
     _chart_png = None
     _chart_b64 = None
     _chart_img_html = ""
@@ -349,10 +352,24 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 "low": float(b.get("l", 0) or 0), "close": float(b.get("c", 0) or 0),
                 "volume": int(b.get("v", 0) or 0),
             } for b in _raw_bars if float(b.get("c", 0) or 0) > 0])
+        # Infer human-readable level reasons from the same pre-market bars
+        # (never blank; falls back to strategy stop / strategy target).
+        try:
+            from app.engines.level_reasons import infer_stop_target_reasons as _infer_lr
+            _reasons = _infer_lr(
+                direction="long", entry=float(pick["entry"]),
+                stop=float(pick["stop"]), target=float(pick["target"]),
+                bars_df=_bars_df, instrument=pick["ticker"],
+            )
+            stop_reason = _reasons.get("stop_reason") or stop_reason
+            target_reason = _reasons.get("target_reason") or target_reason
+        except Exception as _lr_e:
+            logger.warning(f"[ThetaScanner] reason inference errored {pick.get('ticker')}: {type(_lr_e).__name__}: {_lr_e}")
         _chart_png = generate_trade_chart(
             symbol=pick["ticker"], timeframe="1m", bars_df=_bars_df,
             entry=float(pick["entry"]), stop=float(pick["stop"]),
             target=float(pick["target"]), direction="long", key_levels=None,
+            stop_reason=stop_reason, target_reason=target_reason,
         )
     except Exception as _ch_e:
         logger.warning(f"[ThetaScanner] chart gen errored {pick.get('ticker')}: {type(_ch_e).__name__}: {_ch_e}")
@@ -374,8 +391,8 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <tr><td style="padding:8px;color:#475569;">Ticker</td><td style="text-align:right;font-weight:700;font-size:18px;">{pick['ticker']}</td></tr>
         <tr><td style="padding:8px;color:#475569;">Entry</td><td style="text-align:right;font-weight:700;">${pick['entry']:.2f}</td></tr>
-        <tr><td style="padding:8px;color:#475569;">Stop (-3%)</td><td style="text-align:right;font-weight:700;color:#dc2626;">${pick['stop']:.2f}</td></tr>
-        <tr><td style="padding:8px;color:#475569;">Target (+10%)</td><td style="text-align:right;font-weight:700;color:#16a34a;">${pick['target']:.2f}</td></tr>
+        <tr><td style="padding:8px;color:#475569;">Stop (-3%)</td><td style="text-align:right;font-weight:700;color:#dc2626;">${pick['stop']:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({stop_reason})</span></td></tr>
+        <tr><td style="padding:8px;color:#475569;">Target (+10%)</td><td style="text-align:right;font-weight:700;color:#16a34a;">${pick['target']:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({target_reason})</span></td></tr>
         <tr><td style="padding:8px;color:#475569;">Gap</td><td style="text-align:right;">+{pick['gap_pct']:.1f}%</td></tr>
         <tr><td style="padding:8px;color:#475569;">Volume vs prior</td><td style="text-align:right;">{pick['rel_vol']}×</td></tr>
         <tr><td style="padding:8px;color:#475569;">Catalyst</td><td style="text-align:right;">{pick['catalyst_reason']}</td></tr>
@@ -460,14 +477,20 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
         await db.execute(_t(
             "ALTER TABLE email_signals_history ADD COLUMN IF NOT EXISTS chart_b64 text"
         ))
+        await db.execute(_t(
+            "ALTER TABLE email_signals_history ADD COLUMN IF NOT EXISTS stop_reason text"
+        ))
+        await db.execute(_t(
+            "ALTER TABLE email_signals_history ADD COLUMN IF NOT EXISTS target_reason text"
+        ))
         import json as _qj
         await db.execute(_t("""
             INSERT INTO email_signals_history
               (picked_at, ticker, asset_type, direction, entry, stop, target,
                gap_pct, rel_vol, today_vol, score, catalyst_reason, quality_reasons,
-               chart_b64)
+               chart_b64, stop_reason, target_reason)
             VALUES (NOW(), :tk, :at, 'long', :en, :st, :tg, :gp, :rv, :tv, :sc, :cr, :qr,
-                    :chart)
+                    :chart, :stop_reason, :target_reason)
         """), {
             "tk": pick["ticker"], "at": pick.get("asset_type", "options"),
             "en": pick["entry"], "st": pick["stop"], "tg": pick["target"],
@@ -476,6 +499,7 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
             "cr": pick["catalyst_reason"],
             "qr": _qj.dumps(pick.get("quality_reasons", [])),
             "chart": _chart_b64,
+            "stop_reason": stop_reason, "target_reason": target_reason,
         })
         await db.commit()
         logger.info(f"[ThetaScanner] persisted to email_signals_history: {pick['ticker']}")
