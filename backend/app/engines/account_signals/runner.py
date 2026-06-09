@@ -52,13 +52,138 @@ async def stop_watcher(watcher_id: str):
             pass
 
 
+# ── Futures real-time via Polygon ETF proxy (added 2026-06-09) ──────────────
+# yfinance "=F" bars are ~10-15 min delayed, which made the futures Account
+# Signals emails fire ~10 min late. Polygon's real-time ETF proxy (SPY/QQQ/
+# IWM/DIA) is seconds-fresh; we scale it to the futures price LEVEL with the
+# existing dynamic get_proxy_scale(). Micros map to the SAME proxy + parent
+# scale as their full-size contract.
+_FUTURES_PROXY_ETF = {
+    "ES": "SPY", "NQ": "QQQ", "RTY": "IWM", "YM": "DIA",
+    "MES": "SPY", "MNQ": "QQQ", "M2K": "IWM", "MYM": "DIA",
+}
+# Micro -> full-size parent (for the proxy scale lookup, which is keyed on the
+# full-size root: ES/NQ/RTY/YM).
+_MICRO_PARENT = {"MES": "ES", "MNQ": "NQ", "M2K": "RTY", "MYM": "YM"}
+
+
+def _fetch_futures_via_polygon(instrument: str, timeframe: str, count: int = 50):
+    """Return a list of bar dicts for a futures `instrument`, sourced from the
+    Polygon ETF proxy and scaled to the futures price level. Returns [] (so the
+    caller falls back to candle_cache/yfinance) on any miss/error."""
+    import os as _os
+    import requests as _rq
+    import pandas as _pd
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from app.engines.data_feeds.proxy_scale import get_proxy_scale
+
+    inst = instrument.upper()
+    etf = _FUTURES_PROXY_ETF.get(inst)
+    if not etf:
+        return []  # not a proxied futures instrument
+    key = _os.environ.get("POLYGON_API_KEY", "")
+    if not key:
+        return []
+
+    # Scale is keyed on the full-size root (micros borrow the parent's ratio).
+    scale_root = _MICRO_PARENT.get(inst, inst)
+    try:
+        scale = float(get_proxy_scale(scale_root))
+    except Exception as e:
+        logger.warning(f"[Signals] futures {inst}: proxy scale lookup failed ({e}); skipping Polygon path")
+        return []
+    if not scale or scale <= 0:
+        return []
+
+    tf_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}.get(timeframe, 1)
+    # Pull a window of 1-min proxy bars wide enough to resample `count` bars of
+    # the requested timeframe (+buffer). 2 calendar days covers an overnight gap
+    # so the latest RTH/ETH bar is always present.
+    end = _dt.now(_tz.utc)
+    start = end - _td(days=2)
+    url = (
+        f"https://api.polygon.io/v2/aggs/ticker/{etf}"
+        f"/range/1/minute/{start.date()}/{end.date()}"
+        f"?adjusted=true&sort=asc&limit=50000&apiKey={key}"
+    )
+    try:
+        r = _rq.get(url, timeout=8)
+        if r.status_code != 200:
+            logger.warning(f"[Signals] futures {inst} via Polygon {etf}: HTTP {r.status_code}; falling back")
+            return []
+        results = (r.json() or {}).get("results", []) or []
+    except Exception as e:
+        logger.warning(f"[Signals] futures {inst} via Polygon {etf}: fetch error {type(e).__name__}: {e}; falling back")
+        return []
+    if not results:
+        logger.info(f"[Signals] futures {inst} via Polygon {etf}: no bars returned; falling back")
+        return []
+
+    df = _pd.DataFrame(results)
+    df["timestamp"] = _pd.to_datetime(df["t"], unit="ms", utc=True)
+    df = df.rename(columns={"o": "open", "h": "high", "l": "low",
+                            "c": "close", "v": "volume"})
+    df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]]
+    # Scale ETF price -> futures price level (volume left as the ETF's).
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].astype(float) * scale
+    df["volume"] = df["volume"].astype(float)
+
+    # Resample to the requested timeframe the same way the candle_cache path does.
+    if timeframe != "1m":
+        df = df.resample(f"{tf_minutes}min").agg(
+            {"open": "first", "high": "max", "low": "min",
+             "close": "last", "volume": "sum"}
+        ).dropna()
+    df = df.tail(count)
+    if df.empty:
+        return []
+
+    latest_ts = df.index[-1].to_pydatetime()
+    age_sec = (_dt.now(_tz.utc) - latest_ts).total_seconds()
+    logger.info(
+        f"[Signals] futures {inst} via Polygon {etf} scale={scale:.2f} "
+        f"latest_bar={latest_ts.isoformat()} age={age_sec:.0f}s"
+    )
+    # Freshness guard: the whole point is a fresher bar than yfinance. If the
+    # proxy itself is stale (sparse pre-mkt / overnight SPY), don't regress —
+    # return [] so the caller falls through to candle_cache/yfinance.
+    _max_age = float(_os.environ.get("FUTURES_PROXY_MAX_AGE_SEC", "900"))
+    if age_sec > _max_age:
+        logger.info(
+            f"[Signals] futures {inst} via Polygon {etf}: latest bar age "
+            f"{age_sec:.0f}s > {_max_age:.0f}s (sparse proxy) — falling back to yfinance"
+        )
+        return []
+    return [{
+        "timestamp": ts.to_pydatetime(),
+        "open": float(r2["open"]), "high": float(r2["high"]),
+        "low": float(r2["low"]), "close": float(r2["close"]),
+        "volume": int(r2["volume"]),
+    } for ts, r2 in df.iterrows()]
+
+
 def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     """Bug #27 fix: read from candle_cache (populated nightly by our own
     Polygon/Databento fetchers) instead of relying on yfinance bulk pulls
     that rate-limit to ~5% of the universe per cycle. Fall back to yfinance
-    only when the cache is empty for this symbol/timeframe."""
+    only when the cache is empty for this symbol/timeframe.
+
+    2026-06-09: for FUTURES instruments, try the real-time Polygon ETF proxy
+    FIRST (seconds-fresh) before candle_cache/yfinance — this is what fixes the
+    ~10-min-late futures emails. Any miss/error transparently falls through to
+    the existing (slower but reliable) paths below."""
     import psycopg2, os, pandas as _pd
     sym = instrument.upper()
+    # ── Futures real-time fast-path (Polygon ETF proxy, scaled) ──
+    if sym in _FUTURES_PROXY_ETF:
+        try:
+            proxy_bars = _fetch_futures_via_polygon(instrument, timeframe, count)
+        except Exception as e:
+            logger.warning(f"[Signals] futures {sym}: Polygon proxy path crashed ({type(e).__name__}: {e}); falling back")
+            proxy_bars = None
+        if proxy_bars:
+            return proxy_bars
     # Map timeframes to candle_cache resampling. The cache stores 1m bars.
     tf_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}.get(timeframe, 1)
     need = count * tf_minutes + 60  # buffer for resampling
