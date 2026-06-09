@@ -26,6 +26,32 @@ router = APIRouter()
 # 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
 
+# Track whether we have already run the idempotent chart-column migration this
+# process so we don't issue the ALTER on every list request.
+_chart_cols_ensured = False
+
+
+async def _ensure_chart_columns(db) -> None:
+    """Idempotently add the `chart_b64 TEXT` column to both signal-history
+    tables. Stores the annotated trade-chart PNG (base64) alongside each
+    signal so the Email Signals page can render it inline. Safe to call
+    repeatedly — ADD COLUMN IF NOT EXISTS is a no-op once the column exists,
+    and we additionally short-circuit after the first success per process.
+    Never raises: a migration hiccup must not break the signal feed."""
+    global _chart_cols_ensured
+    if _chart_cols_ensured:
+        return
+    try:
+        for tbl in ("account_signals", "email_signals_history"):
+            await db.execute(text(
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS chart_b64 TEXT"
+            ))
+        await db.commit()
+        _chart_cols_ensured = True
+    except Exception as _e:
+        logger.warning(f"[signals] _ensure_chart_columns failed (non-fatal): {_e}")
+
+
 # ─── Pydantic models ─────────────────────────────────────────────────
 
 class WatcherCreate(BaseModel):
@@ -94,6 +120,7 @@ async def list_signals(
       * `?status=foo`            — filter to any specific status value
       * `?include_suppressed=true` — drop the filter entirely (returns all)
     """
+    await _ensure_chart_columns(db)
     if include_suppressed:
         sql = """
             SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
@@ -163,6 +190,7 @@ async def list_suppressed_signals(
     are easy to spot."""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin only.")
+    await _ensure_chart_columns(db)
     rows = (await db.execute(text("""
         SELECT s.id, s.instrument, s.direction, s.entry_price, s.stop_loss,
                s.take_profit, s.bias, s.fired_at, s.status,
