@@ -99,6 +99,8 @@ def generate_trade_chart(
     target: float,
     direction: str,
     key_levels: Optional[dict] = None,
+    stop_reason: Optional[str] = None,
+    target_reason: Optional[str] = None,
 ) -> Optional[bytes]:
     """Render a TradingView-style annotated trade chart to PNG bytes.
 
@@ -198,13 +200,22 @@ def generate_trade_chart(
                     continue
 
         # ── 6. Right-edge labels for entry/stop/target. ──
+        # Prefer the explicit caller-supplied level reasons (e.g.
+        # "swing low", "London high") so the label reads
+        # "STOP 29895 (swing low)". Fall back to the legacy key_levels
+        # heuristic when no reason was passed.
         stop_note = ""
         target_note = ""
-        if key_levels:
+        if stop_reason:
+            stop_note = f" ({stop_reason})"
+        elif key_levels:
             if "swing_low" in key_levels and side_word == "LONG":
                 stop_note = " (swing low)"
             elif "swing_high" in key_levels and side_word == "SHORT":
                 stop_note = " (swing high)"
+        if target_reason:
+            target_note = f" ({target_reason})"
+        elif key_levels:
             if "prev_high" in key_levels and side_word == "LONG":
                 target_note = " (prev high)"
             elif "prev_low" in key_levels and side_word == "SHORT":
@@ -275,7 +286,8 @@ def generate_trade_chart(
         png = buf.getvalue()
         logger.info(
             f"[trade-chart] rendered sym={symbol} tf={timeframe} dir={side_word} "
-            f"rr=1:{rr:g} bytes={len(png)}"
+            f"rr=1:{rr:g} bytes={len(png)} stop_reason={stop_reason or '-'} "
+            f"target_reason={target_reason or '-'}"
         )
         return png
     except Exception as e:
