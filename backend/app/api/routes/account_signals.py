@@ -416,6 +416,43 @@ def send_signal_email(
             f"strategy={strategy_name} to={to} err={type(_cap_err).__name__}: {str(_cap_err)[:120]} "
             f"-- proceeding with send (fail-open)"
         )
+    # ── Annotated trade-chart PNG (best-effort) ──────────────────────────
+    # Pull recent bars via the SAME data path the watcher uses
+    # (_fetch_bars_sync → Polygon ETF proxy for futures → candle_cache →
+    # yfinance), render the TradingView-style position chart, attach it inline
+    # (<img src="cid:tradechart">) and stash base64 for the Email Signals page.
+    # Any failure (no bars, bad geometry, matplotlib hiccup) degrades to a
+    # no-chart email — a chart must NEVER block the signal.
+    _chart_png = None
+    _chart_b64 = None
+    _chart_img_html = ""
+    try:
+        from app.engines.account_signals.runner import _fetch_bars_sync
+        from app.services.trade_chart import generate_trade_chart
+        import pandas as _pd_ch
+        _tf = "5m"
+        _bars = _fetch_bars_sync(instrument, _tf, 50) or []
+        _bars_df = None
+        if _bars:
+            _bars_df = _pd_ch.DataFrame(_bars)
+        _chart_png = generate_trade_chart(
+            symbol=instrument, timeframe=_tf, bars_df=_bars_df,
+            entry=entry, stop=stop, target=target, direction=direction,
+            key_levels=None,
+        )
+    except Exception as _ch_e:
+        _lg.warning(f"[signal-email] chart gen errored sym={instrument}: {type(_ch_e).__name__}: {_ch_e}")
+        _chart_png = None
+    if _chart_png:
+        import base64 as _b64_ch
+        _chart_b64 = _b64_ch.b64encode(_chart_png).decode()
+        _chart_img_html = (
+            '<img src="cid:tradechart" alt="trade setup" '
+            'style="display:block;width:100%;max-width:520px;border-radius:12px;'
+            'border:1px solid #e2e8f0;margin:0 0 14px;"/>'
+        )
+    else:
+        _lg.info(f"[signal-email] chart skipped (invalid geometry) sym={instrument} dir={direction} e={entry} s={stop} t={target}")
     subject = f"🎯 Theta Scanner (Futures): {side_word} {instrument} @ {entry:.2f} · {strategy_name}"
     html = f"""
     <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
@@ -440,6 +477,8 @@ def send_signal_email(
         </table>
       </div>
 
+      {_chart_img_html}
+
       <hr style="border:none;border-top:1px solid #e2e8f0;margin:18px 0 14px;"/>
 
       <p style="margin:0;color:#94a3b8;font-size:11px;line-height:1.6;">
@@ -447,7 +486,7 @@ def send_signal_email(
       </p>
     </div>
     """
-    _result = _send_tracked(to, subject, html)
+    _result = _send_tracked(to, subject, html, inline_png=_chart_png)
     _ok = bool(_result.get("sent"))
     _sent_iso = _dt_fs.now(_tz_fs.utc).isoformat()
     _latency_ms = int((_dt_fs.now(_tz_fs.utc) - entry_detected_at).total_seconds() * 1000) if entry_detected_at else 0
@@ -464,6 +503,7 @@ def send_signal_email(
         "error": _result.get("error"),
         "suppressed": False,
         "provider_sent_at": _sent_iso if _ok else None,
+        "chart_b64": _chart_b64,
     }
 """Patch — add device-registration + push helpers. Append to account_signals.py."""
 

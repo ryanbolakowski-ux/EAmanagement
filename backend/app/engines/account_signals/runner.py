@@ -587,7 +587,12 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         provider_sent_at = datetime.now(timezone.utc) if sent else None
         latency = (provider_sent_at - detected_at).total_seconds() if provider_sent_at else None
         final_status = "sent" if sent else ("suppressed" if suppressed else "failed")
+        # chart_b64: annotated trade-chart PNG (base64) produced by
+        # send_signal_email so the Email Signals page can render it inline.
+        _chart_b64 = result.get("chart_b64")
         async with async_session_factory() as db:
+            from app.api.routes.account_signals import _ensure_chart_columns
+            await _ensure_chart_columns(db)
             await db.execute(text("""
                 UPDATE account_signals
                    SET status = :st,
@@ -596,13 +601,15 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
                        provider_message_id = :pid,
                        provider_status = :pstatus,
                        latency_seconds = :lat,
-                       error_message = :err
+                       error_message = :err,
+                       chart_b64 = :chart
                  WHERE id = :id
             """), {
                 "st": final_status, "psa": provider_sent_at,
                 "pid": result.get("provider_message_id"),
                 "pstatus": result.get("provider_status"),
-                "lat": latency, "err": result.get("error"), "id": sid,
+                "lat": latency, "err": result.get("error"),
+                "chart": _chart_b64, "id": sid,
             })
             await db.commit()
         elapsed_ms = int((datetime.now(timezone.utc) - queued_at).total_seconds() * 1000)
