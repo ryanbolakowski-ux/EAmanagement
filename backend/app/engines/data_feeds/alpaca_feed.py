@@ -65,7 +65,7 @@ def fetch_alpaca_bars(symbol: str, timeframe: str = "1Min", limit: int = 200):
         "timeframe": timeframe,
         "feed": _ALPACA_FEED,
         "limit": int(limit),
-        "sort": "asc",
+        "sort": "desc",  # fetch the MOST RECENT bars (Alpaca returns newest-first); df.sort_index() below re-orders chronologically
     }
     url = _BARS_URL.format(symbol=sym)
 
