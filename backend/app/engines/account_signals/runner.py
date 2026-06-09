@@ -163,6 +163,87 @@ def _fetch_futures_via_polygon(instrument: str, timeframe: str, count: int = 50)
     } for ts, r2 in df.iterrows()]
 
 
+def _fetch_futures_via_alpaca(instrument: str, timeframe: str, count: int = 50):
+    """Return scaled futures bars sourced from Alpaca's real-time IEX ETF proxy.
+
+    Alpaca's FREE tier serves real-time IEX bars for ultra-liquid ETFs
+    (SPY/QQQ/IWM/DIA), accurate to the penny — the cheapest fix for the
+    ~15-min-late futures emails (Polygon real-time is 403 "not entitled").
+    We fetch the proxy ETF, scale it to the futures price level with the same
+    dynamic get_proxy_scale() the Polygon path uses, and resample to the
+    requested timeframe.
+
+    Returns [] (so the caller falls through to the Polygon/yfinance paths) on
+    any miss/error. Alpaca IEX is real-time, so — unlike the delayed Polygon
+    proxy — we do NOT apply the 900s freshness-discard guard here: its bars are
+    trusted as fresh."""
+    import os as _os
+    import pandas as _pd
+    from datetime import datetime as _dt, timezone as _tz
+    from app.engines.data_feeds.proxy_scale import get_proxy_scale
+    from app.engines.data_feeds.alpaca_feed import fetch_alpaca_bars
+
+    inst = instrument.upper()
+    etf = _FUTURES_PROXY_ETF.get(inst)
+    if not etf:
+        return []  # not a proxied futures instrument
+    if not _os.environ.get("ALPACA_API_KEY", ""):
+        return []  # keys not configured -> stay on the existing fallback
+
+    # Scale is keyed on the full-size root (micros borrow the parent's ratio).
+    scale_root = _MICRO_PARENT.get(inst, inst)
+    try:
+        scale = float(get_proxy_scale(scale_root))
+    except Exception as e:
+        logger.warning(f"[Signals] futures {inst}: proxy scale lookup failed ({e}); skipping Alpaca path")
+        return []
+    if not scale or scale <= 0:
+        return []
+
+    tf_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}.get(timeframe, 1)
+    # Pull enough 1-min proxy bars to resample `count` bars of the requested
+    # timeframe (+buffer). Alpaca caps at 10000/req; this stays well under.
+    need = count * tf_minutes + 60
+    try:
+        df = fetch_alpaca_bars(etf, timeframe="1Min", limit=min(need, 10000))
+    except Exception as e:
+        logger.warning(f"[Signals] futures {inst} via Alpaca {etf}: fetch crashed {type(e).__name__}: {e}; falling back")
+        return []
+    if df is None or df.empty:
+        return []
+
+    df = df[["open", "high", "low", "close", "volume"]].copy()
+    # Scale ETF price -> futures price level (volume left as the ETF's).
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].astype(float) * scale
+    df["volume"] = df["volume"].astype(float)
+
+    # Resample to the requested timeframe the same way the Polygon path does.
+    if timeframe != "1m":
+        df = df.resample(f"{tf_minutes}min").agg(
+            {"open": "first", "high": "max", "low": "min",
+             "close": "last", "volume": "sum"}
+        ).dropna()
+    df = df.tail(count)
+    if df.empty:
+        return []
+
+    latest_ts = df.index[-1].to_pydatetime()
+    age_sec = (_dt.now(_tz.utc) - latest_ts).total_seconds()
+    # NOTE: no freshness-discard guard here — Alpaca IEX bars are real-time and
+    # trusted as fresh (the 900s guard applies only to the delayed Polygon path).
+    logger.info(
+        f"[Signals] futures {inst} source=alpaca proxy={etf} scale={scale:.2f} "
+        f"latest_bar={latest_ts.isoformat()} age={age_sec:.0f}s"
+    )
+    return [{
+        "timestamp": ts.to_pydatetime(),
+        "open": float(r2["open"]), "high": float(r2["high"]),
+        "low": float(r2["low"]), "close": float(r2["close"]),
+        "volume": int(r2["volume"]),
+    } for ts, r2 in df.iterrows()]
+
+
 def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     """Bug #27 fix: read from candle_cache (populated nightly by our own
     Polygon/Databento fetchers) instead of relying on yfinance bulk pulls
@@ -175,14 +256,28 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     the existing (slower but reliable) paths below."""
     import psycopg2, os, pandas as _pd
     sym = instrument.upper()
-    # ── Futures real-time fast-path (Polygon ETF proxy, scaled) ──
+    # ── Futures real-time fast-path (scaled ETF proxy) ──
+    # Source priority: (1) Alpaca IEX real-time (free tier, penny-accurate for
+    # SPY/QQQ/IWM/DIA — the cheapest fix for ~15-min-late futures emails),
+    # (2) Polygon proxy (existing fallback), (3) yfinance (final fallback below).
     if sym in _FUTURES_PROXY_ETF:
+        # (1) Alpaca IEX — preferred when keys are configured. Real-time, so no
+        # freshness-discard guard is applied to its bars (handled in the helper).
+        try:
+            alpaca_bars = _fetch_futures_via_alpaca(instrument, timeframe, count)
+        except Exception as e:
+            logger.warning(f"[Signals] futures {sym}: Alpaca proxy path crashed ({type(e).__name__}: {e}); falling back")
+            alpaca_bars = None
+        if alpaca_bars:
+            return alpaca_bars
+        # (2) Polygon proxy — fallback (delayed; keeps its own 900s freshness guard).
         try:
             proxy_bars = _fetch_futures_via_polygon(instrument, timeframe, count)
         except Exception as e:
             logger.warning(f"[Signals] futures {sym}: Polygon proxy path crashed ({type(e).__name__}: {e}); falling back")
             proxy_bars = None
         if proxy_bars:
+            logger.info(f"[Signals] futures {sym} source=polygon proxy={_FUTURES_PROXY_ETF.get(sym)}")
             return proxy_bars
     # Map timeframes to candle_cache resampling. The cache stores 1m bars.
     tf_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}.get(timeframe, 1)
