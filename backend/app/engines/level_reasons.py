@@ -380,29 +380,39 @@ def infer_stop_target_reasons(
 
     # ── Build candidate pools, directionally biased ──────────────────────
     # "low" levels are protective for longs / objective for shorts; vice-versa.
+    # ORDER MATTERS: _closest_label keeps the first candidate on a distance
+    # tie, so we list the more *specific / named* levels first (previous-day
+    # and session highs/lows, then FVG, then VWAP) and the generic swing
+    # high/low LAST. That way a price sitting at both a swing high and the
+    # previous-day high is labelled "previous high", which is the more
+    # informative reason.
     low_candidates = []   # things at the downside
     high_candidates = []  # things at the upside
 
-    for v in s_lo:
-        low_candidates.append(("swing low", v))
-    for v in s_hi:
-        high_candidates.append(("swing high", v))
-
+    # 1. Named session / previous-day levels (most specific).
     for label, (side, val) in sessions.items():
         if side == "low":
             low_candidates.append((label, val))
         else:
             high_candidates.append((label, val))
 
-    # FVG invalidation edges.
+    # 2. FVG invalidation edges.
     for v in fvg_bull:
         low_candidates.append(("FVG invalidation", v))
     for v in fvg_bear:
         high_candidates.append(("FVG invalidation", v))
 
+    # 3. Session VWAP.
     if vwap is not None:
         low_candidates.append(("session VWAP", vwap))
         high_candidates.append(("session VWAP", vwap))
+
+    # 4. Generic swing pivots (least specific — only wins when nothing named
+    #    is closer).
+    for v in s_lo:
+        low_candidates.append(("swing low", v))
+    for v in s_hi:
+        high_candidates.append(("swing high", v))
 
     # ── Assemble per-leg candidate ordering by side ──────────────────────
     if is_long:
