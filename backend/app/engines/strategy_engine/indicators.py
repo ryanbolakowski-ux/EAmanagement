@@ -291,6 +291,12 @@ def is_in_session(timestamp, session_filters: list[str]) -> bool:
         "LONDON": (2 * 60, 5 * 60),
         "LONDON_CLOSE": (10 * 60, 12 * 60),
         "ASIA": (20 * 60, 24 * 60),
+        # ── ICT killzone windows added for the strategy rebuild (SS1). ──
+        # Additive only; do not change the keys above (load-bearing).
+        "SILVER_BULLET": (10 * 60, 11 * 60),      # 10:00-11:00 ET
+        "NY_OPEN": (9 * 60 + 30, 10 * 60),         # 09:30-10:00 ET
+        "NY_PM_ICT": (13 * 60 + 30, 16 * 60),      # 13:30-16:00 ET
+        "LONDON_OPEN": (2 * 60, 3 * 60),           # 02:00-03:00 ET
     }
 
     for sf in session_filters:
