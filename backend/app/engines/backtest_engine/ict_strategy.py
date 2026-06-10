@@ -12,6 +12,7 @@ from app.engines.strategy_engine.indicators import (
     is_in_session, get_tick_size, FairValueGap,
     compute_rsi, compute_session_vwap,
 )
+from app.engines.ict.registry import get_setup
 
 
 class ICTStrategy(BaseStrategy):
@@ -36,6 +37,33 @@ class ICTStrategy(BaseStrategy):
         self._cooldown_bars = 1  # minimum bars between signals (restored)
 
     def on_bar(self, bars):
+
+        # === STEP 0: dedicated-setup dispatch (registry) with SAFE FALLBACK ===
+        # If this strategy has been explicitly ported to its own ICTSetup,
+        # delegate to it. Otherwise get_setup() returns None and we fall
+        # through to the EXISTING generic model below, UNCHANGED. No setups
+        # are registered yet, so every strategy currently takes the fallback
+        # path = zero behavior change.
+        try:
+            _setup = get_setup(
+                self.config.name,
+                getattr(self.config, "rule_tree", {}) or {},
+            )
+        except Exception as _exc:  # never let dispatch crash the loop
+            logger.warning(f"[ict] get_setup failed for {self.config.name!r}: {_exc!r}")
+            _setup = None
+        if _setup is not None:
+            logger.info(
+                f"[ict] strategy={self.config.name} using dedicated setup={_setup.name}"
+            )
+            try:
+                return _setup.evaluate(self._build_ictcontext(bars))
+            except Exception as _exc:  # fail open to the generic model
+                logger.error(
+                    f"[ict] dedicated setup={_setup.name} raised for "
+                    f"{self.config.name!r}: {_exc!r}; falling back to generic model"
+                )
+        # else / on error: fall through to the EXISTING generic logic below.
 
         if not self.check_risk_controls():
             return None
@@ -285,6 +313,17 @@ class ICTStrategy(BaseStrategy):
 
     def on_tick(self, tick):
         return None
+
+    def _build_ictcontext(self, bars):
+        """Wrap the on_bar inputs in an ICTContext for a dedicated setup.
+
+        Thin adapter: passes the same timeframe->DataFrame dict the generic
+        model uses, this strategy's instrument, and the existing
+        StrategyConfig. Imported lazily so the engine has no hard import-
+        time dependency on the new package.
+        """
+        from app.engines.ict.context import ICTContext
+        return ICTContext.from_bars(bars, self.instrument, self.config)
 
     # ── Helpers ──────────────────────────────────────────────
 
