@@ -156,15 +156,19 @@ class FVGInversionTap(ICTSetup):
             return None
 
         # --- target = min RR (seed 3), clamped to <=3R (SS3.8) -------------
+        # The take-profit honours the SS3.8 cap (<=3R). The min-RR GATE, however,
+        # checks against the *requested* min RR: if the strategy demands more
+        # reward than the 3R cap can deliver, that minimum cannot be met, so we
+        # stand aside rather than take a sub-minimum trade ("respect min-RR").
         min_rr = float(getattr(cfg, "risk_reward_ratio", None) or _DEFAULT_MIN_RR)
         rr = min(min_rr, _MAX_RR)
         tp = self._target_from_rr(entry, sl, direction, rr)
 
         # --- min-RR gate (SS3.8) -------------------------------------------
-        if not self._min_rr_ok(entry, sl, tp, min_rr=min(min_rr, _MAX_RR)):
+        if not self._min_rr_ok(entry, sl, tp, min_rr=min_rr):
             logger.info(
-                f"[ict:inversion] skip - RR<{min(min_rr, _MAX_RR)} "
-                f"(entry={entry} stop={sl} tgt={tp}) ({inst})"
+                f"[ict:inversion] skip - RR<{min_rr} (capped tgt only reaches "
+                f"{rr}R) (entry={entry} stop={sl} tgt={tp}) ({inst})"
             )
             return None
 
