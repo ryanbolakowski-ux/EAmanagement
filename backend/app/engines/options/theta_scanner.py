@@ -229,7 +229,8 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
     # MIN_SCORE floor (added 2026-06-05): only fire if the top candidate clears
     # the quality bar. After 4 losing micro-cap stop-outs in 5 days, the bar
     # is non-negotiable. Reject sub-floor days entirely.
-    MIN_SCORE = 15.0
+    MIN_SCORE = 12.0      # floor to CONSIDER (lowered 2026-06-11 from 15)
+    CONFIRM_SCORE = 15.0  # >= this = confirmed entry; MIN_SCORE..CONFIRM_SCORE = WATCH ONLY
     if candidates[0]["score"] < MIN_SCORE:
         logger.info(
             f"[stock-scanner] no pick \u2014 best candidate {candidates[0]['ticker']} "
@@ -259,7 +260,10 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
             continue
         c["quality_reasons"] = reasons
         if verdict == "accept":
-            c["watch_only"] = False
+            # Cleared quality filters. If the score is in the MIN..CONFIRM
+            # band it's a lower-conviction near-miss -> WATCH ONLY (not a
+            # hard entry). >= CONFIRM_SCORE -> confirmed entry.
+            c["watch_only"] = c["score"] < CONFIRM_SCORE
             best = c
             break
         if verdict == "watch" and best_watch is None:
