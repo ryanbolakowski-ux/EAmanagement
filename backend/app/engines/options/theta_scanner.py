@@ -322,7 +322,7 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     _qr = pick.get("quality_reasons") or []
     subject = f"🎯 Theta Scanner: {pick['ticker']} +{pick['projected_move_pct']:.0f}% target ({pick['catalyst_reason']})"
     if _watch:
-        subject = f"👀 WATCH ONLY — {pick['ticker']} (no clean setup today)"
+        subject = f"🎯 Theta Scanner: 👀 WATCH ONLY — {pick['ticker']} (no clean setup today)"
     alt_html = ""
     if pick.get("alternatives"):
         alt_html = "<p style='font-size:11px;color:#94a3b8;'>Runners-up: " + ", ".join(

@@ -491,14 +491,21 @@ async def _run_watcher(watcher_id, strategy_id, user_id, instruments, account_la
             # Confirm watcher is still active
             async with async_session_factory() as db:
                 r = await db.execute(text("""
-                    SELECT w.is_active, s.status
+                    SELECT w.is_active, s.status, u.is_active AS user_active
                       FROM account_signal_watchers w
                       LEFT JOIN strategies s ON s.id = w.strategy_id
+                      LEFT JOIN users u ON u.id = w.user_id
                      WHERE w.id = :id
                 """), {"id": watcher_id})
                 row = r.fetchone()
                 if not row or not row[0]:
                     logger.info(f"[Signals] watcher {watcher_id} deactivated")
+                    return
+                # Also stop if the owning USER was deactivated/deleted. Only an
+                # explicit False stops it (NULL/orphan joins are left running so
+                # a missing user row can never silence a real customer).
+                if row[2] is False:
+                    logger.info(f"[Signals] watcher {watcher_id} owner deactivated — stopping")
                     return
                 # Bug 2: never emit for a DRAFT strategy even if a watcher exists
                 # (handles legacy rows created before the create-time guard).

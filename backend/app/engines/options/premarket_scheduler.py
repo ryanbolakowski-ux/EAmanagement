@@ -992,6 +992,7 @@ async def run_theta_scanner_for_all_users():
             SELECT DISTINCT u.id, u.email, u.username FROM users u
               JOIN strategies s ON s.user_id = u.id
              WHERE s.signal_mode = 'theta_scanner' AND s.status = 'ACTIVE'
+               AND u.is_active = true   -- exclude deactivated/deleted accounts
         """))).fetchall()
         for u in users:
             class _U: pass
