@@ -138,11 +138,15 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
 
     soft_fail = False  # VWAP-below or continuation fail → watch-only
 
-    # 2. Pre-market liquidity (HARD)
+    # 2. Pre-market liquidity: < $500k = HARD reject (illiquid micro-cap);
+    #    $500k-$1M = WATCH-ONLY (thin but tradeable, user decides); >=$1M = clean.
     pm_dollar_vol = _premarket_dollar_volume(bars_1m)
-    if pm_dollar_vol < 1_000_000:
-        logger.info(f"[ThetaScanner] reject {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1M")
+    if pm_dollar_vol < 500_000:
+        logger.info(f"[ThetaScanner] reject {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $500k (illiquid)")
         return "reject", reasons
+    if pm_dollar_vol < 1_000_000:
+        logger.info(f"[ThetaScanner] {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1M — thin, WATCH-ONLY")
+        soft_fail = True
     reasons.append(f"pm $-vol ${pm_dollar_vol/1e6:.1f}M")
 
     # 1 + 4. VWAP-relative checks
