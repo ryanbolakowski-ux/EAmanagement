@@ -8,7 +8,10 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.models.user import User, SubscriptionTier
-from app.core.auth import require_2fa_when_paid as get_current_user
+# Admin routes are protected by require_admin (is_admin + valid passcode
+# session) which IS the second factor — do NOT 2FA-gate them too, or the
+# admin can be locked out of the unlock flow itself (object-Object bug 2026-06-11).
+from app.core.auth import get_current_user
 from app.services.email import send_tier_change_email, send_comp_granted_email, send_comp_revoked_email
 
 router = APIRouter()
