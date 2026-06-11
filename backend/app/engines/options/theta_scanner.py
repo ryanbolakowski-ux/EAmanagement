@@ -469,24 +469,35 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
             "ALTER TABLE email_signals_history ADD COLUMN IF NOT EXISTS chart_b64 text"
         ))
         import json as _qj
-        await db.execute(_t("""
-            INSERT INTO email_signals_history
-              (picked_at, ticker, asset_type, direction, entry, stop, target,
-               gap_pct, rel_vol, today_vol, score, catalyst_reason, quality_reasons,
-               chart_b64)
-            VALUES (NOW(), :tk, :at, 'long', :en, :st, :tg, :gp, :rv, :tv, :sc, :cr, :qr,
-                    :chart)
-        """), {
-            "tk": pick["ticker"], "at": pick.get("asset_type", "options"),
-            "en": pick["entry"], "st": pick["stop"], "tg": pick["target"],
-            "gp": pick["gap_pct"], "rv": pick.get("rel_vol", 0),
-            "tv": pick["today_vol"], "sc": pick["score"],
-            "cr": pick["catalyst_reason"],
-            "qr": _qj.dumps(pick.get("quality_reasons", [])),
-            "chart": _chart_b64,
-        })
-        await db.commit()
-        logger.info(f"[ThetaScanner] persisted to email_signals_history: {pick['ticker']}")
+        # email_signals_history is a GLOBAL pick log, but emit_theta_pick is called
+        # once PER subscribed user — guard so we write exactly one history row per
+        # (ticker, day). The per-user EMAIL already went out above; this only
+        # de-dupes the history/Email-Signals row (was inserting N times = N emails-page rows).
+        _dup = (await db.execute(_t(
+            "SELECT 1 FROM email_signals_history WHERE ticker = :tk "
+            "AND picked_at::date = (NOW() AT TIME ZONE 'America/New_York')::date LIMIT 1"
+        ), {"tk": pick["ticker"]})).first()
+        if _dup:
+            logger.info(f"[ThetaScanner] history row for {pick['ticker']} already exists today — skip dup insert")
+        else:
+            await db.execute(_t("""
+                INSERT INTO email_signals_history
+                  (picked_at, ticker, asset_type, direction, entry, stop, target,
+                   gap_pct, rel_vol, today_vol, score, catalyst_reason, quality_reasons,
+                   chart_b64)
+                VALUES (NOW(), :tk, :at, 'long', :en, :st, :tg, :gp, :rv, :tv, :sc, :cr, :qr,
+                        :chart)
+            """), {
+                "tk": pick["ticker"], "at": pick.get("asset_type", "options"),
+                "en": pick["entry"], "st": pick["stop"], "tg": pick["target"],
+                "gp": pick["gap_pct"], "rv": pick.get("rel_vol", 0),
+                "tv": pick["today_vol"], "sc": pick["score"],
+                "cr": pick["catalyst_reason"],
+                "qr": _qj.dumps(pick.get("quality_reasons", [])),
+                "chart": _chart_b64,
+            })
+            await db.commit()
+            logger.info(f"[ThetaScanner] persisted to email_signals_history: {pick['ticker']}")
     except Exception as e:
         logger.error(f"[ThetaScanner] history persist failed: {e}")
     return ok
