@@ -297,6 +297,7 @@ def is_in_session(timestamp, session_filters: list[str]) -> bool:
         "NY_OPEN": (9 * 60 + 30, 10 * 60),         # 09:30-10:00 ET
         "NY_PM_ICT": (13 * 60 + 30, 16 * 60),      # 13:30-16:00 ET
         "LONDON_OPEN": (2 * 60, 3 * 60),           # 02:00-03:00 ET
+        "LONDON_INTO_NY_ENTRY": (9 * 60 + 30, 11 * 60),  # 09:30-11:00 ET (London-into-NY entry window, SS3.5.8)
     }
 
     for sf in session_filters:

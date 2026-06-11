@@ -47,6 +47,7 @@ ICT_SESSIONS: dict[str, tuple[int, int]] = {
     "NY_OPEN": (9 * 60 + 30, 10 * 60),         # 09:30-10:00 ET
     "NY_PM_ICT": (13 * 60 + 30, 16 * 60),      # 13:30-16:00 ET
     "LONDON_OPEN": (2 * 60, 3 * 60),           # 02:00-03:00 ET
+    "LONDON_INTO_NY_ENTRY": (9 * 60 + 30, 11 * 60),  # 09:30-11:00 ET (SS3.5.8)
 }
 
 __all__ = [

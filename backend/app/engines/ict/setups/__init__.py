@@ -13,6 +13,8 @@ Ported so far:
     shared ``amd_core`` (Accumulation -> Manipulation -> Distribution) skeleton
   * Judas Swing        (proposal SS3.3, build step 5) -> ``judas_swing``
     over ``amd_core`` (London-open false move that reverses)
+  * London Sweep into NY (proposal SS3.5, build step 5) -> ``london_into_ny``
+    over ``amd_core`` (London sweeps the Asian range, NY reverses it)
 """
 from __future__ import annotations
 
@@ -21,8 +23,9 @@ from app.engines.ict.setups import fvg_inversion_tap  # noqa: F401
 from app.engines.ict.setups import silver_bullet  # noqa: F401
 from app.engines.ict.setups import po3  # noqa: F401
 from app.engines.ict.setups import judas_swing  # noqa: F401
+from app.engines.ict.setups import london_into_ny  # noqa: F401
 
 __all__ = [
     "fvg_inversion_tap", "silver_bullet",
-    "po3", "judas_swing", "amd_core",
+    "po3", "judas_swing", "london_into_ny", "amd_core",
 ]
