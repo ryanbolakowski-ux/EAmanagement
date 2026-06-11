@@ -73,7 +73,12 @@ _MAX_RR = 3.0
 _INVERSION_LOOKBACK = 3
 
 
-@register("FVG Inversion Tap")
+# REVERTED TO V1 (user feedback 2026-06-11): the new dedicated port was too
+# tight and dropped the win rate vs the original engine. Registration is
+# DISABLED so get_setup("FVG Inversion Tap") returns None -> falls back to
+# the original generic engine (the 85%-WR V1). Re-enable by uncommenting
+# the decorator below after retuning + a backtest that BEATS V1.
+# @register("FVG Inversion Tap")
 class FVGInversionTap(ICTSetup):
     """Enter on the candle that inverts a recently-violated FVG (no retest)."""
 

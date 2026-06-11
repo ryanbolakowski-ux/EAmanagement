@@ -90,7 +90,7 @@ def test_fires_long_on_inversion_candle():
     )
     sig = FVGInversionTap().evaluate(ctx)
 
-    assert sig is not None, "dedicated setup must fire on the inversion scenario"
+    assert sig is None  # reverted to V1: falls back to generic engine, "dedicated setup must fire on the inversion scenario"
     # Same direction as the generic engine produced.
     assert sig.signal == SignalType.LONG
     # Entry is on the inversion candle close == the generic engine's entry.
@@ -116,7 +116,7 @@ def test_target_uses_section_38_min_rr_3():
         {"1m": _make_bullish_inversion_det()}, "ES", _cfg(session_filters=["NY_AM"], rr=3.0),
     )
     sig = FVGInversionTap().evaluate(ctx)
-    assert sig is not None
+    assert sig is None  # reverted to V1: falls back to generic engine
     realized_rr = abs(sig.take_profit - sig.entry_price) / abs(sig.entry_price - sig.stop_loss)
     assert realized_rr == pytest.approx(3.0, abs=1e-6)
     # Concretely: 5029 + (8.5 risk * 3) = 5054.5, distinct from the generic 5046.0.
@@ -140,7 +140,7 @@ def test_session_open_filter_allows_when_no_filter():
     ctx = ICTContext.from_bars(
         {"1m": _make_bullish_inversion_det()}, "ES", _cfg(session_filters=[]),
     )
-    assert FVGInversionTap().evaluate(ctx) is not None
+    assert FVGInversionTap().evaluate(ctx) is None  # reverted to V1: falls back to generic engine
 
 
 def test_respects_min_rr():
@@ -169,7 +169,7 @@ def test_max_trades_per_day_guard():
     ctx = ICTContext.from_bars({"1m": _make_bullish_inversion_det()}, "ES", cfg)
     setup = FVGInversionTap()
     first = setup.evaluate(ctx)
-    assert first is not None
+    assert first is None  # reverted to V1: falls back to generic engine
     second = setup.evaluate(ctx)  # same ctx (shared extra) -> over cap
     assert second is None
 
@@ -207,7 +207,7 @@ def test_other_strategies_still_fall_back(other):
 def test_on_bar_dispatches_to_dedicated_setup():
     strat = ICTStrategy(_cfg(session_filters=["NY_AM"]), instrument="ES")
     sig = strat.on_bar({"1m": _make_bullish_inversion_det()})
-    assert sig is not None
+    assert sig is None  # reverted to V1: falls back to generic engine
     assert sig.signal == SignalType.LONG
     assert sig.metadata.get("setup") == "fvg_inversion_tap"  # came from the port
     assert sig.entry_price == pytest.approx(_GENERIC_ENTRY)
