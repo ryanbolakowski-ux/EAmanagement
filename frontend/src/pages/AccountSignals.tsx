@@ -28,6 +28,10 @@ type Signal = {
   notes?: string
   // Annotated trade-chart PNG (base64), rendered inline in the expanded row.
   chart_b64?: string | null
+  // Human-readable level reasons shown next to the stop/target price
+  // (e.g. 'swing low', 'London high'). Never blank server-side.
+  stop_reason?: string | null
+  target_reason?: string | null
 }
 
 // ── Outcome dot ────────────────────────────────────────────────────────────
@@ -587,8 +591,8 @@ export default function AccountSignals() {
                     <td className="px-3 py-2.5 font-bold text-slate-900 dark:text-slate-100">{s.instrument}</td>
                     <td className="px-3 py-2.5"><span className={`badge ${s.direction === 'long' ? 'badge-green' : 'badge-red'}`}>{s.direction.toUpperCase()}</span></td>
                     <td className="px-3 py-2.5 text-blue-600 font-semibold">{s.entry_price.toFixed(2)}</td>
-                    <td className="px-3 py-2.5 text-red-500">{s.stop_loss.toFixed(2)}</td>
-                    <td className="px-3 py-2.5 text-green-600">{s.take_profit.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 text-red-500">{s.stop_loss.toFixed(2)}{s.stop_reason ? <span className="ml-1 text-[10px] text-slate-400 dark:text-slate-500">· {s.stop_reason}</span> : null}</td>
+                    <td className="px-3 py-2.5 text-green-600">{s.take_profit.toFixed(2)}{s.target_reason ? <span className="ml-1 text-[10px] text-slate-400 dark:text-slate-500">· {s.target_reason}</span> : null}</td>
                     <td className="px-3 py-2.5 text-xs">
                       {s.outcome ? (
                         <span className="font-semibold capitalize text-slate-700 dark:text-slate-200">
@@ -602,6 +606,16 @@ export default function AccountSignals() {
                   {isOpen && (
                     <tr className="bg-slate-50 dark:bg-slate-900/60">
                       <td colSpan={9} className="px-4 pb-4 pt-1">
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs">
+                          <span className="text-rose-600 dark:text-rose-300">
+                            SL {s.stop_loss.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            <span className="text-slate-400 dark:text-slate-500"> · {s.stop_reason || 'strategy stop'}</span>
+                          </span>
+                          <span className="text-emerald-600 dark:text-emerald-300">
+                            TP {s.take_profit.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            <span className="text-slate-400 dark:text-slate-500"> · {s.target_reason || 'strategy target'}</span>
+                          </span>
+                        </div>
                         {s.chart_b64 ? (
                           <img
                             src={`data:image/png;base64,${s.chart_b64}`}
