@@ -11,6 +11,8 @@ Ported so far:
   * ICT Silver Bullet  (proposal SS3.2, build step 4) -> ``silver_bullet``
   * Power of 3 (PO3)   (proposal SS3.4, build step 5) -> ``po3`` over the
     shared ``amd_core`` (Accumulation -> Manipulation -> Distribution) skeleton
+  * Judas Swing        (proposal SS3.3, build step 5) -> ``judas_swing``
+    over ``amd_core`` (London-open false move that reverses)
 """
 from __future__ import annotations
 
@@ -18,8 +20,9 @@ from __future__ import annotations
 from app.engines.ict.setups import fvg_inversion_tap  # noqa: F401
 from app.engines.ict.setups import silver_bullet  # noqa: F401
 from app.engines.ict.setups import po3  # noqa: F401
+from app.engines.ict.setups import judas_swing  # noqa: F401
 
 __all__ = [
     "fvg_inversion_tap", "silver_bullet",
-    "po3", "amd_core",
+    "po3", "judas_swing", "amd_core",
 ]
