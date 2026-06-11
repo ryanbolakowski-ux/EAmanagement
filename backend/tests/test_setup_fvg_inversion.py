@@ -186,7 +186,10 @@ def test_get_setup_returns_dedicated_for_inversion_tap():
 
 
 @pytest.mark.parametrize("other", [
-    "Liquidity Sweep + FVG", "ICT Silver Bullet", "Silver Bullet",
+    "Liquidity Sweep + FVG",
+    # NB: "ICT Silver Bullet"/"Silver Bullet" were here in step 3 but are
+    # ported in step 4 (see test_setup_silver_bullet.py); they now
+    # resolve, so they are intentionally NOT in this fall-back list.
     "Judas Swing", "Power of 3", "PO3", "London Sweep into NY",
     "SMT Divergence Reversal", "NY PM Reversal", "Reversal Swing",
     "IOFED Precision Entry", "AMD Strategy", "ICT 2022 Model (AMD)",

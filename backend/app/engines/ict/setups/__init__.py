@@ -8,10 +8,12 @@ the safety property: porting one strategy can never affect the others.
 
 Ported so far:
   * FVG Inversion Tap  (proposal SS3.8, build step 3) -> ``fvg_inversion_tap``
+  * ICT Silver Bullet  (proposal SS3.2, build step 4) -> ``silver_bullet``
 """
 from __future__ import annotations
 
 # Side-effecting imports: each module self-registers via @register on import.
 from app.engines.ict.setups import fvg_inversion_tap  # noqa: F401
+from app.engines.ict.setups import silver_bullet  # noqa: F401
 
-__all__ = ["fvg_inversion_tap"]
+__all__ = ["fvg_inversion_tap", "silver_bullet"]
