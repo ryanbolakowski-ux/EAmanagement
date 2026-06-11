@@ -12,8 +12,8 @@ Proves the user-locked SS3.2 rules:
   * A second qualifying setup the same ET day -> None (max 1 trade/day).
   * 1H bias DOWN with a bullish FVG -> None (bias disagreement).
   * get_setup("ICT Silver Bullet") returns the dedicated setup (and the short
-    rule_tree id "silver_bullet" too); PO3/Judas/SMT/London/NY-PM still None
-    (the generic fallback is unaffected).
+    rule_tree id "silver_bullet" too); the still-unported SMT/NY-PM/etc.
+    still resolve to None (the generic fallback is unaffected).
 
 The bars are 5m primary + 1H bias. ET is derived from the bar timestamps
 (14:00 UTC == 10:00 ET on this date), and the LATEST bar drives the window
@@ -217,12 +217,14 @@ def test_get_setup_returns_dedicated_for_silver_bullet():
     assert isinstance(reg.get_setup("x", {"ict_setup": "silver_bullet"}), SilverBullet)
 
 
+# NOTE: PO3 / Judas Swing / London Sweep into NY were ported in build step 5
+# (the AMD family), so they now resolve to dedicated setups - they are NOT in
+# this list. The strategies below remain UNPORTED and must still fall back.
 @pytest.mark.parametrize("other", [
-    "Power of 3", "PO3", "Judas Swing", "SMT Divergence Reversal",
-    "London Sweep into NY", "NY PM Reversal", "Reversal Swing",
+    "SMT Divergence Reversal", "NY PM Reversal", "Reversal Swing",
     "IOFED Precision Entry", "AMD Strategy", "ICT 2022 Model (AMD)",
 ])
 def test_other_strategies_still_fall_back(other):
-    """Porting Silver Bullet must not affect any un-ported strategy: they all
-    still resolve to None (= use the generic engine fallback)."""
+    """Porting Silver Bullet (and later the AMD family) must not affect any
+    STILL-unported strategy: they all resolve to None (= generic fallback)."""
     assert reg.get_setup(other) is None

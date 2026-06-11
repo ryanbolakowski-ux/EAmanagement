@@ -19,9 +19,11 @@ def test_inversion_tap_falls_back_to_v1():
 
 
 def test_other_strategies_unaffected_by_revert():
-    # Silver Bullet stays active; PO3/Judas/SMT remain on fallback (None)
+    # Silver Bullet stays active; PO3/Judas/London were ported in build step 5
+    # (they now resolve to dedicated setups). The STILL-unported SMT + NY PM
+    # remain on the generic fallback (None).
     assert reg.get_setup("ICT Silver Bullet") is not None
-    for name in ("Power of 3 (PO3)", "Judas Swing", "SMT Divergence Reversal"):
+    for name in ("SMT Divergence Reversal", "NY PM Reversal"):
         assert reg.get_setup(name) is None
 
 
