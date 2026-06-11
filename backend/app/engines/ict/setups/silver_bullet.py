@@ -168,7 +168,10 @@ class SilverBullet(ICTSetup):
             return None
 
         # --- target = nearest opposing liquidity (SS3.2.7) -----------------
-        tgt = self._nearest_opposing_liquidity(ctx, pdf, inst, direction, entry)
+        # The draw-on-liquidity the displacement is running TOWARD - measured
+        # BEYOND the FVG itself (a prior swing high/low or the session extreme),
+        # never the FVG's own displacement candles.
+        tgt = self._nearest_opposing_liquidity(ctx, pdf, inst, direction, fvg)
         if tgt is None:
             logger.info(
                 f"[ict:silver_bullet] skip - no opposing liquidity target ({inst})"
@@ -316,20 +319,27 @@ class SilverBullet(ICTSetup):
 
     def _nearest_opposing_liquidity(
         self, ctx: ICTContext, pdf: pd.DataFrame, inst: str,
-        direction: str, entry: float,
+        direction: str, fvg: object,
     ) -> Optional[float]:
-        """Nearest opposing liquidity pool the displacement runs toward.
+        """Nearest opposing liquidity pool the displacement runs TOWARD.
 
-        For a LONG: the nearest pool ABOVE ``entry`` (old swing high or session
-        high). For a SHORT: nearest pool BELOW ``entry`` (old swing low or
-        session low). Returns the price or ``None`` if nothing sits on the
-        opposing side.
+        For a LONG: the nearest old high resting ABOVE the FVG (a confirmed
+        swing high or the session high) - the buy-side liquidity the up-move is
+        drawn to. For a SHORT: the nearest old low BELOW the FVG. Returns the
+        price or ``None`` if nothing rests on the opposing side beyond the gap.
+
+        Crucially the boundary is the FVG's far edge (its HIGH for a long, LOW
+        for a short), NOT the entry - so the FVG's own displacement candles
+        never count as the target. ``find_swing_highs``/``find_swing_lows``
+        already exclude the most-recent (unconfirmed) bars, which is what we
+        want; the session extreme is the backstop pool.
         """
+        fvg_high = float(fvg.high)
+        fvg_low = float(fvg.low)
         levels: list[float] = []
 
-        # Session high/low of the current Silver Bullet window's surrounding
-        # NY session (use the SILVER_BULLET window itself for the in-window
-        # extreme; fall back to the morning if empty).
+        # Session extreme over the Silver Bullet window (fall back to the wider
+        # morning if the tight window has no qualifying bars).
         for win in (("10:00", "11:00"), ("09:30", "12:00")):
             hi, lo = session_range(pdf, win[0], win[1])
             if direction == "long" and hi is not None:
@@ -337,7 +347,7 @@ class SilverBullet(ICTSetup):
             if direction == "short" and lo is not None:
                 levels.append(float(lo))
 
-        # Structural old highs/lows (liquidity resting at swing points).
+        # Confirmed structural old highs/lows (resting liquidity at swings).
         try:
             if direction == "long":
                 for s in find_swing_highs(pdf, _SWING_LOOKBACK):
@@ -349,10 +359,11 @@ class SilverBullet(ICTSetup):
             pass
 
         if direction == "long":
-            above = [p for p in levels if p > entry]
+            # Only pools strictly ABOVE the FVG high (beyond the gap).
+            above = [p for p in levels if p > fvg_high]
             return min(above) if above else None
         else:
-            below = [p for p in levels if p < entry]
+            below = [p for p in levels if p < fvg_low]
             return max(below) if below else None
 
     # --- per-day trade cap (SS3.2.9; entry_guard is the hard gate) ---------
