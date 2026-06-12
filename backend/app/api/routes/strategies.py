@@ -242,7 +242,7 @@ def _engine_meta(s) -> dict:
     except Exception:
         v2 = False
     return {"rule_tree": rt,
-            "engine_version": str((rt or {}).get("engine_version", "v1")).lower(),
+            "engine_version": str((rt or {}).get("engine_version", "v1") or "v1").strip().lower(),
             "v2_available": bool(v2)}
 
 

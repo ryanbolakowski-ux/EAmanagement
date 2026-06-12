@@ -51,7 +51,7 @@ class ICTStrategy(BaseStrategy):
         # entirely and runs the generic engine below UNCHANGED (zero behaviour
         # change). Even when v2 is selected, get_setup() returns None for any
         # strategy lacking a dedicated setup, so it safely falls back to V1.
-        _ev = str((getattr(self.config, "rule_tree", {}) or {}).get("engine_version", "v1")).lower()
+        _ev = str((getattr(self.config, "rule_tree", {}) or {}).get("engine_version", "v1") or "v1").strip().lower()
         if _ev == "v2":
             try:
                 from app.engines.ict import setups as _ict_setups  # noqa: F401  (self-registers)

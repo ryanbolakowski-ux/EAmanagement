@@ -1151,15 +1151,21 @@ async def _check_and_run_theta_scanner():
                     _diag = (getattr(_ts, "_NOPICK_STATE", {}) or {}).get("last") or {}
                     _reason = _diag.get("reason") or "No setup cleared the quality filters today."
                     import json as _json, redis as _rds
+                    # The Redis key doubles as a restart-safe idempotency latch:
+                    # only email if we have not already recorded a no-pick today.
+                    _already_noticed = False
                     try:
                         _rc = _rds.Redis.from_url(
                             os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
-                        _rc.set(f"theta:nopick:{today_key_visible}",
-                                _json.dumps({"reason": _reason, "ticker": _diag.get("ticker"),
-                                             "score": _diag.get("score")}), ex=129600)
+                        _already_noticed = bool(_rc.get(f"theta:nopick:{today_key_visible}"))
+                        if not _already_noticed:
+                            _rc.set(f"theta:nopick:{today_key_visible}",
+                                    _json.dumps({"reason": _reason, "ticker": _diag.get("ticker"),
+                                                 "score": _diag.get("score")}), ex=129600)
                     except Exception:
                         pass
-                    await _send_no_pick_emails(today_key_visible, _reason)
+                    if not _already_noticed:
+                        await _send_no_pick_emails(today_key_visible, _reason)
                 except Exception as _ne:
                     logger.error(f"[ThetaScanner] no-pick user note failed: {_ne}")
 
