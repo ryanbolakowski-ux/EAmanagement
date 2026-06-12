@@ -90,6 +90,8 @@ class MetricsResponse(BaseModel):
     breakeven_trades: int = 0
     effective_win_rate: float = 0.0
     total_trades: int
+    winning_trades: int = 0
+    losing_trades: int = 0
     win_rate: float
     net_profit: float
     profit_factor: float
@@ -227,7 +229,9 @@ async def get_backtest_metrics(
     _expectancy = (_safe_float(m.net_profit) / _tt) if _tt > 0 else 0.0
 
     return MetricsResponse(
-        total_trades=m.total_trades, win_rate=safe_float(m.win_rate), net_profit=safe_float(m.net_profit),
+        total_trades=m.total_trades,
+        winning_trades=int(getattr(m, "winning_trades", 0) or 0), losing_trades=int(getattr(m, "losing_trades", 0) or 0),
+        win_rate=safe_float(m.win_rate), net_profit=safe_float(m.net_profit),
         profit_factor=safe_float(m.profit_factor), max_drawdown=safe_float(m.max_drawdown), max_drawdown_pct=safe_float(m.max_drawdown_pct),
         sharpe_ratio=safe_float(m.sharpe_ratio), avg_rr=safe_float(m.avg_rr),
         breakeven_trades=int(getattr(m, "breakeven_trades", 0) or 0),
@@ -390,6 +394,8 @@ async def _run_backtest_task(backtest_run_id: str):
                 bt_metrics = BacktestMetrics(
                     backtest_run_id=run.id,
                     total_trades=metrics.total_trades,
+                    winning_trades=getattr(metrics, "winning_trades", 0),
+                    losing_trades=getattr(metrics, "losing_trades", 0),
                     breakeven_trades=getattr(metrics, "breakeven_trades", 0),
                     effective_win_rate=getattr(metrics, "effective_win_rate", 0.0),
                     win_rate=metrics.win_rate,
