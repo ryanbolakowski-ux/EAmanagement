@@ -1010,6 +1010,39 @@ _theta_last_scan_min = None  # debounce: don't scan more than once per ~5 min
 # (>9:50 ET) without anything firing, send ONE URGENT alert per trading
 # date so we know the scanner didn't silently fail. Cleared by date.
 _theta_no_pick_alerted_for_date: set = set()
+
+
+async def _send_no_pick_emails(date_str: str, reason: str) -> None:
+    """Email active Theta Scanner subscribers a short "no pick today" note with
+    the reason. Subject carries "Theta Scanner" so the EMAIL_KILL_SWITCH
+    whitelist passes it. Recipients filtered to active users only."""
+    from app.database import async_session_factory
+    from app.services.email import _send_tracked
+    from sqlalchemy import text as _t
+    try:
+        async with async_session_factory() as _db:
+            rows = (await _db.execute(_t(
+                "SELECT DISTINCT u.email FROM users u JOIN strategies s ON s.user_id = u.id "
+                "WHERE s.signal_mode = 'theta_scanner' AND s.status = 'ACTIVE' AND u.is_active = true"
+            ))).fetchall()
+    except Exception as _e:
+        logger.error(f"[ThetaScanner] no-pick recipient query failed: {_e}")
+        return
+    subject = f"\U0001f3af Theta Scanner: No pick today ({date_str})"
+    html = (
+        "<div style=\"font-family:system-ui,Arial,sans-serif;max-width:520px;margin:0 auto;padding:18px;\">"
+        "<h2 style=\"color:#7c3aed;margin:0 0 10px;\">\U0001f3af Theta Scanner \u2014 no pick today</h2>"
+        "<p style=\"font-size:14px;color:#334155;\">The premarket scan ran and stood down: no setup cleared the quality bar.</p>"
+        f"<div style=\"background:#f1f5f9;border-radius:8px;padding:10px 12px;font-size:13px;color:#475569;\"><b>Why:</b> {reason}</div>"
+        "<p style=\"font-size:12px;color:#94a3b8;margin-top:14px;\">No action needed \u2014 a no-trade day is a valid outcome. You will get the next qualifying pick automatically.</p>"
+        "</div>"
+    )
+    for r in rows:
+        try:
+            _send_tracked(r[0], subject, html)
+        except Exception as _e:
+            logger.error(f"[ThetaScanner] no-pick email to {r[0]} failed: {_e}")
+
 # Once-per-day exception alert. Same idea, but for the case where
 # find_best_premarket_pick raises — we want one alert per traceback
 # per day, not one alert every 5 minutes for an hour.
@@ -1111,6 +1144,24 @@ async def _check_and_run_theta_scanner():
                     )
                 except Exception as _ae:
                     logger.error(f"[ThetaScanner] failed to send no-pick alert: {_ae}")
+
+                # --- user-facing "no pick today" note + dashboard sentinel ---
+                try:
+                    from app.engines.options import theta_scanner as _ts
+                    _diag = (getattr(_ts, "_NOPICK_STATE", {}) or {}).get("last") or {}
+                    _reason = _diag.get("reason") or "No setup cleared the quality filters today."
+                    import json as _json, redis as _rds
+                    try:
+                        _rc = _rds.Redis.from_url(
+                            os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+                        _rc.set(f"theta:nopick:{today_key_visible}",
+                                _json.dumps({"reason": _reason, "ticker": _diag.get("ticker"),
+                                             "score": _diag.get("score")}), ex=129600)
+                    except Exception:
+                        pass
+                    await _send_no_pick_emails(today_key_visible, _reason)
+                except Exception as _ne:
+                    logger.error(f"[ThetaScanner] no-pick user note failed: {_ne}")
 
     # Skip if outside the entire premarket scan window (6:00 ET - 9:50 ET)
     if not in_window:

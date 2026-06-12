@@ -196,7 +196,22 @@ async def today_pick(
             pass
 
     if not raw:
-        return {"pick": None, "market_status": status, "message": "No pick yet today. Scanner runs at 9:25 ET."}
+        # No pick stored for today. Distinguish "window closed, no qualifying
+        # setup" (with the reason) from "still scanning" so the UI never shows a
+        # stale prior-day pick.
+        no_pick_reason = None
+        try:
+            _np = await _redis.get(f"theta:nopick:{date.today().isoformat()}")
+            if _np:
+                no_pick_reason = (json.loads(_np) or {}).get("reason")
+        except Exception:
+            no_pick_reason = None
+        if no_pick_reason:
+            return {"pick": None, "no_pick": True, "reason": no_pick_reason,
+                    "market_status": status,
+                    "message": f"No pick today \u2014 {no_pick_reason}"}
+        return {"pick": None, "no_pick": False, "market_status": status,
+                "message": "No pick yet today. Scanner runs through 9:25 ET."}
     try:
         pick = json.loads(raw)
         # Enrich with live price + % change vs entry — best-effort

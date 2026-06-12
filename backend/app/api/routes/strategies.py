@@ -74,6 +74,12 @@ class StrategyResponse(BaseModel):
     # column). 'futures' | 'options' | 'stock' | 'unknown'.
     asset_class: str = "unknown"
     created_at: str
+    # Engine selector (V1 generic vs V2 dedicated setup). engine_version is
+    # read from rule_tree; v2_available is True only when a dedicated setup
+    # exists for this strategy name.
+    rule_tree: dict = {}
+    engine_version: str = "v1"
+    v2_available: bool = False
 
     class Config:
         from_attributes = True
@@ -95,7 +101,7 @@ async def list_strategies(
             higher_timeframes=s.higher_timeframes or [],
             risk_reward_ratio=s.risk_reward_ratio, stop_loss_type=s.stop_loss_type,
             session_filters=s.session_filters, starred=getattr(s, "starred", False),
-            asset_class=classify_asset_class(s.instruments),
+            asset_class=classify_asset_class(s.instruments), **_engine_meta(s),
             created_at=s.created_at.isoformat(),
         )
         for s in result.scalars().all()
@@ -132,7 +138,7 @@ async def create_strategy(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=getattr(strategy, "starred", False),
-        asset_class=classify_asset_class(strategy.instruments),
+        asset_class=classify_asset_class(strategy.instruments), **_engine_meta(strategy),
         created_at=strategy.created_at.isoformat(),
     )
 
@@ -156,7 +162,7 @@ async def get_strategy(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=getattr(strategy, "starred", False),
-        asset_class=classify_asset_class(strategy.instruments),
+        asset_class=classify_asset_class(strategy.instruments), **_engine_meta(strategy),
         created_at=strategy.created_at.isoformat(),
     )
 
@@ -196,7 +202,7 @@ async def update_strategy(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=getattr(strategy, "starred", False),
-        asset_class=classify_asset_class(strategy.instruments),
+        asset_class=classify_asset_class(strategy.instruments), **_engine_meta(strategy),
         created_at=strategy.created_at.isoformat(),
     )
 
@@ -225,6 +231,21 @@ async def delete_strategy(
     await db.commit()
 
 
+def _engine_meta(s) -> dict:
+    """Per-strategy engine fields: rule_tree, the chosen engine (v1/v2 from
+    rule_tree), and whether a V2 dedicated setup actually exists for this name."""
+    rt = getattr(s, "rule_tree", None) or {}
+    try:
+        from app.engines.ict import setups as _setups  # noqa: F401  (registers)
+        from app.engines.ict.registry import get_setup
+        v2 = get_setup(s.name, rt) is not None
+    except Exception:
+        v2 = False
+    return {"rule_tree": rt,
+            "engine_version": str((rt or {}).get("engine_version", "v1")).lower(),
+            "v2_available": bool(v2)}
+
+
 def _strategy_to_response(s) -> "StrategyResponse":
     return StrategyResponse(
         id=str(s.id), name=s.name, description=s.description,
@@ -233,7 +254,7 @@ def _strategy_to_response(s) -> "StrategyResponse":
         higher_timeframes=s.higher_timeframes or [],
         risk_reward_ratio=s.risk_reward_ratio, stop_loss_type=s.stop_loss_type,
         session_filters=s.session_filters, starred=getattr(s, "starred", False),
-        asset_class=classify_asset_class(s.instruments),
+        asset_class=classify_asset_class(s.instruments), **_engine_meta(s),
         created_at=s.created_at.isoformat(),
     )
 
@@ -300,7 +321,7 @@ async def toggle_strategy_star(
         higher_timeframes=strategy.higher_timeframes or [],
         risk_reward_ratio=strategy.risk_reward_ratio, stop_loss_type=strategy.stop_loss_type,
         session_filters=strategy.session_filters, starred=bool(strategy.starred),
-        asset_class=classify_asset_class(strategy.instruments),
+        asset_class=classify_asset_class(strategy.instruments), **_engine_meta(strategy),
         created_at=strategy.created_at.isoformat(),
     )
 """Patch — append to strategies.py to add share/import endpoints.

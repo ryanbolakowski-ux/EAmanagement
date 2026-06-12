@@ -459,6 +459,7 @@ async def _run_watcher(watcher_id, strategy_id, user_id, instruments, account_la
                 use_rsi_filter=bool((strategy_model.rule_tree or {}).get("use_rsi_filter", False)),
                 use_vwap_filter=bool((strategy_model.rule_tree or {}).get("use_vwap_filter", False)),
             )
+            cfg.rule_tree = strategy_model.rule_tree or {}  # carries engine_version (v1/v2)
 
         # Per-instrument: warm a buffer from cache, then poll Yahoo
         buffers: dict[tuple[str, str], list] = {}

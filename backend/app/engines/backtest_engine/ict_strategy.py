@@ -34,8 +34,38 @@ class ICTStrategy(BaseStrategy):
         self._last_signal_bar = -1
         self._bar_counter = 0
         self._cooldown_bars = 1  # minimum bars between signals (restored)
+        self._ict_extra: dict = {}  # persistent per-setup ledger (V2 daily cap)
+
+    def _build_ictcontext(self, bars):
+        """Adapter: wrap on_bar inputs in an ICTContext for a V2 dedicated setup.
+        The per-setup ledger (extra) persists across bars within a run so a
+        max-N/day cap engages offline (prod uses entry_guard as the hard cap)."""
+        from app.engines.ict.context import ICTContext
+        ctx = ICTContext.from_bars(bars, self.instrument, self.config)
+        ctx.extra = self._ict_extra
+        return ctx
 
     def on_bar(self, bars):
+        # === STEP 0: dedicated-setup (V2) dispatch, gated PER-STRATEGY ===
+        # Opt in via rule_tree.engine_version == "v2". Default "v1" skips this
+        # entirely and runs the generic engine below UNCHANGED (zero behaviour
+        # change). Even when v2 is selected, get_setup() returns None for any
+        # strategy lacking a dedicated setup, so it safely falls back to V1.
+        _ev = str((getattr(self.config, "rule_tree", {}) or {}).get("engine_version", "v1")).lower()
+        if _ev == "v2":
+            try:
+                from app.engines.ict import setups as _ict_setups  # noqa: F401  (self-registers)
+                from app.engines.ict.registry import get_setup as _get_setup
+                _setup = _get_setup(self.config.name, getattr(self.config, "rule_tree", {}) or {})
+            except Exception as _exc:
+                logger.warning(f"[ict] v2 dispatch failed for {self.config.name!r}: {_exc!r}")
+                _setup = None
+            if _setup is not None:
+                logger.info(f"[ict] {self.config.name} -> V2 setup={_setup.name}")
+                try:
+                    return _setup.evaluate(self._build_ictcontext(bars))
+                except Exception as _exc:
+                    logger.error(f"[ict] v2 setup={_setup.name} raised for {self.config.name!r}: {_exc!r}; falling back to V1")
 
         if not self.check_risk_controls():
             return None

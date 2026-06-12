@@ -3,6 +3,8 @@ import os, math, json
 from datetime import datetime, timezone
 from typing import Optional
 from loguru import logger
+
+_NOPICK_STATE: dict = {"last": None}
 from sqlalchemy import text
 
 _CATALYST_WEIGHTS = {
@@ -220,6 +222,8 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
             continue
     if not candidates:
         logger.info("[ThetaScanner] no candidate passed quality filters")
+        _NOPICK_STATE["last"] = {"ticker": None, "score": None,
+            "reason": "no gapper met the universe filters today"}
         return None
     candidates.sort(key=lambda c: c["score"], reverse=True)
     # Per-candidate visibility (every candidate, not just the winner) so we can
@@ -240,6 +244,9 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
             f"[stock-scanner] no pick \u2014 best candidate {candidates[0]['ticker']} "
             f"score={candidates[0]['score']:.2f} below MIN_SCORE={MIN_SCORE}"
         )
+        _NOPICK_STATE["last"] = {"ticker": candidates[0]["ticker"],
+            "score": round(float(candidates[0]["score"]), 2),
+            "reason": f"best candidate scored {candidates[0]['score']:.1f}, below the {MIN_SCORE:.0f} minimum"}
         for c in candidates[:5]:
             logger.info(
                 f"[stock-scanner] rejected candidate: {c['ticker']} "
@@ -284,8 +291,15 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
             )
         else:
             logger.info("[stock-scanner] no pick \u2014 all candidates rejected by quality filters")
+            _top = candidates[0]
+            _qr = _top.get("quality_reasons") or []
+            _NOPICK_STATE["last"] = {"ticker": _top["ticker"],
+                "score": round(float(_top["score"]), 2),
+                "reason": (f"top candidate {_top['ticker']} ({_top['score']:.1f}) failed quality: "
+                           + ("; ".join(str(r) for r in _qr) if _qr else "did not clear the filters"))}
             return None
 
+    _NOPICK_STATE["last"] = None  # a pick fired today
     best.setdefault("watch_only", False)
     best.setdefault("quality_reasons", [])
     best["entry"] = best["price"]
