@@ -1,5 +1,4 @@
 """Tests for the V1/V2 engine toggle + no-pick diagnostic."""
-import pytest
 from app.engines.ict import setups  # noqa: F401  registers dedicated setups
 from app.engines.ict.registry import get_setup
 from app.engines.strategy_engine.base_strategy import StrategyConfig
