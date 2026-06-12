@@ -1015,7 +1015,7 @@ export default function StrategyBuilder() {
                         <option value="v1">V1 — Generic ICT engine (default)</option>
                         <option value="v2">V2 — Dedicated {form.name} setup</option>
                       </select>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">V1 is the battle-tested generic engine. V2 runs this strategy\u2019s dedicated ICT setup (more selective). Switch anytime \u2014 it only affects this strategy.</p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">V1 is the battle-tested generic engine. V2 runs this strategy’s dedicated ICT setup (more selective). Switch anytime — it only affects this strategy.</p>
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-4">
