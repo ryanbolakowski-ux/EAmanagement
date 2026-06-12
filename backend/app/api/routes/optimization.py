@@ -42,6 +42,7 @@ class OptimizationRunResponse(BaseModel):
     error_message: Optional[str] = None
     failure_reason: Optional[str] = None
     progress: float = 0.0
+    eta_seconds: Optional[float] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
 
@@ -56,6 +57,24 @@ def _opt_progress(run) -> float:
     if tot <= 0:
         return 0.0
     return round(min(100.0, (run.completed_combinations or 0) / tot * 100.0), 1)
+
+
+def _opt_eta(run) -> Optional[float]:
+    """Seconds remaining, extrapolated from measured per-combo time. None until
+    at least one combo has finished; 0 once the run is terminal."""
+    st = run.status.value if hasattr(run.status, "value") else str(run.status)
+    if st in ("completed", "failed"):
+        return 0.0
+    done = run.completed_combinations or 0
+    tot = run.total_combinations or 0
+    if not run.started_at or done <= 0 or tot <= 0:
+        return None
+    from datetime import datetime as _dt, timezone as _tz
+    started = run.started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=_tz.utc)
+    elapsed = (_dt.now(_tz.utc) - started).total_seconds()
+    return round(elapsed / done * (tot - done), 0)
 
 
 class OptimizationResultResponse(BaseModel):
@@ -146,7 +165,7 @@ async def list_optimizations(
             status=r.status.value, total_combinations=r.total_combinations,
             completed_combinations=r.completed_combinations, created_at=r.created_at.isoformat(),
             error_message=r.error_message, failure_reason=r.error_message,
-            progress=_opt_progress(r),
+            progress=_opt_progress(r), eta_seconds=_opt_eta(r),
             started_at=r.started_at.isoformat() if r.started_at else None,
             completed_at=r.completed_at.isoformat() if r.completed_at else None,
         )
@@ -268,7 +287,7 @@ async def get_optimization_run(
         status=run.status.value, total_combinations=run.total_combinations,
         completed_combinations=run.completed_combinations, created_at=run.created_at.isoformat(),
         error_message=run.error_message, failure_reason=run.error_message,
-        progress=_opt_progress(run),
+        progress=_opt_progress(run), eta_seconds=_opt_eta(run),
         started_at=run.started_at.isoformat() if run.started_at else None,
         completed_at=run.completed_at.isoformat() if run.completed_at else None,
     )
@@ -434,67 +453,77 @@ async def _run_optimization_task(run_id: str):
             # ── Parallel batch runner ───────────────────────────────────────
             # Each combo gets its own strategy + runner but SHARES the
             # data_handler (read-only — get_bars_up_to is pure-read).
-            BATCH_SIZE = 4
+            # ── Real multi-core parallel execution (process pool) ────────────
+            # Threads cannot parallelize CPU-bound backtests (Python GIL) — that
+            # is why this used to peg ONE core and crawl for 20-90 min. A process
+            # pool runs combos on separate cores; each worker rebuilds the
+            # DataHandler ONCE (initializer) then reuses it. Progress + running
+            # best update PER COMBO (as_completed) so the UI never sits at 0%.
+            import time as _time, concurrent.futures as _cf, multiprocessing as _mp, os as _os
+            from app.engines.optimization_engine import opt_worker as _ow
 
-            def _run_one_combo(idx_combo):
-                idx, combo = idx_combo
-                params = dict(zip(param_keys, combo))
-                try:
-                    config = StrategyConfig(
-                        name=strategy_model.name,
-                        instruments=strategy_model.instruments or [run.instrument],
-                        primary_timeframe=params.get("primary_timeframe", strategy_model.primary_timeframe or "15m"),
-                        execution_timeframe=params.get("execution_timeframe", strategy_model.execution_timeframe or "1m"),
-                        higher_timeframes=strategy_model.higher_timeframes or [],
-                        risk_reward_ratio=float(params.get("risk_reward_ratio", strategy_model.risk_reward_ratio or 2.0)),
-                        stop_loss_type=params.get("stop_loss_type", strategy_model.stop_loss_type or "structure"),
-                        stop_loss_ticks=int(params.get("stop_loss_ticks", strategy_model.stop_loss_ticks or 8)),
-                        max_contracts=strategy_model.max_contracts or 1,
-                        session_filters=strategy_model.session_filters or [],
-                        fvg_min_size_ticks=int(params.get("fvg_min_size_ticks", strategy_model.fvg_min_size_ticks or 4)),
-                        fvg_max_size_ticks=strategy_model.fvg_max_size_ticks,
-                        max_daily_loss=strategy_model.max_daily_loss,
-                        max_trades_per_day=strategy_model.max_trades_per_day,
-                        use_rsi_filter=bool((strategy_model.rule_tree or {}).get("use_rsi_filter", False)),
-                        use_vwap_filter=bool((strategy_model.rule_tree or {}).get("use_vwap_filter", False)),
-                    )
-                    strategy = ICTStrategy(config, instrument=run.instrument)
-                    # Use the SHARED handler — build_timeframes/filter_date_range
-                    # are now idempotent so the runner's calls are no-ops.
-                    data_handler = shared_data_handler
-                    all_tfs = list(set([config.primary_timeframe, config.execution_timeframe] + config.higher_timeframes))
-                    bt_config = BacktestConfig(
-                        instrument=run.instrument, start_date=run.start_date, end_date=run.end_date,
-                        primary_timeframe=config.primary_timeframe, all_timeframes=all_tfs,
-                        initial_capital=100000, commission_per_side=2.50, slippage_ticks=1,
-                    )
-                    metrics = BacktestRunner(strategy, data_handler, bt_config).run()
-                    return idx, {
-                        "params": params,
-                        "net_profit": metrics.net_profit, "profit_factor": metrics.profit_factor,
-                        "win_rate": metrics.win_rate, "max_drawdown": metrics.max_drawdown_pct,
-                        "total_trades": metrics.total_trades, "sharpe_ratio": metrics.sharpe_ratio,
-                    }
-                except Exception as e:
-                    import traceback; traceback.print_exc()
-                    logger.error(f"OPTIMIZER: combo {idx+1}/{len(combos)} failed: {type(e).__name__}: {e}")
-                    return idx, {
-                        "params": params, "net_profit": 0, "profit_factor": 0, "win_rate": 0,
-                        "max_drawdown": 0, "total_trades": 0, "sharpe_ratio": 0,
-                        "_error": f"{type(e).__name__}: {e}",
-                    }
-
-            for batch_start in range(0, len(combos), BATCH_SIZE):
-                batch = list(enumerate(combos))[batch_start:batch_start + BATCH_SIZE]
-                # Run BATCH_SIZE combos concurrently via threads
-                results = await asyncio.gather(
-                    *(asyncio.to_thread(_run_one_combo, ic) for ic in batch)
-                )
-                for idx, res in results:
+            metric_key = run.optimization_metric or "profit_factor"
+            _strat = {
+                "name": strategy_model.name, "instruments": strategy_model.instruments,
+                "primary_timeframe": strategy_model.primary_timeframe,
+                "execution_timeframe": strategy_model.execution_timeframe,
+                "higher_timeframes": strategy_model.higher_timeframes,
+                "risk_reward_ratio": strategy_model.risk_reward_ratio,
+                "stop_loss_type": strategy_model.stop_loss_type,
+                "stop_loss_ticks": strategy_model.stop_loss_ticks,
+                "max_contracts": strategy_model.max_contracts,
+                "session_filters": strategy_model.session_filters,
+                "fvg_min_size_ticks": strategy_model.fvg_min_size_ticks,
+                "fvg_max_size_ticks": strategy_model.fvg_max_size_ticks,
+                "max_daily_loss": strategy_model.max_daily_loss,
+                "max_trades_per_day": strategy_model.max_trades_per_day,
+                "rule_tree": strategy_model.rule_tree or {},
+            }
+            _df_records = df.reset_index().to_dict("list")
+            _n_workers = min(len(combos), max(1, (_os.cpu_count() or 2) - 1))
+            _loop = asyncio.get_event_loop()
+            _t0 = _time.monotonic()
+            done_count = 0
+            best = None
+            _failed = 0
+            _ctx = _mp.get_context("spawn")
+            _pool = _cf.ProcessPoolExecutor(
+                max_workers=_n_workers, mp_context=_ctx,
+                initializer=_ow.init_worker,
+                initargs=(_df_records, run.instrument, base_tf, list(possible_tfs)),
+            )
+            logger.info(f"[OPT] run={run.id} dispatching {len(combos)} combos across {_n_workers} processes")
+            try:
+                _futs = [
+                    _loop.run_in_executor(_pool, _ow.run_combo, i, dict(zip(param_keys, combo)),
+                                          _strat, run.start_date, run.end_date)
+                    for i, combo in enumerate(combos)
+                ]
+                for _fut in asyncio.as_completed(_futs):
+                    idx, res = await _fut
                     all_results[idx] = res
-                    print(f"OPTIMIZER: Combo {idx+1}/{len(combos)} done: {res['total_trades']} trades, ${res['net_profit']:.0f} profit")
-                run.completed_combinations = batch_start + len(batch)
-                await db.commit()
+                    done_count += 1
+                    if res.get("_error"):
+                        _failed += 1
+                        logger.error(f"[OPT COMBO-FAIL] run={run.id} {done_count}/{len(combos)} "
+                                     f"params={res.get('params')} err={res.get('_error')}")
+                    elif best is None or (res.get(metric_key, 0) or 0) > (best.get(metric_key, 0) or 0):
+                        best = res
+                    run.completed_combinations = done_count
+                    await db.commit()
+                    _elapsed = _time.monotonic() - _t0
+                    _eta = int(_elapsed / done_count * (len(combos) - done_count)) if done_count else None
+                    logger.info(
+                        f"[OPT PROGRESS] run={run.id} {done_count}/{len(combos)} "
+                        f"({done_count*100//max(1,len(combos))}%) params={res.get('params')} "
+                        f"{metric_key}={res.get(metric_key)} WR={res.get('win_rate')} "
+                        f"trades={res.get('total_trades')} best_{metric_key}={best.get(metric_key) if best else None} "
+                        f"failed={_failed} eta~{_eta}s"
+                    )
+            finally:
+                _pool.shutdown(wait=False, cancel_futures=True)
+            logger.info(f"[OPT] run={run.id} all {len(combos)} combos done in "
+                        f"{int(_time.monotonic()-_t0)}s ({_failed} failed)")
 
             # If EVERY combo errored, the run is a real failure — surface it
             # instead of "completing" with a grid of zeroes.
@@ -503,7 +532,7 @@ async def _run_optimization_task(run_id: str):
                 run.status = OptimizationStatus.FAILED
                 run.error_message = (
                     f"All {len(all_results)} parameter combinations failed. "
-                    f"First error: {errored[0][_error]}"
+                    f"First error: {errored[0].get('_error')}"
                 )[:480]
                 run.completed_at = datetime.now(timezone.utc)
                 await db.commit()
