@@ -159,8 +159,10 @@ async def today_pick(
     raw = None
     try:
         raw = await _redis.get(f"theta:lastpick:{date.today().isoformat()}")
-        if not raw:
-            raw = await _redis.get("theta:lastpick:latest")
+        # Do NOT fall back to theta:lastpick:latest — that key is not
+        # date-bounded and would surface a PRIOR day's pick on a no-pick day
+        # (this was the "yesterday's pick still showing" bug). The DB fallback
+        # below is date-bounded (picked_at::date = CURRENT_DATE).
     except Exception as _re:
         # Redis hiccup (auth, network, restart) — fall through to DB
         raw = None

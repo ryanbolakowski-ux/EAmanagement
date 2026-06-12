@@ -48,6 +48,9 @@ export interface Strategy {
   max_daily_loss: number | null
   max_trades_per_day: number | null
   created_at: string
+  rule_tree?: Record<string, unknown>
+  engine_version?: 'v1' | 'v2'
+  v2_available?: boolean
 }
 
 export interface StrategyCreate {

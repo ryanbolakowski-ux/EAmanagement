@@ -218,6 +218,8 @@ const emptyForm = {
   fvg_max_size_ticks: 20,
   max_daily_loss: 500,
   max_trades_per_day: 3,
+  engine_version: 'v1' as 'v1' | 'v2',
+  v2_available: false,
   // Extended ICT fields
   selectedConfluences: [] as string[],
   selectedOrderFlow: [] as string[],
@@ -368,6 +370,8 @@ export default function StrategyBuilder() {
       fvg_max_size_ticks: s.fvg_max_size_ticks || 20,
       max_daily_loss: s.max_daily_loss || 500,
       max_trades_per_day: s.max_trades_per_day || 3,
+      engine_version: ((s as any).engine_version === 'v2' ? 'v2' : 'v1') as 'v1' | 'v2',
+      v2_available: !!(s as any).v2_available,
       selectedConfluences,
       selectedOrderFlow,
       entryRules: entryMatch ? entryMatch[1].trim() : '',
@@ -474,6 +478,7 @@ export default function StrategyBuilder() {
         order_flow: form.selectedOrderFlow,
         use_rsi_filter: form.selectedOrderFlow.includes('rsi_filter'),
         use_vwap_filter: form.selectedOrderFlow.includes('vwap_filter'),
+        engine_version: form.engine_version,
       },
     }
 
@@ -1002,6 +1007,17 @@ export default function StrategyBuilder() {
               {/* ── Risk Management Tab ── */}
               {activeTab === 'risk' && (
                 <div className="space-y-5">
+                  {form.v2_available && (
+                    <div>
+                      <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-1.5 dark:text-slate-300">Engine</label>
+                      <select value={form.engine_version} onChange={e => setForm({...form, engine_version: (e.target.value === 'v2' ? 'v2' : 'v1')})}
+                        className="w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-800 dark:border-slate-700">
+                        <option value="v1">V1 — Generic ICT engine (default)</option>
+                        <option value="v2">V2 — Dedicated {form.name} setup</option>
+                      </select>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">V1 is the battle-tested generic engine. V2 runs this strategy\u2019s dedicated ICT setup (more selective). Switch anytime \u2014 it only affects this strategy.</p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-1.5 dark:text-slate-300">Risk:Reward Ratio</label>
