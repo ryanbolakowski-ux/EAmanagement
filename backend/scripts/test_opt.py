@@ -14,7 +14,7 @@ async def main():
             "parameter_grid, optimization_metric, total_combinations, completed_combinations, status, created_at) "
             "VALUES (:id,:s,:u,'NQ',:sd,:ed, CAST(:grid AS jsonb),'profit_factor',0,0,'QUEUED',NOW())"),
             {"id": rid, "s": sid, "u": uid, "sd": datetime(2026,5,1), "ed": datetime(2026,6,1),
-             "grid": '{"stop_loss_ticks":[8,12],"risk_reward_ratio":[2,3]}'})
+             "grid": '{"risk_reward_ratio":[1.5,2.0,2.5,3.0],"stop_loss_ticks":[8,10,12,16],"fvg_min_size_ticks":[2,4,6],"risk_reward_ratio":[2,3]}'})
         await db.commit()
     print(f"created test run {rid[:8]} (4 combos, 1mo NQ)")
     t0=time.time()

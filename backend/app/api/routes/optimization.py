@@ -480,7 +480,34 @@ async def _run_optimization_task(run_id: str):
                 "rule_tree": strategy_model.rule_tree or {},
             }
             _df_records = df.reset_index().to_dict("list")
-            _n_workers = min(len(combos), max(1, (_os.cpu_count() or 2) - 1))
+
+            # ── Deduplicate functionally-identical combos ────────────────────
+            # A grid dimension can be a no-op for a given strategy: e.g.
+            # stop_loss_ticks does NOTHING when stop_loss_type='structure' (the
+            # stop is derived from market structure, not a tick distance), so
+            # those combos produce byte-identical results. Build a
+            # result-affecting signature from the ACTUAL grid params (dropping
+            # ONLY the proven no-op), run each unique config ONCE, and replicate
+            # its result to the duplicates. Big speedup, zero change to results.
+            _combo_params = [dict(zip(param_keys, c)) for c in combos]
+            def _sig(p):
+                st = p.get("stop_loss_type", _strat["stop_loss_type"] or "structure")
+                items = []
+                for k in param_keys:
+                    if k == "stop_loss_ticks" and st != "ticks":
+                        continue  # tick distance is irrelevant for a structure stop
+                    items.append((k, p.get(k)))
+                return tuple(items)
+            _groups = {}   # rep combo index -> [all member combo indices]
+            _sig_rep = {}
+            for _i, _p in enumerate(_combo_params):
+                _key = _sig(_p)
+                if _key not in _sig_rep:
+                    _sig_rep[_key] = _i; _groups[_i] = []
+                _groups[_sig_rep[_key]].append(_i)
+            _reps = list(_groups.keys())
+
+            _n_workers = min(len(_reps), max(1, (_os.cpu_count() or 2) - 1))
             _loop = asyncio.get_event_loop()
             _t0 = _time.monotonic()
             done_count = 0
@@ -492,21 +519,27 @@ async def _run_optimization_task(run_id: str):
                 initializer=_ow.init_worker,
                 initargs=(_df_records, run.instrument, base_tf, list(possible_tfs)),
             )
-            logger.info(f"[OPT] run={run.id} dispatching {len(combos)} combos across {_n_workers} processes")
+            logger.info(f"[OPT] run={run.id} {len(combos)} combos -> {len(_reps)} distinct configs "
+                        f"({len(combos)-len(_reps)} duplicate no-op combos skipped); "
+                        f"running across {_n_workers} processes")
             try:
                 _futs = [
-                    _loop.run_in_executor(_pool, _ow.run_combo, i, dict(zip(param_keys, combo)),
+                    _loop.run_in_executor(_pool, _ow.run_combo, _ridx,
+                                          dict(zip(param_keys, combos[_ridx])),
                                           _strat, run.start_date, run.end_date)
-                    for i, combo in enumerate(combos)
+                    for _ridx in _reps
                 ]
                 for _fut in asyncio.as_completed(_futs):
-                    idx, res = await _fut
-                    all_results[idx] = res
-                    done_count += 1
+                    ridx, res = await _fut
+                    members = _groups.get(ridx, [ridx])
+                    for _m in members:                       # replicate to duplicate param sets
+                        mres = dict(res); mres["params"] = _combo_params[_m]
+                        all_results[_m] = mres
+                    done_count += len(members)
                     if res.get("_error"):
-                        _failed += 1
-                        logger.error(f"[OPT COMBO-FAIL] run={run.id} {done_count}/{len(combos)} "
-                                     f"params={res.get('params')} err={res.get('_error')}")
+                        _failed += len(members)
+                        logger.error(f"[OPT COMBO-FAIL] run={run.id} config={res.get('params')} "
+                                     f"err={res.get('_error')}")
                     elif best is None or (res.get(metric_key, 0) or 0) > (best.get(metric_key, 0) or 0):
                         best = res
                     run.completed_combinations = done_count
@@ -515,7 +548,7 @@ async def _run_optimization_task(run_id: str):
                     _eta = int(_elapsed / done_count * (len(combos) - done_count)) if done_count else None
                     logger.info(
                         f"[OPT PROGRESS] run={run.id} {done_count}/{len(combos)} "
-                        f"({done_count*100//max(1,len(combos))}%) params={res.get('params')} "
+                        f"({done_count*100//max(1,len(combos))}%) config={res.get('params')} "
                         f"{metric_key}={res.get(metric_key)} WR={res.get('win_rate')} "
                         f"trades={res.get('total_trades')} best_{metric_key}={best.get(metric_key) if best else None} "
                         f"failed={_failed} eta~{_eta}s"
