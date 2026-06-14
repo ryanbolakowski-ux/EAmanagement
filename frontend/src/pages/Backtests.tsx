@@ -77,8 +77,8 @@ function OptimizePrompt({ selectedRun, baselineMetrics }: { selectedRun: any; ba
           <div className="flex-1">
             <div className="font-bold text-slate-900 dark:text-slate-100 mb-1">Optimize for better results?</div>
             <div className="text-xs text-slate-600 dark:text-slate-400 mb-3">
-              I'll run ~80 parameter combinations on this exact strategy + instrument + date range, then show you the top performer vs your current result.
-              <br/>Expected: <strong>3–6 minutes</strong>.
+              I'll run 48 parameter combinations on this exact strategy + instrument + date range, then show you the top performer vs your current result.
+              <br/>Time depends on your date range — a full year can take <strong>15–40 min</strong> (the first result lands after the first combo, ~1–2 min). You'll see live progress + a real ETA once it starts.
             </div>
             <div className="flex gap-2">
               <button onClick={start} className="bg-violet-600 hover:bg-violet-500 text-white font-bold text-xs px-4 py-2 rounded-lg flex items-center gap-1.5">
@@ -96,17 +96,21 @@ function OptimizePrompt({ selectedRun, baselineMetrics }: { selectedRun: any; ba
 
   if (phase === 'starting' || phase === 'running') {
     const prog = optRun?.progress ?? 0
+    const etaS = optRun?.eta_seconds
+    const etaTxt = (etaS == null) ? null : (etaS < 60 ? `~${Math.round(etaS)}s left` : `~${Math.round(etaS/60)} min left`)
+    const done = optRun?.completed_combinations || 0
+    const total = optRun?.total_combinations || 48
     return (
       <div className="rounded-2xl border border-violet-300 dark:border-violet-700 bg-violet-50 dark:bg-violet-950/30 p-5">
         <div className="flex items-center gap-3 mb-2">
           <div className="inline-block w-5 h-5 border-2 border-violet-600 border-r-transparent rounded-full animate-spin"/>
-          <div className="font-bold text-slate-900 dark:text-slate-100">Optimizing... {prog.toFixed(0)}%</div>
+          <div className="font-bold text-slate-900 dark:text-slate-100">Optimizing… {prog.toFixed(0)}%{etaTxt ? <span className="font-normal text-slate-500"> · {etaTxt}</span> : null}</div>
         </div>
         <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden mb-2">
           <div className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${Math.max(2, prog)}%` }}/>
         </div>
         <div className="text-[11px] text-slate-500 dark:text-slate-400">
-          {optRun?.completed_combinations || 0} of {optRun?.total_combinations || '~80'} combos done. Running 4 in parallel — feel free to leave this tab open.
+          {done} of {total} combos done · running in parallel across CPU cores. {done === 0 ? 'Warming up — the first result takes a few minutes on a long date range (a year ≈ 3 min/combo); this is working, not stuck.' : 'Feel free to leave this tab open.'}
         </div>
       </div>
     )
