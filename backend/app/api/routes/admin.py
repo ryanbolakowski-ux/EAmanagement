@@ -1,3 +1,4 @@
+from loguru import logger
 import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -730,8 +731,10 @@ async def systems_check(
         except Exception:
             return None
 
-    def _staleness(ts):
-        """Map a datetime to {green/yellow/red} based on minutes since."""
+    def _staleness(ts, crit: bool = True):
+        """Map a datetime to {green/yellow/red} by minutes since. For
+        non-critical components (crit=False) staleness caps at YELLOW — a stale
+        periodic sync or an overnight-held position is "degraded", not "down"."""
         if ts is None:
             return "yellow"
         try:
@@ -740,7 +743,7 @@ async def systems_check(
             return "yellow"
         if delta < 5: return "green"
         if delta < 30: return "yellow"
-        return "red"
+        return "red" if crit else "yellow"
 
     # ── scanners ────────────────────────────────────────────────────────
     theta_today = await _first(
@@ -762,11 +765,16 @@ async def systems_check(
         "ORDER BY picked_at DESC LIMIT 1"
     )
 
+    # A no-pick day is a VALID outcome, not a failure. GREEN if a pick fired, or
+    # the scanner cleanly stood down (Redis no-pick sentinel), or it is simply
+    # not done running yet (pre-9:25 ET / weekend). YELLOW only if the window has
+    # passed with no pick AND no clean stand-down record. NEVER falsely RED for
+    # "no setup today" — a real scanner crash surfaces in recent_errors instead.
+    _theta_pre_window = (et_now.weekday() >= 5) or (et_now.hour < 9) or (et_now.hour == 9 and et_now.minute < 25)
+    _theta_status = "green" if (theta_today or _theta_pre_window) else "yellow"  # no-pick after window = yellow (not red)
     scanners = {
         "theta_scanner": {
-            "status": "green" if theta_today else (
-                "yellow" if et_now.hour < 10 else "red"
-            ),
+            "status": _theta_status,
             "last_run_at": theta_today.picked_at.isoformat() if theta_today else None,
             "today_pick": theta_today.ticker if theta_today else None,
             "next_run_at": None,  # premarket scheduler-driven, not cron
@@ -859,7 +867,7 @@ async def systems_check(
             "active_sessions": int(paper_active),
         },
         "open_position_monitor": {
-            "status": _staleness(last_priced) if open_positions > 0 else "green",
+            "status": _staleness(last_priced, crit=False) if open_positions > 0 else "green",
             "last_check_at": last_priced.isoformat() if last_priced else None,
             "open_count": int(open_positions),
         },
@@ -909,12 +917,12 @@ async def systems_check(
 
     integrations = {
         "kyc_webhooks": {
-            "status": _staleness(kyc_last) if kyc_today > 0 else "yellow",
+            "status": _staleness(kyc_last, crit=False) if kyc_today > 0 else "yellow",
             "last_received_at": kyc_last.isoformat() if kyc_last else None,
             "today_count": int(kyc_today),
         },
         "broker_sync": {
-            "status": _staleness(broker_last) if broker_n > 0 else "yellow",
+            "status": _staleness(broker_last, crit=False) if broker_n > 0 else "yellow",
             "last_sync_at": broker_last.isoformat() if broker_last else None,
             "accounts": broker_n,
         },
@@ -1027,32 +1035,86 @@ async def systems_check(
         "last_health_check_at": now_utc.isoformat(),
     }
 
-    # ── overall ─────────────────────────────────────────────────────────
-    all_statuses = []
-    for section in (scanners, trading, integrations, infra):
-        for v in section.values():
-            if isinstance(v, dict) and "status" in v:
-                all_statuses.append(v["status"])
-    # Add email-section sub statuses too
-    for k in ("trade_alert_status", "futures_email_status",
-              "options_swing_status", "heartbeat_status"):
-        if k in emails:
-            all_statuses.append(emails[k])
+    # ── component metadata: checked_at + criticality + error list ───────
+    # CRITICAL components can turn the WHOLE dashboard red. Everything else is
+    # "degraded" at worst — its red contributes only YELLOW to the overall.
+    CRITICAL_KEYS = {"database", "redis", "email_provider"}
+    _now_iso = now_utc.isoformat()
+    _human = {
+        "theta_scanner": "Theta Scanner (stock pick)", "futures_scanner": "Futures scanner",
+        "options_scanner": "Options scanner", "live_trading": "Live trading", "paper_trading": "Paper trading",
+        "open_position_monitor": "Open-position monitor", "position_closing_job": "Position-closing job",
+        "kyc_webhooks": "KYC webhooks", "broker_sync": "Broker sync", "market_data": "Market data",
+        "stripe_webhook": "Stripe webhook", "email_provider": "Email provider (Resend)", "tradier_api": "Tradier API",
+        "database": "Database", "redis": "Redis", "queue": "Job queue", "scheduler": "Scheduler",
+    }
+    _manual = {
+        "email_provider": "RESEND_API_KEY missing/invalid in prod env, or Resend returning non-200. Verify the key + Resend account status.",
+        "database": "Postgres unreachable — check the edge_db container and DATABASE_URL.",
+        "redis": "Redis unreachable — check the edge_redis container and REDIS_URL.",
+        "stripe_webhook": "STRIPE_WEBHOOK_SECRET not set in prod env — add it so Stripe events verify.",
+        "market_data": "POLYGON_API_KEY not set — fallbacks (cache/yfinance) still work, but the primary provider is unconfigured.",
+        "tradier_api": "TRADIER_API_KEY not set — Tradier live execution is unavailable until configured.",
+    }
+    _fixable = {
+        "theta_scanner": "rerun_scanner_check", "open_position_monitor": "resync_positions",
+        "broker_sync": "resync_broker", "email_provider": "refresh_email_health",
+        "queue": "clear_stale_jobs", "redis": "refresh_health", "database": "refresh_health",
+        "market_data": "refresh_health",
+    }
+    errors = []
+    for _sname, _sect in (("scanners", scanners), ("trading", trading),
+                          ("integrations", integrations), ("infra", infra)):
+        for _k, _v in _sect.items():
+            if not (isinstance(_v, dict) and "status" in _v):
+                continue
+            _v.setdefault("checked_at", _now_iso)
+            _is_crit = _k in CRITICAL_KEYS
+            _v["critical"] = _is_crit
+            if _v["status"] in ("red", "yellow"):
+                _last_succ = (_v.get("last_run_at") or _v.get("last_sync_at")
+                              or _v.get("last_received_at") or _v.get("last_check_at"))
+                _affected = None
+                if _k == "email_provider" and last_failure:
+                    _affected = f"email to {last_failure.recipient}"
+                elif _k == "broker_sync":
+                    _affected = f"{broker_n} broker account(s)"
+                elif _k == "open_position_monitor":
+                    _affected = f"{open_positions} open position(s)"
+                _msg = {"red": "Critical: component down", "yellow": "Degraded / stale"}.get(_v["status"])
+                if _k == "email_provider" and last_failure and last_failure.error_message:
+                    _msg = (last_failure.error_message or _msg)[:200]
+                errors.append({
+                    "component": _k, "label": _human.get(_k, _k), "section": _sname,
+                    "severity": "critical" if (_is_crit and _v["status"] == "red") else "warning",
+                    "status": _v["status"], "message": _msg, "at": _now_iso,
+                    "affected": _affected, "last_success": _last_succ,
+                    "auto_fixable": _k in _fixable, "fix_action": _fixable.get(_k),
+                    "manual_instructions": _manual.get(_k),
+                })
+    _email_subs = ("trade_alert_status", "futures_email_status", "options_swing_status", "heartbeat_status")
 
-    worst = _systems_check_status(*all_statuses)
+    # ── overall (criticality-aware) ─────────────────────────────────────
+    _has_critical_red = any(e["severity"] == "critical" for e in errors)
+    _has_any_issue = bool(errors) or any(emails.get(k) in ("red", "yellow") for k in _email_subs)
+    worst = "red" if _has_critical_red else ("yellow" if _has_any_issue else "green")
     summary_map = {
         "green":  "All systems operating normally.",
-        "yellow": "Some subsystems are stale or degraded — review the cards below.",
-        "red":    "One or more critical subsystems are down — see flagged cards.",
+        "yellow": "Some subsystems are degraded or stale — review the flagged cards (non-critical).",
+        "red":    "A CRITICAL subsystem is down — see the flagged cards and Show Errors.",
         "unknown": "Status indeterminate.",
     }
     overall = {
         "status": worst,
         "summary": summary_map.get(worst, "Status indeterminate."),
+        "checked_at": _now_iso,
+        "error_count": len(errors),
+        "critical_count": sum(1 for e in errors if e["severity"] == "critical"),
     }
 
     return {
         "overall": overall,
+        "errors": errors,
         "scanners": scanners,
         "emails": emails,
         "trading": trading,
@@ -1062,6 +1124,74 @@ async def systems_check(
         "jobs_running": jobs_running,
         "metrics": metrics,
     }
+
+
+class _SCFixRequest(BaseModel):
+    action: str
+    component: Optional[str] = None
+
+
+@router.post("/systems-check/fix")
+async def systems_check_fix(
+    req: "_SCFixRequest",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run a SAFE auto-fix for a flagged System Check component. Admin-only.
+    Every attempt + outcome is logged; never performs destructive actions."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    action = (req.action or "").strip()
+    logger.info(f"[systems-check-fix] admin={current_user.email} action={action} component={req.component}")
+    ok = False; msg = ""; detail = {}
+    try:
+        if action in ("refresh_health", "refresh_email_health", "resync_positions"):
+            from app.engines.scanner_health import check_health
+            h = await check_health()
+            detail = {k: bool(v.get("ok")) for k, v in (h.get("components") or {}).items()}
+            ok = True
+            msg = ("Re-checked; open positions re-price on the monitor's next tick (~1 min)."
+                   if action == "resync_positions" else "Re-ran health check.")
+        elif action == "clear_stale_jobs":
+            r1 = await db.execute(text("UPDATE backtest_runs SET status='FAILED', completed_at=NOW(), "
+                "error_message='cleared via admin System Check (stale >1h)' "
+                "WHERE LOWER(status::text)='running' AND created_at < NOW() - INTERVAL '1 hour'"))
+            r2 = await db.execute(text("UPDATE optimization_runs SET status='FAILED', completed_at=NOW(), "
+                "error_message='cleared via admin System Check (stale >1h)' "
+                "WHERE LOWER(status::text)='running' AND created_at < NOW() - INTERVAL '1 hour'"))
+            await db.commit()
+            ok = True; msg = f"Cleared {r1.rowcount} stale backtest(s) + {r2.rowcount} stale optimization(s)."
+        elif action == "rerun_scanner_check":
+            from app.engines.options.theta_scanner import find_best_premarket_pick
+            pick = await find_best_premarket_pick(db)
+            ok = True
+            msg = (f"Re-ran Theta Scanner: pick={pick['ticker']}" if pick
+                   else "Re-ran Theta Scanner: no qualifying setup right now (valid — not an error).")
+        elif action == "resync_broker":
+            from app.api.routes.scanner import _refresh_broker_balance
+            rows = (await db.execute(text("SELECT DISTINCT user_id FROM broker_accounts WHERE is_active=true"))).fetchall()
+            n = 0
+            for _r in rows:
+                try:
+                    await _refresh_broker_balance(db, _r.user_id); n += 1
+                except Exception as _e:
+                    logger.warning(f"[systems-check-fix] broker resync user={_r.user_id} failed: {_e}")
+            ok = True; msg = f"Re-synced {n} active broker account owner(s)."
+        elif action in ("retry_admin_email", "test_heartbeat"):
+            from app.engines import scanner_health as _sh
+            try: _sh._LAST_HEARTBEAT_SENT = None
+            except Exception: pass
+            await _sh.send_daily_heartbeat()
+            ok = True; msg = "Sent heartbeat email to admin."
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown or unsafe action: {action!r}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[systems-check-fix] action={action} FAILED: {e}")
+        return {"ok": False, "action": action, "message": f"Fix attempt failed: {e}", "detail": {}}
+    logger.info(f"[systems-check-fix] action={action} ok={ok} msg={msg}")
+    return {"ok": ok, "action": action, "message": msg, "detail": detail}
 
 
 # ─────────────────────────────────────────────────────────────────────────

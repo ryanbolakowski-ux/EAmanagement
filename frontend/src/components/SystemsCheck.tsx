@@ -25,9 +25,16 @@ import {
 const API = ((import.meta as any).env?.VITE_API_URL || '') + '/api/v1/admin'
 
 type StatusColor = 'green' | 'yellow' | 'red' | 'unknown'
+type SCError = {
+  component: string; label: string; section: string
+  severity: 'critical' | 'warning'; status: string; message: string
+  at?: string; affected?: string | null; last_success?: string | null
+  auto_fixable: boolean; fix_action?: string | null; manual_instructions?: string | null
+}
 
 interface SystemsPayload {
-  overall: { status: StatusColor; summary: string }
+  overall: { status: StatusColor; summary: string; checked_at?: string; error_count?: number; critical_count?: number }
+  errors?: SCError[]
   scanners: Record<string, any>
   emails: Record<string, any>
   trading: Record<string, any>
@@ -232,6 +239,9 @@ export default function SystemsCheck({ token }: { token: string | null }) {
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [lastFetch, setLastFetch] = useState<Date | null>(null)
+  const [showErrors, setShowErrors] = useState(false)
+  const [fixBusy, setFixBusy] = useState<string | null>(null)
+  const [fixMsg, setFixMsg] = useState<Record<string, { ok: boolean; message: string }>>({})
 
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
 
@@ -247,6 +257,22 @@ export default function SystemsCheck({ token }: { token: string | null }) {
       setErr(e?.message || 'fetch failed')
     } finally { setLoading(false) }
   }, [token])
+
+  const runFix = useCallback(async (action: string) => {
+    if (!token) return
+    setFixBusy(action)
+    try {
+      const r = await fetch(API + '/systems-check/fix', {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      const j = await r.json()
+      setFixMsg(m => ({ ...m, [action]: { ok: !!j.ok, message: j.message || (r.ok ? 'Done' : `HTTP ${r.status}`) } }))
+      fetchData()
+    } catch (e: any) {
+      setFixMsg(m => ({ ...m, [action]: { ok: false, message: e?.message || 'fix failed' } }))
+    } finally { setFixBusy(null) }
+  }, [token, fetchData])
 
   useEffect(() => {
     fetchData()
@@ -288,10 +314,52 @@ export default function SystemsCheck({ token }: { token: string | null }) {
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
               {loading ? 'Refreshing…' : 'Refresh now'}
             </button>
+            {(data?.errors?.length ?? 0) > 0 && (
+              <button onClick={() => setShowErrors(v => !v)}
+                className="inline-flex items-center gap-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs px-3 py-2 rounded-xl">
+                {showErrors ? 'Hide' : 'Show'} Errors ({data?.errors?.length})
+              </button>
+            )}
           </div>
         </div>
         {err && <div className="mt-3 text-xs text-red-600 dark:text-red-400 font-mono">Error: {err}</div>}
       </div>
+
+      {/* Error detail / Fix panel */}
+      {showErrors && data?.errors && data.errors.length > 0 && (
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-4 space-y-3">
+          <div className="text-xs font-extrabold uppercase tracking-wider text-slate-500 dark:text-slate-400">Flagged components ({data.errors.length})</div>
+          {data.errors.map((e, idx) => (
+            <div key={idx} className={`rounded-xl border p-3 ${e.severity === 'critical' ? 'border-red-300 dark:border-red-700 bg-red-50/50 dark:bg-red-900/10' : 'border-amber-300 dark:border-amber-700 bg-amber-50/50 dark:bg-amber-900/10'}`}>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded ${e.severity === 'critical' ? 'bg-red-200 text-red-800 dark:bg-red-900/50 dark:text-red-300' : 'bg-amber-200 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300'}`}>{e.severity}</span>
+                  <span className="font-bold text-sm text-slate-800 dark:text-slate-100">{e.label}</span>
+                  <span className="text-[10px] text-slate-400">({e.component})</span>
+                </div>
+                {e.auto_fixable && e.fix_action && (
+                  <button onClick={() => runFix(e.fix_action!)} disabled={fixBusy === e.fix_action}
+                    className="inline-flex items-center gap-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white font-bold text-[11px] px-3 py-1.5 rounded-lg">
+                    {fixBusy === e.fix_action ? 'Fixing…' : 'Fix'}
+                  </button>
+                )}
+              </div>
+              <div className="text-xs text-slate-600 dark:text-slate-300 mt-1.5">{e.message}</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">
+                {e.affected && <span>Affected: {e.affected}</span>}
+                {e.at && <span>Detected: {new Date(e.at).toLocaleTimeString()}</span>}
+                {e.last_success && <span>Last OK: {new Date(e.last_success).toLocaleString()}</span>}
+              </div>
+              {e.manual_instructions && !e.auto_fixable && (
+                <div className="text-[11px] text-slate-600 dark:text-slate-300 mt-1.5 bg-slate-100 dark:bg-slate-800 rounded p-2"><b>To fix:</b> {e.manual_instructions}</div>
+              )}
+              {e.fix_action && fixMsg[e.fix_action] && (
+                <div className={`text-[11px] mt-1.5 font-mono ${fixMsg[e.fix_action].ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{fixMsg[e.fix_action].message}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Admin controls */}
       <ActionPanel token={token} />

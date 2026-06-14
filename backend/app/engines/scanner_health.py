@@ -26,6 +26,30 @@ ADMIN_HEARTBEAT_EMAIL: str = os.environ.get(
 
 
 
+# Only these being DOWN means the SYSTEM is down (critical). yfinance + polygon
+# have fallback feeds; a no-pick day is a valid outcome — those are DEGRADED only.
+CRITICAL_HEALTH_KEYS = {"redis", "resend", "database"}
+
+
+def apply_criticality(result: dict) -> dict:
+    """Tag each component critical/non-critical and recompute the aggregate:
+    result['ok'] = no CRITICAL component down (NOT "everything perfect");
+    result['degraded'] = any component (incl. non-critical) down. Pure + testable."""
+    critical_ok = True
+    degraded = False
+    for k, v in (result.get("components") or {}).items():
+        v["critical"] = k in CRITICAL_HEALTH_KEYS
+        if not v.get("ok"):
+            degraded = True
+            if v["critical"]:
+                critical_ok = False
+    result["ok"] = critical_ok
+    result["degraded"] = degraded
+    result["broken_critical"] = [k for k, v in result["components"].items() if v.get("critical") and not v.get("ok")]
+    result["broken_degraded"] = [k for k, v in result["components"].items() if not v.get("critical") and not v.get("ok")]
+    return result
+
+
 async def check_health(verbose: bool = False) -> dict:
     """Probe every layer of the scanner pipeline. Returns dict with per-component
     state + an aggregate ok bool. Designed to be called from both the HTTP
@@ -142,9 +166,67 @@ async def check_health(verbose: bool = False) -> dict:
     except Exception as e:
         result["components"]["theta_scanner_today"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
 
+    apply_criticality(result)  # tag critical/degraded + recompute aggregate ok
+
     global _LAST_HEALTH_CHECK
     _LAST_HEALTH_CHECK = result
     return result
+
+
+async def _health_alert_manager(health: dict) -> None:
+    """Critical-only, throttled, ADMIN-ONLY health alerts + recovery emails.
+    One alert per critical component per hour (Redis dedup). When a previously-
+    alerted component recovers, send a 'recovered' email and clear the flag."""
+    try:
+        import redis.asyncio as _ra
+        r = _ra.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    except Exception:
+        r = None
+    broken = set(health.get("broken_critical", []))
+    from app.engines.pipeline_alerts import send_pipeline_failure_alert
+    DASH = "https://thetaalgos.com/app/admin"
+    # newly-broken critical components (throttle 1/hour via SETNX)
+    for comp in broken:
+        already = False
+        if r is not None:
+            try:
+                already = not bool(await r.set(f"health:alert:{comp}", "1", ex=3600, nx=True))
+            except Exception:
+                already = False
+        if already:
+            continue
+        cv = health["components"].get(comp, {})
+        try:
+            await send_pipeline_failure_alert(
+                reason=f"CRITICAL: {comp} is down",
+                context={"job": "scanner_health.monitor", "component": comp,
+                         "error": cv.get("error") or "health check failed",
+                         "detected_at": health.get("ts"), "dashboard": DASH,
+                         "auto_fix_attempted": False, "severity": "critical"},
+            )
+            logger.error(f"[scanner-health] ADMIN ALERT sent (critical {comp})")
+        except Exception as e:
+            logger.error(f"[scanner-health] alert dispatch failed for {comp}: {e}")
+    # recovery: alert flags that exist but are no longer broken
+    if r is not None:
+        try:
+            for key in (await r.keys("health:alert:*")):
+                comp = key.split(":")[-1]
+                if comp not in broken:
+                    await r.delete(key)
+                    try:
+                        await send_pipeline_failure_alert(
+                            reason=f"RECOVERED: {comp} is healthy again",
+                            context={"job": "scanner_health.monitor", "component": comp,
+                                     "recovered_at": health.get("ts"), "dashboard": DASH,
+                                     "severity": "recovery"},
+                        )
+                        logger.info(f"[scanner-health] recovery alert sent ({comp})")
+                    except Exception:
+                        pass
+            await r.aclose()
+        except Exception:
+            pass
 
 
 async def send_daily_heartbeat():
@@ -245,10 +327,11 @@ async def run_health_monitor_loop():
         try:
             await send_daily_heartbeat()  # idempotent — only fires once per day
             health = await check_health()
-            if not health["ok"]:
-                # Build a terse log line; future iteration could SMS / Slack
-                broken = [k for k, v in health["components"].items() if not v.get("ok")]
-                logger.error(f"[scanner-health] PIPELINE DEGRADED — broken: {broken}")
+            await _health_alert_manager(health)   # critical-only, throttled, admin-only
+            if health.get("broken_critical"):
+                logger.error(f"[scanner-health] CRITICAL down: {health['broken_critical']}")
+            elif health.get("degraded"):
+                logger.warning(f"[scanner-health] degraded (non-critical, no alert): {health.get('broken_degraded')}")
         except Exception as e:
             logger.warning(f"[scanner-health] loop iteration failed: {e}")
             try:
