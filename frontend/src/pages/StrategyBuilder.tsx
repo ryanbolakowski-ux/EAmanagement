@@ -212,6 +212,8 @@ const emptyForm = {
   risk_reward_ratio: 2.5,
   stop_loss_type: 'structure',
   stop_loss_ticks: 8,
+  breakeven_mode: 'structure',
+  breakeven_at_r: 1.0,
   max_contracts: 1,
   session_filters: ['NY'] as string[],
   fvg_min_size_ticks: 4,
@@ -363,6 +365,8 @@ export default function StrategyBuilder() {
       higher_timeframes: s.higher_timeframes || ['1H', '4H'],
       risk_reward_ratio: s.risk_reward_ratio,
       stop_loss_type: s.stop_loss_type,
+      breakeven_mode: (s.breakeven_mode as string) || 'structure',
+      breakeven_at_r: s.breakeven_at_r ?? 1.0,
       stop_loss_ticks: s.stop_loss_ticks || 8,
       max_contracts: s.max_contracts || 1,
       session_filters: s.session_filters || [],
@@ -465,6 +469,8 @@ export default function StrategyBuilder() {
       risk_reward_ratio: form.risk_reward_ratio,
       stop_loss_type: form.stop_loss_type,
       stop_loss_ticks: form.stop_loss_type === 'ticks' ? form.stop_loss_ticks : undefined,
+      breakeven_mode: form.breakeven_mode,
+      breakeven_at_r: form.breakeven_at_r,
       max_contracts: form.max_contracts,
       session_filters: form.session_filters,
       fvg_min_size_ticks: form.fvg_min_size_ticks,
@@ -786,7 +792,7 @@ export default function StrategyBuilder() {
                     <div>
                       <h3 className="font-bold text-slate-900 text-sm dark:text-slate-100">{strat.name}</h3>
                       <div className="flex items-center gap-2 mt-1">
-                        <span className="badge badge-green">{strat.winRate} Win Rate</span>
+                        <span className="badge badge-grey" title="Illustrative range for the published setup — NOT a backtest of your data. Run a backtest to get the real win rate, which depends on your break-even setting.">~{strat.winRate} typical</span>
                         <span className="badge badge-blue">{strat.category}</span>
                         <span className="badge badge-grey">R:R {strat.rr}</span>
                       </div>
@@ -1050,6 +1056,28 @@ export default function StrategyBuilder() {
                         className="w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-800 dark:border-slate-700"/>
                     </div>
                   )}
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-2 dark:text-slate-300">Break-Even Management</label>
+                    <div className="flex gap-3">
+                      {([['structure','Structure'],['r','Fixed +R'],['off','Off']] as [string,string][]).map(([mode,lbl]) => (
+                        <button key={mode} type="button" onClick={() => setForm({...form, breakeven_mode: mode})}
+                          className={`flex-1 px-4 py-3 rounded-xl border text-sm font-medium transition-all ${ form.breakeven_mode === mode ? 'bg-blue-600 text-white border-blue-600 shadow-sm' : 'bg-white dark:bg-slate-800 text-slate-600 border-slate-200 hover:border-blue-300' } dark:text-slate-300 dark:border-slate-700`}>
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
+                    {form.breakeven_mode === 'r' && (
+                      <div className="mt-3">
+                        <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-1.5 dark:text-slate-300">Move to break-even at (R multiple)</label>
+                        <input type="number" step="0.5" min="0.5" value={form.breakeven_at_r} onChange={e => setForm({...form, breakeven_at_r: parseFloat(e.target.value) || 1})}
+                          className="w-full border border-slate-300 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-800 dark:border-slate-700"/>
+                      </div>
+                    )}
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">
+                      <b>Structure</b>: stop slides to entry once price breaks the prior swing — how these setups are actually managed. <b>Fixed +R</b>: move to break-even at a set R multiple. <b>Off</b>: always take the full stop (lowest win rate). Break-even exits count as scratches, not losses, in the win rate.
+                    </p>
+                  </div>
 
                   <div className="grid grid-cols-2 gap-4">
                     <div>

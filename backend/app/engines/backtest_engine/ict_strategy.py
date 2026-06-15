@@ -262,11 +262,13 @@ class ICTStrategy(BaseStrategy):
             if tp <= entry:
                 return None
 
+            be_trig = self._compute_breakeven_trigger(entry, tp, 'long', bars.get(etf), primary)
             return TradeSignal(
                 signal=SignalType.LONG, instrument=self.instrument,
                 entry_price=entry, stop_loss=sl, take_profit=tp,
                 contracts=self.config.max_contracts,
                 metadata={
+                    "breakeven_trigger": be_trig,
                     "bias": bias,
                     "fvg_type": entry_fvg.direction,
                     "fvg_high": entry_fvg.high,
@@ -295,11 +297,13 @@ class ICTStrategy(BaseStrategy):
             if tp >= entry:
                 return None
 
+            be_trig = self._compute_breakeven_trigger(entry, tp, 'short', bars.get(etf), primary)
             return TradeSignal(
                 signal=SignalType.SHORT, instrument=self.instrument,
                 entry_price=entry, stop_loss=sl, take_profit=tp,
                 contracts=self.config.max_contracts,
                 metadata={
+                    "breakeven_trigger": be_trig,
                     "bias": bias,
                     "fvg_type": entry_fvg.direction,
                     "fvg_high": entry_fvg.high,
@@ -759,6 +763,35 @@ class ICTStrategy(BaseStrategy):
         if direction == "long":
             return min(tp, entry + max_r)
         return max(tp, entry - max_r)
+
+    def _compute_breakeven_trigger(self, entry, tp, direction, exec_df, primary_df):
+        """Structure-based break-even trigger: the nearest PRIOR swing the trade
+        must break to confirm continuation (the user's "previous swing high/low =
+        possible reversal point"). For a long it's the local swing HIGH the
+        pullback came from (just above entry); breaking it = continuation, so the
+        stop slides to entry. Must sit strictly between entry and the target so it
+        can arm before TP. Returns a price, or None when no clean level exists."""
+        df = exec_df if (exec_df is not None and len(exec_df) >= 15) else primary_df
+        if df is None or len(df) < 10:
+            return None
+        recent = df.tail(40)
+        buf = 2 * self.tick_size
+        try:
+            if direction == "long":
+                highs = [sw.price for sw in find_swing_highs(recent, lookback=2)
+                         if sw.price > entry + buf]
+                cand = min(highs) if highs else None     # nearest above entry
+                if cand is not None and cand < (tp - buf):
+                    return float(cand)
+            else:
+                lows = [sw.price for sw in find_swing_lows(recent, lookback=2)
+                        if sw.price < entry - buf]
+                cand = max(lows) if lows else None        # nearest below entry
+                if cand is not None and cand > (tp + buf):
+                    return float(cand)
+        except Exception:
+            return None
+        return None
 
     def _compute_take_profit(self, entry, sl, direction, df, htf_df=None):
         """Structure-based take-profit.

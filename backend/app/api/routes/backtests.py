@@ -71,6 +71,10 @@ class BacktestRequest(BaseModel):
     risk_per_trade_pct: float = 1.0
     trailing_drawdown: float = 0.0
     daily_loss_limit: float = 0.0
+    # Optional per-run override of the strategy's break-even management.
+    # None -> use the strategy's configured breakeven_at_r.
+    breakeven_at_r: Optional[float] = None
+    breakeven_mode: Optional[str] = None
 
 
 class BacktestRunResponse(BaseModel):
@@ -149,6 +153,14 @@ async def run_backtest(
             "stop_loss_ticks": strategy.stop_loss_ticks,
             "fvg_min_size_ticks": strategy.fvg_min_size_ticks,
             "session_filters": strategy.session_filters,
+            "breakeven_at_r": (
+                data.breakeven_at_r if data.breakeven_at_r is not None
+                else (getattr(strategy, "breakeven_at_r", None) or 0.0)
+            ),
+            "breakeven_mode": (
+                data.breakeven_mode if data.breakeven_mode is not None
+                else (getattr(strategy, "breakeven_mode", None) or "off")
+            ),
         },
         status=BacktestStatus.QUEUED,
     )
@@ -363,6 +375,12 @@ async def _run_backtest_task(backtest_run_id: str):
 
                 all_tfs = list(set([config.primary_timeframe, config.execution_timeframe] + config.higher_timeframes))
 
+                _be_at_r = (run.strategy_params_snapshot or {}).get("breakeven_at_r")
+                if _be_at_r is None:
+                    _be_at_r = getattr(strategy_model, "breakeven_at_r", None) or 0.0
+                _be_mode = (run.strategy_params_snapshot or {}).get("breakeven_mode")
+                if _be_mode is None:
+                    _be_mode = getattr(strategy_model, "breakeven_mode", None) or "off"
                 bt_config = BacktestConfig(
                     instrument=run.instrument,
                     start_date=run.start_date,
@@ -375,6 +393,8 @@ async def _run_backtest_task(backtest_run_id: str):
                     risk_per_trade_pct=run.risk_per_trade_pct,
                     trailing_drawdown=run.trailing_drawdown,
                     daily_loss_limit=run.daily_loss_limit,
+                    breakeven_at_r=float(_be_at_r or 0.0),
+                    breakeven_mode=str(_be_mode or "off"),
                 )
 
                 run.progress = 40.0

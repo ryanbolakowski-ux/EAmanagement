@@ -40,6 +40,8 @@ export interface Strategy {
   higher_timeframes: string[]
   risk_reward_ratio: number
   stop_loss_type: 'ticks' | 'structure'
+  breakeven_mode?: string
+  breakeven_at_r?: number
   stop_loss_ticks: number
   max_contracts: number
   session_filters: string[]
@@ -62,6 +64,8 @@ export interface StrategyCreate {
   higher_timeframes: string[]
   risk_reward_ratio: number
   stop_loss_type: string
+  breakeven_mode?: string
+  breakeven_at_r?: number
   stop_loss_ticks?: number
   max_contracts: number
   session_filters: string[]

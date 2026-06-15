@@ -72,6 +72,14 @@ async def ensure_strategy_columns() -> None:
                 "ALTER TABLE strategies "
                 "ADD COLUMN IF NOT EXISTS max_open_positions INTEGER DEFAULT 1"
             ))
+            await db.execute(text(
+                "ALTER TABLE strategies "
+                "ADD COLUMN IF NOT EXISTS breakeven_at_r DOUBLE PRECISION DEFAULT 0.0"
+            ))
+            await db.execute(text(
+                "ALTER TABLE strategies "
+                "ADD COLUMN IF NOT EXISTS breakeven_mode VARCHAR(16) DEFAULT 'off'"
+            ))
             await db.commit()
         ensure_strategy_columns._done = True  # type: ignore[attr-defined]
     except Exception as e:

@@ -205,6 +205,7 @@ async def start_optimization(
     KNOWN_PARAMS = {
         "risk_reward_ratio", "stop_loss_ticks", "fvg_min_size_ticks",
         "primary_timeframe", "execution_timeframe", "stop_loss_type",
+        "breakeven_at_r",
     }
     unknown = [k for k in grid.keys() if k not in KNOWN_PARAMS]
     if unknown:
@@ -477,6 +478,8 @@ async def _run_optimization_task(run_id: str):
                 "fvg_max_size_ticks": strategy_model.fvg_max_size_ticks,
                 "max_daily_loss": strategy_model.max_daily_loss,
                 "max_trades_per_day": strategy_model.max_trades_per_day,
+                "breakeven_at_r": getattr(strategy_model, "breakeven_at_r", None),
+                "breakeven_mode": getattr(strategy_model, "breakeven_mode", None),
                 "rule_tree": strategy_model.rule_tree or {},
             }
             _df_records = df.reset_index().to_dict("list")

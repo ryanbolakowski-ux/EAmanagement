@@ -405,8 +405,12 @@ def compute_options_metrics(trades: list[OptionBacktestTrade], initial_capital: 
     gross_profit = sum(wins)
     gross_loss   = abs(sum(losses))
     net_profit   = sum(net_pnls)
-    win_rate     = len(wins) / len(trades) if trades else 0.0
-    effective_wr = len(wins) / (len(wins) + len(losses)) if (wins or losses) else 0.0
+    # Unify with the futures/optimizer definition via the canonical helper:
+    # win_rate counts break-even scratches as non-losses; effective excludes them.
+    from app.engines.backtest_engine.metrics import win_rate_stats
+    _wr = win_rate_stats(len(wins) + len(breakevens), len(losses), len(breakevens))
+    win_rate     = _wr["win_rate"]
+    effective_wr = _wr["effective_win_rate"]
 
     # Equity curve
     eq = initial_capital

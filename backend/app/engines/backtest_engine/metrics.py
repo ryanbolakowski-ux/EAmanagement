@@ -41,6 +41,46 @@ class BacktestMetricsResult:
     monthly_returns: dict = field(default_factory=dict)
 
 
+
+def win_rate_stats(winning_trades: int, losing_trades: int, breakeven_trades: int) -> dict:
+    """CANONICAL win-rate definitions — the SINGLE source of truth shared by every
+    metrics path (futures backtest, optimizer, options backtest). Keeping the math
+    in one place is what guarantees the strategy database, builder, optimizer and
+    backtest can never drift to different win-rate definitions.
+
+    Conventions (documented + asserted):
+      * `winning_trades` INCLUDES break-even exits — a scratch at entry is a
+        non-loss, so it rolls into wins for the headline win_rate.
+      * total              = winning_trades + losing_trades   (BE lives inside wins)
+      * win_rate           = winning_trades / total           (BE counts as a non-loss)
+      * effective_win_rate = real_wins / (real_wins + losses) (BE excluded entirely)
+        where real_wins = winning_trades - breakeven_trades.
+
+    The two rates answer different questions and BOTH are surfaced in the UI:
+      win_rate          -> "how often did I avoid a full loss?"  (BE = scratch)
+      effective_win_rate-> "of trades that fully resolved, how many hit target?"
+    """
+    winning_trades = int(winning_trades or 0)
+    losing_trades = int(losing_trades or 0)
+    breakeven_trades = int(breakeven_trades or 0)
+    # Invariants — break loudly rather than silently report inconsistent stats.
+    assert breakeven_trades >= 0 and winning_trades >= 0 and losing_trades >= 0
+    assert breakeven_trades <= winning_trades, (
+        f"breakeven_trades ({breakeven_trades}) cannot exceed winning_trades ({winning_trades})")
+    total = winning_trades + losing_trades
+    real_wins = winning_trades - breakeven_trades
+    decisive = real_wins + losing_trades
+    return {
+        "total_trades": total,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "breakeven_trades": breakeven_trades,
+        "real_wins": real_wins,
+        "win_rate": (winning_trades / total) if total else 0.0,
+        "effective_win_rate": (real_wins / decisive) if decisive else 0.0,
+    }
+
+
 def calculate_metrics(
     trades: list[dict],
     initial_capital: float = 100_000.0,
@@ -66,14 +106,15 @@ def calculate_metrics(
     wins       = [t for t in trades if t.get("is_winner")]
     losses     = [t for t in trades if not t.get("is_winner")]
 
-    m.winning_trades   = len(wins)  # includes BE
-    m.losing_trades    = len(losses)
-    m.breakeven_trades = len(breakevens)
-    m.win_rate         = m.winning_trades / m.total_trades if m.total_trades else 0.0
-    # 'Effective' WR excludes BE — useful as a more conservative read-out.
-    real_wins = m.winning_trades - m.breakeven_trades
-    decisive  = real_wins + m.losing_trades
-    m.effective_win_rate = (real_wins / decisive) if decisive else 0.0
+    # Route every win-rate number through the ONE canonical helper so the
+    # backtest, optimizer and options paths can never define win rate
+    # differently. (see win_rate_stats docstring for the conventions.)
+    _wr = win_rate_stats(len(wins), len(losses), len(breakevens))
+    m.winning_trades     = _wr["winning_trades"]   # includes BE
+    m.losing_trades      = _wr["losing_trades"]
+    m.breakeven_trades   = _wr["breakeven_trades"]
+    m.win_rate           = _wr["win_rate"]
+    m.effective_win_rate = _wr["effective_win_rate"]
 
     pnls = [t["net_pnl"] for t in trades]
     m.net_profit  = sum(pnls)

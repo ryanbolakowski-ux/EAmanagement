@@ -61,6 +61,9 @@ class SimulatedTrade:
     net_pnl: float = 0.0
     is_winner: bool = False
     exit_reason: str = ""
+    # Structure-based break-even trigger price (nearest prior swing the
+    # trade must break to confirm continuation). None = no structural BE.
+    be_trigger: Optional[float] = None
     conditions_snapshot: dict = field(default_factory=dict)
 
 
@@ -95,6 +98,8 @@ class BacktestConfig:
     # default added in ecba592 caused regression to 86% / 68%. Default
     # restored to OFF; opt-in by setting on the run config.
     breakeven_at_r: float = 0.0
+    # "off" | "r" (fixed R multiple) | "structure" (break a prior swing).
+    breakeven_mode: str = "off"
     # Apex-style trailing drawdown ($ from the equity peak). When the
     # current drawdown from peak crosses `half_size_drawdown_pct` of this
     # threshold, the runner halves the next trade's contract size. Set
@@ -208,6 +213,7 @@ class BacktestRunner:
                         contracts=contracts,
                         entry_time=timestamp.to_pydatetime(),
                         conditions_snapshot=signal.metadata,
+                        be_trigger=signal.metadata.get("breakeven_trigger"),
                     )
                     _risk_dollars = abs(entry - signal.stop_loss) / traded_tick_size * traded_tick_value * contracts
                     _risk_pct = (_risk_dollars / self._equity * 100.0) if self._equity > 0 else 0.0
@@ -329,17 +335,27 @@ class BacktestRunner:
         # slide the stop to entry. Trades that initially work and then
         # reverse exit at $0 instead of -1R — biggest WR booster in the
         # engine because it turns losers-that-tried into break-evens.
+        be_mode = getattr(self.config, "breakeven_mode", "off") or "off"
         be_r = self.config.breakeven_at_r
-        if be_r > 0 and not getattr(t, "_be_moved", False):
-            initial_risk = abs(t.entry_price - t.stop_loss)
-            if t.direction == "long":
-                trigger = t.entry_price + initial_risk * be_r
-                if bar["high"] >= trigger:
+        # Back-compat: a positive breakeven_at_r with no explicit mode = R-mode.
+        if be_mode == "off" and be_r > 0:
+            be_mode = "r"
+        if be_mode != "off" and not getattr(t, "_be_moved", False):
+            # Resolve ONE trigger price, whatever the mode, then arm BE when
+            # price reaches it. structure -> the prior swing the strategy
+            # attached; r -> a fixed R multiple from entry.
+            be_trigger = None
+            if be_mode == "structure":
+                be_trigger = getattr(t, "be_trigger", None)
+            elif be_mode == "r" and be_r > 0:
+                initial_risk = abs(t.entry_price - t.stop_loss)
+                be_trigger = (t.entry_price + initial_risk * be_r) if t.direction == "long" \
+                    else (t.entry_price - initial_risk * be_r)
+            if be_trigger is not None:
+                if t.direction == "long" and bar["high"] >= be_trigger:
                     t.stop_loss = t.entry_price
                     t._be_moved = True
-            else:
-                trigger = t.entry_price - initial_risk * be_r
-                if bar["low"] <= trigger:
+                elif t.direction == "short" and bar["low"] <= be_trigger:
                     t.stop_loss = t.entry_price
                     t._be_moved = True
 

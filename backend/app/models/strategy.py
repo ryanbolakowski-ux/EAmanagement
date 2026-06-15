@@ -45,6 +45,16 @@ class Strategy(Base):
     risk_reward_ratio: Mapped[float] = mapped_column(default=2.0)
     stop_loss_type: Mapped[str] = mapped_column(String(20), default="structure")  # "ticks" or "structure"
     stop_loss_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Break-even management: once price runs this many R in our favour, the
+    # stop slides to entry. 0.0 = off. This is part of the strategy DEFINITION
+    # so the backtest, optimizer and live paths all model the SAME management
+    # the trader actually uses — the single biggest driver of win rate.
+    # (No explicit Float type: SQLAlchemy infers it from Mapped[float], matching
+    # risk_reward_ratio above and avoiding an import assumption.)
+    breakeven_at_r: Mapped[float | None] = mapped_column(nullable=True, default=0.0)
+    # "off" | "r" (fixed R multiple) | "structure" (move to break-even when a
+    # prior swing breaks — the way these setups are actually managed).
+    breakeven_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, default="off")
     max_contracts: Mapped[int] = mapped_column(Integer, default=1)
 
     # Session filter

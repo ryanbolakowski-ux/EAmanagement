@@ -55,10 +55,14 @@ def run_combo(idx, params, strat, start_date, end_date):
         config.rule_tree = strat.get("rule_tree") or {}  # carries engine_version v1/v2
         strategy = ICTStrategy(config, instrument=inst)
         all_tfs = list(set([config.primary_timeframe, config.execution_timeframe] + (config.higher_timeframes or [])))
+        _be = params.get("breakeven_at_r", strat.get("breakeven_at_r"))
+        _be_mode = params.get("breakeven_mode", strat.get("breakeven_mode")) or "off"
         bt = BacktestConfig(
             instrument=inst, start_date=start_date, end_date=end_date,
             primary_timeframe=config.primary_timeframe, all_timeframes=all_tfs,
             initial_capital=100000, commission_per_side=2.50, slippage_ticks=1,
+            breakeven_at_r=float(_be if _be is not None else 0.0),
+            breakeven_mode=str(_be_mode),
         )
         m = BacktestRunner(strategy, dh, bt).run()
         return idx, {
