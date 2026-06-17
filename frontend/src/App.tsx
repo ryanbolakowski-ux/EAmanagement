@@ -7,6 +7,7 @@ import NotAvailable from './pages/NotAvailable'
 import Kyc from './pages/Kyc'
 import Profile from './pages/Profile'
 import Pricing from './pages/Pricing'
+import SignalReview from './pages/SignalReview'
 import Dashboard from './pages/Dashboard'
 import StrategyBuilder from './pages/StrategyBuilder'
 import BiasDetail from './pages/BiasDetail'
@@ -161,6 +162,7 @@ export default function App() {
         <Route path="prop-firms" element={<PropFirms />} />
         <Route path="account-signals" element={<AccountSignals />} />
         <Route path="email-signals" element={<AccountSignals />} />
+        <Route path="signals/:id/review" element={<SignalReview />} />
         <Route path="options" element={<Options />} />
         <Route path="options/sessions" element={<OptionsSessions />} />
         <Route path="options/sessions/:id" element={<OptionsSessionDetail />} />

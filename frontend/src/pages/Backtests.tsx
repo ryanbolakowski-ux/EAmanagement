@@ -11,6 +11,8 @@ const STATUS_COLORS: Record<string, string> = {
   running: 'badge-amber',
   failed: 'badge-red',
   queued: 'badge-grey',
+  recovering: 'badge-blue',
+  resumed: 'badge-amber',
   cancelled: 'bg-slate-100 text-slate-500'}
 
 /**
@@ -100,15 +102,20 @@ function OptimizePrompt({ selectedRun, baselineMetrics }: { selectedRun: any; ba
     const etaTxt = (etaS == null) ? null : (etaS < 60 ? `~${Math.round(etaS)}s left` : `~${Math.round(etaS/60)} min left`)
     const done = optRun?.completed_combinations || 0
     const total = optRun?.total_combinations || 48
+    const _ost = (optRun?.status || '').toLowerCase()
+    const recovering = _ost === 'recovering' || _ost === 'resumed'
     return (
       <div className="rounded-2xl border border-violet-300 dark:border-violet-700 bg-violet-50 dark:bg-violet-950/30 p-5">
         <div className="flex items-center gap-3 mb-2">
           <div className="inline-block w-5 h-5 border-2 border-violet-600 border-r-transparent rounded-full animate-spin"/>
-          <div className="font-bold text-slate-900 dark:text-slate-100">Optimizing… {prog.toFixed(0)}%{etaTxt ? <span className="font-normal text-slate-500"> · {etaTxt}</span> : null}</div>
+          <div className="font-bold text-slate-900 dark:text-slate-100">{recovering ? 'Recovering after restart…' : 'Optimizing…'} {prog.toFixed(0)}%{etaTxt ? <span className="font-normal text-slate-500"> · {etaTxt}</span> : null}</div>
         </div>
         <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden mb-2">
           <div className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${Math.max(2, prog)}%` }}/>
         </div>
+        {recovering && (
+          <div className="text-[11px] text-blue-700 dark:text-blue-300 mb-1 font-semibold">Your run wasn’t lost — it’s resuming from the last saved checkpoint and only re-running the unfinished combos.</div>
+        )}
         <div className="text-[11px] text-slate-500 dark:text-slate-400">
           {done} of {total} combos done · running in parallel across CPU cores. {done === 0 ? 'Warming up — the first result takes a few minutes on a long date range (a year ≈ 3 min/combo); this is working, not stuck.' : 'Feel free to leave this tab open.'}
         </div>
