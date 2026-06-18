@@ -42,6 +42,8 @@ services:
       - ./backend/.env
     environment:
       FRONTEND_URL: https://thetaalgos.com
+      APP_ENV: production   # echo=False (was defaulting to development -> SQL echo spam)
+      THETA_AUTO_PAPER_ENABLED: "1"   # #27: auto paper-trade the daily Theta pick
     ports:
       - "127.0.0.1:8000:8000"   # backend: nginx proxies, no need for public bind
     volumes:

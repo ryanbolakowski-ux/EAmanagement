@@ -315,18 +315,27 @@ class PaperTrader:
         """Return the number of contracts to trade given the stop distance and
         the user's risk budget. Mirrors the backtest engine's sizing so paper
         and backtest stay consistent. Zero means the account is too small to
-        risk even one contract — caller should fall back to micro or skip."""
-        stop_dist_ticks = abs(entry - stop) / tick_size
-        if stop_dist_ticks <= 0:
+        risk even one contract — caller should fall back to micro or skip.
+
+        Sizing math delegates to the unified min-of sizer (#136). A futures
+        engine's loss_per_unit = (|entry-stop|/tick_size)*tick_value maps to
+        point_value = tick_value/tick_size; commission_per_unit is one-way
+        (unified_size applies the round-trip 2x), and the two caps fold into a
+        single max_units ceiling. Behaviour is unchanged."""
+        from app.core.sizing import unified_size
+        if tick_size <= 0:
             return 0
-        loss_per_contract = stop_dist_ticks * tick_value + (self.commission * 2)
-        if loss_per_contract <= 0:
-            return 0
-        risk_dollars = self._equity * (self._risk_per_trade_pct / 100.0)
-        if risk_dollars <= 0:
-            return 0
-        raw = int(risk_dollars // loss_per_contract)
-        return max(0, min(raw, strategy_cap, self._max_contracts_cap))
+        res = unified_size(
+            entry_price=entry,
+            stop_loss=stop,
+            point_value=tick_value / tick_size,
+            risk_per_trade_pct=self._risk_per_trade_pct,
+            account_equity=self._equity,
+            max_units=min(strategy_cap, self._max_contracts_cap),
+            commission_per_unit=self.commission,
+            symbol="paper-futures",
+        )
+        return res.final_size
 
     def _pick_contract_size_with_micro(self, entry: float, stop: float,
                                         configured_instrument: str,

@@ -207,19 +207,37 @@ class LiveTrader:
                 await self._cancel_bracket_and_close(price, ExitReason.TP_HIT)
 
     def _pick_contract_size(self, entry, stop, tick_size, tick_value, cap):
-        """Risk-based size: never risk more than 1% of starting equity (or
-        $100, whichever is greater) on a single trade. Conservative default
-        for live trading."""
+        """Risk-based size via the shared unified_size module (#136).
+
+        Sizes by the user's account risk settings when wired through
+        (``_risk_per_trade_usd`` / ``_risk_per_trade_pct`` / ``_equity``,
+        set by the live runner from the BrokerAccount). When NONE of those
+        are present we fall back to the historical conservative default of
+        $200 fixed risk per trade so behaviour is unchanged for unwired
+        sessions. Caller handles a 0 return (mini->micro fallback)."""
         if entry == stop or tick_size <= 0 or tick_value <= 0:
             return 0
-        risk_per_contract = abs(entry - stop) / tick_size * tick_value
-        if risk_per_contract <= 0:
-            return 0
-        # Default $200 dollar-risk per trade for live. Override via
-        # self.session_risk_per_trade if you wire it through.
-        max_risk = getattr(self, "session_risk_per_trade", 200.0)
-        sized = int(max_risk // risk_per_contract)
-        return max(0, min(cap, sized))
+        from app.core.sizing import unified_size
+
+        risk_usd = getattr(self, "_risk_per_trade_usd", None)
+        risk_pct = getattr(self, "_risk_per_trade_pct", None)
+        equity   = getattr(self, "_equity", None)
+        # Conservative fallback: when the account risk settings aren't wired
+        # through, use the legacy $200 fixed-risk default (unchanged behaviour).
+        if risk_usd is None and risk_pct is None and equity is None:
+            risk_usd = getattr(self, "session_risk_per_trade", 200.0)
+
+        res = unified_size(
+            entry_price=entry,
+            stop_loss=stop,
+            point_value=tick_value / tick_size,
+            commission_per_unit=0.0,
+            max_units=cap,
+            risk_per_trade_usd=risk_usd,
+            risk_per_trade_pct=risk_pct,
+            account_equity=equity,
+        )
+        return max(0, res.final_size)
 
     def _pick_contract_size_with_micro(self, entry, stop, configured_instrument, cap):
         """Mirror of paper_trader._pick_contract_size_with_micro — sizes on

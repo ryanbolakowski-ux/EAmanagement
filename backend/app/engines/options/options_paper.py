@@ -18,6 +18,7 @@ from loguru import logger
 from app.engines.options.pricing import greeks, price as bs_price
 from app.engines.options.polygon_options import OptionContract
 from app.engines.options.strike_picker import pick_strike, StrikePick
+from app.core.sizing import unified_size
 
 # Risk-free rate assumed for all pricing (FRED 3-month T-bill, refresh quarterly)
 RISK_FREE_RATE = 0.045
@@ -104,21 +105,38 @@ class OptionsPaperTrader:
     # ── Sizing ──────────────────────────────────────────────────────────────
 
     def _size_position(self, entry_premium: float) -> int:
-        """Risk-based contract sizing.
+        """Risk-based contract sizing — delegates to unified_size (#136).
 
-        Per-contract max loss ≈ premium × 100 × (stop_loss_pct / 100).
-        contracts = floor(equity × risk% / loss_per_contract)
-        Bounded to >= 0; caller should skip on 0."""
+        Per-contract max loss = premium × 100 × (stop_loss_pct / 100) plus
+        round-trip commission. There is no contract cap in this engine
+        (max_units=None). Bounded to >= 0; caller skips on 0. See the inline
+        comment below for why the unified_size mapping uses a unit price
+        distance + point_value-as-loss instead of the naive option mapping
+        (bit-for-bit equivalence at break-even boundaries)."""
         if entry_premium <= 0:
             return 0
-        loss_per_contract = entry_premium * 100 * (self._stop_loss_pct / 100.0) + (self.commission * 2)
-        if loss_per_contract <= 0:
-            return 0
-        risk_dollars = self._equity * (self._risk_per_trade_pct / 100.0)
-        if risk_dollars <= 0:
-            return 0
-        n = int(risk_dollars // loss_per_contract)
-        return max(0, n)
+        # Exact mapping to unified_size. The natural option mapping
+        # (stop=premium*(1-pct), point_value=100) recomputes risk-per-unit as
+        # |entry-stop|*100, which differs from the legacy
+        #   loss_per_contract = premium*100*(stop_pct/100) + 2*commission
+        # by one float ULP — enough to flip the contract count at exact
+        # break-even boundaries (money-critical). To reproduce the legacy
+        # number bit-for-bit, we feed a UNIT price distance (entry 2, stop 1 ->
+        # |2-1| == 1.0 exactly) and fold the full per-contract loss into
+        # point_value, so risk_per_unit == point_value + 2*commission ==
+        # legacy loss_per_contract exactly.
+        loss_per_contract_ex_comm = entry_premium * 100 * (self._stop_loss_pct / 100.0)
+        res = unified_size(
+            entry_price=2.0,
+            stop_loss=1.0,
+            point_value=loss_per_contract_ex_comm,
+            risk_per_trade_pct=self._risk_per_trade_pct,
+            account_equity=self._equity,
+            max_units=None,
+            commission_per_unit=self.commission,
+            symbol=self.underlying,
+        )
+        return max(0, res.final_size)
 
     # ── Lifecycle ───────────────────────────────────────────────────────────
 

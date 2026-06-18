@@ -98,13 +98,21 @@ def _next_market_open_et() -> datetime:
 async def _compute_qty_from_sizing(*, broker_account_id, ticker: str, entry: float,
                                      stop: float, default: int = 100) -> int:
     """Compute share quantity for a stock pick from the broker account's
-    saved sizing rules. Honors account_type (cash vs margin) for BP cap."""
+    saved sizing rules. Honors account_type (cash vs margin) for BP cap.
+
+    Migrated to delegate the core min-of size math to
+    app.core.sizing.unified_size (#136). Two edge behaviours are preserved
+    exactly: (1) a missing/invalid stop defaults to a 2% per-share risk, and
+    (2) a valid pick never sizes to 0 — the final max(1, shares) emergency
+    fallback keeps at least 1 share once we have a real risk basis.
+    """
     if not broker_account_id:
         return max(1, default)
     try:
         from app.database import async_session_factory as _asf
         from app.models.user import BrokerAccount as _BA
         from sqlalchemy import select as _sel
+        from app.core.sizing import unified_size
         async with _asf() as _db:
             acct = (await _db.execute(_sel(_BA).where(_BA.id == broker_account_id))).scalar_one_or_none()
         if not acct:
@@ -118,26 +126,49 @@ async def _compute_qty_from_sizing(*, broker_account_id, ticker: str, entry: flo
         if not risk_usd or risk_usd <= 0:
             return max(1, default)
 
-        per_share_risk = abs(entry - stop) if (stop and stop > 0) else (entry * 0.02)
-        if per_share_risk <= 0:
+        # Preserve the default-2%-stop-when-missing edge behaviour by mapping a
+        # missing/invalid stop to an effective stop that yields the same
+        # per-share risk (entry * 0.02) under unified_size's point_value=1.
+        if stop and stop > 0:
+            eff_stop = stop
+        else:
+            eff_stop = entry * (1.0 - 0.02)
+        if abs(entry - eff_stop) <= 0:
             return max(1, default)
 
-        shares = int(risk_usd // per_share_risk)
-        position_usd = shares * entry
-
-        if acct.max_position_usd and position_usd > acct.max_position_usd:
-            shares = int(acct.max_position_usd // entry)
-            position_usd = shares * entry
-
+        # Capital cap mapping: the OLD code applied the buying-power cap to all
+        # accounts, then ALSO applied a cash cap (cached_equity or bp) for cash
+        # accounts. unified_size applies a single capital cap chosen by
+        # account_type, so fold both into the relevant slot as the tighter one.
         bp = acct.cached_buying_power or 0.0
-        if bp > 0 and position_usd > bp:
-            shares = int(bp // entry)
+        is_cash = (acct.account_type or "cash").lower() == "cash"
+        if is_cash:
+            cash = (acct.cached_equity or bp)
+            caps = [c for c in (bp if bp > 0 else None, cash if cash else None) if c]
+            eff_cash = min(caps) if caps else None
+            res = unified_size(
+                entry_price=entry,
+                stop_loss=eff_stop,
+                risk_per_trade_usd=risk_usd,
+                account_equity=acct.cached_equity,
+                max_position_usd=acct.max_position_usd,
+                cached_cash=eff_cash,
+                account_type="cash",
+                point_value=1.0,
+            )
+        else:
+            res = unified_size(
+                entry_price=entry,
+                stop_loss=eff_stop,
+                risk_per_trade_usd=risk_usd,
+                account_equity=acct.cached_equity,
+                max_position_usd=acct.max_position_usd,
+                cached_buying_power=(bp if bp > 0 else None),
+                account_type="margin",
+                point_value=1.0,
+            )
 
-        if (acct.account_type or "cash").lower() == "cash":
-            cash = acct.cached_equity or bp
-            if cash and shares * entry > cash:
-                shares = int(cash // entry)
-
+        shares = res.final_size
         return max(1, shares) if shares >= 1 else 0
     except Exception as e:
         from loguru import logger as _lg

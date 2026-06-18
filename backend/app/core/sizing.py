@@ -116,6 +116,8 @@ def unified_size(
         cons.append(Constraint("max_position_usd", max_position_usd, max_position_usd / notional_per_unit))
     if max_units is not None and max_units > 0:
         cons.append(Constraint("max_units", float(max_units), float(max_units)))
+    elif max_units is not None and max_units <= 0:
+        cons.append(Constraint("max_units", float(max_units), 0.0))  # cap of 0/neg = hard zero
     # Capital: cash account is bounded by cash; margin by buying power.
     if account_type == "cash" and cached_cash is not None and cached_cash > 0 and notional_per_unit > 0:
         cons.append(Constraint("cash", cached_cash, cached_cash / notional_per_unit))

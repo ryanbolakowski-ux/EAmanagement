@@ -85,6 +85,19 @@ async def _run_session(session_id, strategy_id, user_id, broker_account_id, inst
             strategy_id=strategy_id,
             broker_account_id=broker_account_id,
         )
+        # Wire the account's risk settings into the trader so live sizing uses
+        # the user's configured risk-per-trade (falls back to the $200 default
+        # inside _pick_contract_size when none are set). Additive: only set an
+        # attribute when the BrokerAccount actually exposes that field.
+        _ru = getattr(acct_row, "risk_per_trade_usd", None)
+        _rp = getattr(acct_row, "risk_per_trade_pct", None)
+        _eq = getattr(acct_row, "cached_equity", None)
+        if _ru is not None:
+            trader._risk_per_trade_usd = _ru
+        if _rp is not None:
+            trader._risk_per_trade_pct = _rp
+        if _eq is not None:
+            trader._equity = _eq
         trader._is_running = True
         _active_live_traders[f"{session_id}:{instrument}"] = trader
         logger.info(f"[LiveRunner] Started session {session_id} | {instrument}")
