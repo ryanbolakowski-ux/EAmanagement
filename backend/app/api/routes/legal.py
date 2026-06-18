@@ -156,6 +156,10 @@ class AcknowledgmentResponse(BaseModel):
     ip_address: Optional[str]
 
 
+# Kinds that notify the admin/owner when newly signed.
+NOTIFY_ON_SIGN = {"fully_automated_trading"}
+
+
 @router.post("/acknowledge", response_model=AcknowledgmentResponse, status_code=status.HTTP_201_CREATED)
 async def record_acknowledgment(
     data: AcknowledgmentCreate,
@@ -163,11 +167,46 @@ async def record_acknowledgment(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """ACK-IDEMPOTENT-NOTIFY-V1. Records a current-version acknowledgment ONCE
+    (re-signing the same version returns the existing row, never duplicates and
+    never re-fires admin notifications). On a NEW signing of an automation
+    agreement, stores a rich audit record and emails the admin/owner."""
+    import hashlib, json as _json
     version = CURRENT_VERSIONS.get(data.kind, "v1")
-    aid = uuid.uuid4()
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
     now = datetime.now(timezone.utc)
+
+    # ── Idempotency: already accepted THIS version? return it untouched. ──
+    existing = (await db.execute(text("""
+        SELECT id, agreed_at, ip_address, detail FROM user_acknowledgments
+         WHERE user_id = :uid AND kind = :kind AND content_version = :ver
+         ORDER BY agreed_at ASC LIMIT 1
+    """), {"uid": str(current_user.id), "kind": data.kind, "ver": version})).fetchone()
+    if existing:
+        return AcknowledgmentResponse(
+            id=str(existing.id), kind=data.kind, content_version=version,
+            detail=existing.detail if existing.detail is not None else data.detail,
+            agreed_at=existing.agreed_at.isoformat() if existing.agreed_at else now.isoformat(),
+            ip_address=existing.ip_address,
+        )
+
+    # ── New signing: enrich the stored record with audit context. ──
+    doc = get_document(data.kind) or {}
+    text_hash = hashlib.sha256((doc.get("html") or "").encode("utf-8")).hexdigest()
+    plan = current_user.subscription_tier.value if hasattr(current_user.subscription_tier, "value") else str(current_user.subscription_tier)
+    acct_row = (await db.execute(text(
+        "SELECT id, trading_enabled FROM broker_accounts WHERE user_id = :uid ORDER BY created_at ASC LIMIT 1"
+    ), {"uid": str(current_user.id)})).fetchone()
+    account_id = str(acct_row[0]) if acct_row else None
+    trading_enabled = bool(acct_row[1]) if acct_row and acct_row[1] is not None else None
+    enriched = {
+        "user_text": data.detail, "plan": plan, "version": version,
+        "text_sha256": text_hash, "account_id": account_id,
+        "account_trading_enabled": trading_enabled, "signed_at": now.isoformat(),
+        "ip": ip, "user_agent": ua,
+    }
+    aid = uuid.uuid4()
     await db.execute(text("""
         INSERT INTO user_acknowledgments
             (id, user_id, kind, content_version, detail, ip_address, user_agent, agreed_at)
@@ -175,10 +214,43 @@ async def record_acknowledgment(
             (:id, :uid, :kind, :ver, :detail, :ip, :ua, :now)
     """), {
         "id": str(aid), "uid": str(current_user.id),
-        "kind": data.kind, "ver": version, "detail": data.detail,
+        "kind": data.kind, "ver": version, "detail": _json.dumps(enriched),
         "ip": ip, "ua": ua, "now": now,
     })
     await db.commit()
+
+    # ── Admin/owner notification + audit for automation agreements only. ──
+    if data.kind in NOTIFY_ON_SIGN:
+        try:
+            from app.api.routes.security import (
+                audit_log as _audit, notify_admins_security as _notify,
+                EVENT_AGREEMENT_ACCEPTED,
+            )
+            await _audit(db, current_user.id, EVENT_AGREEMENT_ACCEPTED, {
+                "kind": data.kind, "version": version, "plan": plan,
+                "account_id": account_id, "text_sha256": text_hash,
+            }, request)
+            await db.commit()
+            html = (
+                f"<p><b>{current_user.email}</b> signed the <b>{doc.get('title', data.kind)}</b> "
+                f"({version}).</p><ul>"
+                f"<li>User: {current_user.email} (id {current_user.id})</li>"
+                f"<li>Plan/package: {plan}</li>"
+                f"<li>Broker account: {account_id or '—'}</li>"
+                f"<li>Agreement version: {version}</li>"
+                f"<li>Agreement hash (sha256): {text_hash}</li>"
+                f"<li>Signed at: {now.isoformat()}</li>"
+                f"<li>Automation (account trading_enabled): {trading_enabled}</li>"
+                f"<li>IP: {ip or '—'}</li>"
+                f"<li>Device: {ua or '—'}</li></ul>"
+            )
+            await _notify(f"Automation agreement signed by {current_user.email}", html)
+            import loguru
+            loguru.logger.info(f"[automation-agreement] signed user={current_user.id} plan={plan} ver={version} account={account_id}")
+        except Exception as _e:
+            import loguru
+            loguru.logger.warning(f"[automation-agreement] notify failed user={current_user.id}: {_e}")
+
     return AcknowledgmentResponse(
         id=str(aid), kind=data.kind, content_version=version,
         detail=data.detail, agreed_at=now.isoformat(), ip_address=ip,
@@ -232,20 +304,22 @@ async def get_my_ack_status(
     missing. Frontend uses this to know whether to show the modal before
     enabling live trading / options."""
     r = await db.execute(text("""
-        SELECT kind, content_version
+        SELECT kind, content_version, max(agreed_at) AS accepted_at
           FROM user_acknowledgments
          WHERE user_id = :uid
-        ORDER BY agreed_at DESC
+         GROUP BY kind, content_version
     """), {"uid": str(current_user.id)})
-    have: dict[str, set] = {}
+    have: dict[str, dict] = {}
     for row in r.fetchall():
-        have.setdefault(row.kind, set()).add(row.content_version)
+        have.setdefault(row.kind, {})[row.content_version] = row.accepted_at
 
     status_map = {}
     for kind, current_ver in CURRENT_VERSIONS.items():
+        at = have.get(kind, {}).get(current_ver)
         status_map[kind] = {
             "current_version": current_ver,
-            "accepted": current_ver in have.get(kind, set()),
+            "accepted": at is not None,
+            "accepted_at": at.isoformat() if at else None,
         }
     return {"acknowledgments": status_map}
 

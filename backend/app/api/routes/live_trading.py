@@ -258,6 +258,11 @@ async def set_account_trading_enabled(
 
     # Live-trading consent gate — only when *enabling* (turning off doesn't
     # need consent; that always works as a safety release).
+    # AUTOMATION-TOGGLE-NOTIFY-V1
+    _plan = current_user.subscription_tier.value if hasattr(current_user.subscription_tier, "value") else str(current_user.subscription_tier)
+    import datetime as _dtm
+    _when = _dtm.datetime.now(_dtm.timezone.utc).isoformat()
+    from loguru import logger as _lg_at
     if data.trading_enabled and not account.sandbox_mode:
         await require_current_ack(db, current_user.id, "live_trading_consent")
         await require_current_ack(db, current_user.id, "risk_disclosure")
@@ -267,12 +272,20 @@ async def set_account_trading_enabled(
             await require_current_ack(db, current_user.id, "fully_automated_trading")
             await require_recent_verification(db, current_user.id, "enable_automation")
         await audit_log(db, current_user.id, EVENT_AUTOMATION_ENABLED,
-                        {"account_id": str(account.id), "broker": account.broker}, request)
-        await notify_admins_security("Automated trading ENABLED",
-            f"{current_user.email} enabled automation on {account.broker} account {account.id}.")
+                        {"account_id": str(account.id), "broker": account.broker, "plan": _plan}, request)
+        await notify_admins_security("Automated trading ENABLED", (
+            f"<p><b>{current_user.email}</b> ENABLED automated trading.</p><ul>"
+            f"<li>Plan/package: {_plan}</li><li>Broker: {account.broker}</li>"
+            f"<li>Account: {account.id}</li><li>When: {_when}</li></ul>"))
+        _lg_at.info(f"[automation-toggle] ON user={current_user.id} plan={_plan} account={account.id}")
     elif not data.trading_enabled:
         await audit_log(db, current_user.id, EVENT_AUTOMATION_DISABLED,
-                        {"account_id": str(account.id)}, request)
+                        {"account_id": str(account.id), "plan": _plan}, request)
+        await notify_admins_security("Automated trading DISABLED", (
+            f"<p><b>{current_user.email}</b> DISABLED automated trading.</p><ul>"
+            f"<li>Plan/package: {_plan}</li><li>Account: {account.id}</li>"
+            f"<li>When: {_when}</li></ul>"))
+        _lg_at.info(f"[automation-toggle] OFF user={current_user.id} plan={_plan} account={account.id}")
 
     account.trading_enabled = data.trading_enabled
     await db.commit()
@@ -1930,3 +1943,95 @@ async def sizing_preview(
         "stop": float(stop),
         "per_account": per_account,
     }
+
+
+# ── UNIFIED-SIZING-PREVIEW-V1 (#136) ─────────────────────────────────────────
+_FUTURES_POINT_VALUE = {"ES": 50, "NQ": 20, "RTY": 50, "YM": 5,
+                        "MES": 5, "MNQ": 2, "M2K": 5, "MYM": 0.5}
+
+
+class PreEntryPreviewRequest(BaseModel):
+    ticker: str
+    entry: float
+    stop: float
+    take_profit: Optional[float] = None
+    allocation_usd: Optional[float] = None
+    risk_per_trade_usd: Optional[float] = None
+    risk_per_trade_pct: Optional[float] = None
+    max_position_usd: Optional[float] = None
+    max_units: Optional[int] = None
+    broker_account_id: Optional[str] = None
+    instrument_type: str = "stock"   # stock | future | option
+    point_value: Optional[float] = None
+
+
+@router.post("/pre-entry-preview")
+async def pre_entry_preview(
+    data: PreEntryPreviewRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read-only pre-entry preview: shows exactly what would be placed (size,
+    notional, $risk, which constraint binds, SL/TP P&L, R:R) via the shared
+    min-of unified_size(). Places NO order and changes no engine sizing."""
+    from app.core.sizing import unified_size, rr_ratio
+    cash = bp = equity = None
+    acct_type = "margin"
+    if data.broker_account_id:
+        acct = (await db.execute(select(BrokerAccount).where(
+            BrokerAccount.id == data.broker_account_id,
+            BrokerAccount.user_id == current_user.id))).scalar_one_or_none()
+        if acct:
+            cash = getattr(acct, "cached_cash", None)
+            bp = getattr(acct, "cached_buying_power", None)
+            equity = getattr(acct, "cached_equity", None)
+            at = (getattr(acct, "account_type", None) or "").lower()
+            acct_type = "cash" if at == "cash" else "margin"
+    if data.point_value is not None:
+        pv = float(data.point_value)
+    elif data.instrument_type == "future":
+        pv = _FUTURES_POINT_VALUE.get((data.ticker or "").upper(), 1.0)
+    elif data.instrument_type == "option":
+        pv = 100.0
+    else:
+        pv = 1.0
+    res = unified_size(
+        entry_price=data.entry, stop_loss=data.stop,
+        allocation_usd=data.allocation_usd, risk_per_trade_usd=data.risk_per_trade_usd,
+        risk_per_trade_pct=data.risk_per_trade_pct, account_equity=equity,
+        max_position_usd=data.max_position_usd, max_units=data.max_units,
+        cached_cash=cash, cached_buying_power=bp, account_type=acct_type,
+        point_value=pv, symbol=(data.ticker or "").upper())
+    rr = rr_ratio(data.entry, data.stop, data.take_profit)
+    sl_pnl = -(res.final_size * res.risk_per_unit) if res.final_size else 0.0
+    tp_pnl = None
+    if data.take_profit and res.final_size:
+        tp_pnl = res.final_size * abs(data.take_profit - data.entry) * pv
+    return {
+        "ticker": (data.ticker or "").upper(),
+        "instrument_type": data.instrument_type,
+        "entry": data.entry, "stop": data.stop, "take_profit": data.take_profit,
+        "point_value": pv,
+        "sizing": {
+            "final_size": res.final_size,
+            "risk_model": res.risk_model,
+            "binding_constraint": res.binding_constraint,
+            "risk_per_unit": round(res.risk_per_unit, 4),
+            "final_notional_usd": round(res.final_notional_usd, 2),
+            "actual_risk_usd": round(res.actual_risk_usd, 2),
+            "intended_risk_usd": round(res.intended_risk_usd, 2),
+            "constraints": [
+                {"name": c.name, "limit_value": c.limit_value,
+                 "would_size_to": (int(c.would_size_to) if c.would_size_to is not None else None),
+                 "applied": c.applied} for c in res.constraints],
+        },
+        "sl_tp_preview": {
+            "stop_loss_pnl_usd": round(sl_pnl, 2),
+            "take_profit_pnl_usd": round(tp_pnl, 2) if tp_pnl is not None else None,
+            "risk_reward_ratio": rr,
+        },
+        "can_place": res.ok and res.final_size > 0,
+        "reason": res.reason or None,
+        "summary": res.summary,
+    }
+

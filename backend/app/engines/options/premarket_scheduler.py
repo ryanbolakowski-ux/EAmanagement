@@ -977,6 +977,58 @@ async def _delayed_auto_execute(delay_seconds: int):
 
 
 # ===== THETA SCANNER 9:25 ET DAILY =====
+
+async def _start_theta_pick_paper_session(db, user_id, strategy_id, ticker, pick) -> bool:
+    """THETA-AUTOPAPER-V1 (#27). Auto-start ONE options-paper session on today's
+    Theta pick for this user. Idempotent per (date, user, ticker); gated by env
+    THETA_AUTO_PAPER_ENABLED (default OFF). Returns True if a session started."""
+    import os as _os
+    if _os.environ.get("THETA_AUTO_PAPER_ENABLED", "0") not in ("1", "true", "True", "yes"):
+        return False
+    ticker = (ticker or "").upper().strip()
+    if not ticker:
+        return False
+    date_str = _today_et().date().isoformat()
+    # ── Idempotency: one auto-paper session per user per ticker per day. ──
+    rds = _get_email_redis()
+    if rds is not None:
+        try:
+            if not rds.set(f"theta:autopaper:{date_str}:{user_id}:{ticker}", "1", nx=True, ex=20 * 3600):
+                logger.info(f"[OptionsPaper-Theta] already auto-started today user={user_id} {ticker}")
+                return False
+        except Exception:
+            pass
+    else:
+        from sqlalchemy import text as _t2
+        dup = (await db.execute(_t2("""
+            SELECT 1 FROM trade_sessions
+             WHERE user_id = :uid AND mode = 'options_paper' AND instrument = :inst
+               AND is_active = true AND started_at::date = CURRENT_DATE LIMIT 1
+        """), {"uid": str(user_id), "inst": ticker})).fetchone()
+        if dup:
+            return False
+    try:
+        from app.models.trade import TradeSession
+        sess = TradeSession(strategy_id=strategy_id, user_id=user_id,
+                            mode="options_paper", is_active=True, instrument=ticker)
+        db.add(sess)
+        await db.commit()
+        await db.refresh(sess)
+        from app.engines.options.options_paper_runner import start_options_paper_session as _start
+        import asyncio
+        asyncio.create_task(_start(str(sess.id), str(strategy_id), str(user_id), ticker))
+        logger.info(f"[OptionsPaper-Theta] auto-started session={sess.id} user={user_id} "
+                    f"ticker={ticker} score={pick.get('score')} entry={pick.get('entry')}")
+        return True
+    except Exception as e:
+        logger.error(f"[OptionsPaper-Theta] auto-start failed user={user_id} {ticker}: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return False
+
+
 async def run_theta_scanner_for_all_users():
     """Runs Theta Scanner once. Emails + broker order for each eligible user."""
     from app.database import async_session_factory
@@ -989,10 +1041,11 @@ async def run_theta_scanner_for_all_users():
             logger.info("[ThetaScanner] no qualified pick today — sending nothing")
             return
         users = (await db.execute(_t("""
-            SELECT DISTINCT u.id, u.email, u.username FROM users u
+            SELECT DISTINCT ON (u.id) u.id, u.email, u.username, s.id AS strategy_id FROM users u
               JOIN strategies s ON s.user_id = u.id
              WHERE s.signal_mode = 'theta_scanner' AND s.status = 'ACTIVE'
                AND u.is_active = true   -- exclude deactivated/deleted accounts
+             ORDER BY u.id, s.id
         """))).fetchall()
         for u in users:
             class _U: pass
@@ -1002,6 +1055,12 @@ async def run_theta_scanner_for_all_users():
                 logger.info(f"[ThetaScanner] emitted to {u.email}: ok={ok}")
             except Exception as e:
                 logger.error(f"[ThetaScanner] emit failed for {u.email}: {e}")
+            # THETA-AUTOPAPER-V1 (#27): also paper-trade the pick through the
+            # options-paper engine (flag-gated, idempotent).
+            try:
+                await _start_theta_pick_paper_session(db, u.id, u.strategy_id, pick.get("ticker"), pick)
+            except Exception as e:
+                logger.error(f"[OptionsPaper-Theta] wiring error for {u.email}: {e}")
 
 
 _theta_fired_today = None  # in-memory cache, backed by Redis
