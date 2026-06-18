@@ -657,10 +657,14 @@ export default function StrategyBuilder() {
                     <h3 className="font-bold text-slate-900 text-sm truncate dark:text-slate-100">{s.name}</h3>
                     <div className="flex flex-wrap items-center gap-1 mt-1">
                       <span className={`badge ${STATUS_COLORS[s.status] || 'badge-grey'}`}>{s.status}</span>
-                      {/* STRAT-CARD-HONESTY-V1: flag strategies running the generic default */}
-                      {!(String(s.engine_version).toLowerCase() === 'v2' && s.v2_available) && (
+                      {/* STRAT-CARD-HONESTY-V1 + PE-HONESTY-V2: distinguish compiled vs truly-empty */}
+                      {!(String(s.engine_version).toLowerCase() === 'v2' && s.v2_available) && (!s.rule_tree || Object.keys(s.rule_tree).length === 0) && (
                         <span className="badge badge-grey"
-                          title="No dedicated/compiled rules for this strategy — it runs our generic default ICT logic in backtests and live trading, not a custom-translated setup.">generic default</span>
+                          title="No compiled rules for this strategy — it runs our generic default ICT logic in backtests and live trading.">generic default</span>
+                      )}
+                      {!(String(s.engine_version).toLowerCase() === 'v2' && s.v2_available) && s.rule_tree && Object.keys(s.rule_tree).length > 0 && (
+                        <span className="badge badge-blue"
+                          title="Runs the V1 ICT engine with your compiled filters (e.g. VWAP, range take-profit) + break-even.">compiled</span>
                       )}
                     </div>
                   </div>

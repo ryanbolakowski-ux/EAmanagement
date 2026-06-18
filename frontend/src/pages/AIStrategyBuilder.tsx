@@ -246,6 +246,16 @@ export default function AIStrategyBuilder() {
   const hasContent = steps.some(s => s.body.trim().length > 10)
   const allQuestions = steps.flatMap(s => s.questions.map(q => ({ stepId: s.id, q })))
   const nameOffensive = looksOffensive(name)  // PE-BUILDER-SAFEFIX-V1
+  // PE-HONESTY-V2: surface exactly what the compiler will set, for the banner.
+  const _allConcepts = Array.from(new Set(steps.flatMap(s => s.concepts)))
+  const _vwapDetected = _allConcepts.includes('VWAP')
+  const _targetStep = steps.find(s => s.kind === 'target')
+  const _rangeTP = /other side|opposite side|other end|range/.test((_targetStep?.body || '').toLowerCase())
+  const compiledKnobs = [
+    _vwapDetected && 'VWAP filter',
+    _rangeTP && 'range take-profit',
+    breakevenMode !== 'off' && `break-even (${breakevenMode === 'structure' ? 'at structure' : 'at 1R'})`,
+  ].filter(Boolean) as string[]
 
   if (previewMode) {
     return (
@@ -306,14 +316,25 @@ export default function AIStrategyBuilder() {
             That strategy name isn't allowed — please remove profanity/slurs before saving.
           </div>
         )}
-        <div className="rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-4">
-          <div className="text-[11px] font-bold uppercase tracking-widest text-amber-700 dark:text-amber-300 mb-1">Heads up — no exact rules yet</div>
-          <p className="text-xs text-amber-800 dark:text-amber-200 leading-relaxed">
-            I can read your timeframes and concepts, but I can't yet translate these words into precise
-            entry/exit rules. Until rules are defined, this strategy runs our <strong>generic default ICT
-            logic</strong> in backtests and live trading — not your exact described setup.
-          </p>
-        </div>
+        {compiledKnobs.length > 0 ? (
+          <div className="rounded-xl border border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 dark:border-emerald-700 p-4">
+            <div className="text-[11px] font-bold uppercase tracking-widest text-emerald-700 dark:text-emerald-300 mb-1">Compiled to the ICT engine</div>
+            <p className="text-xs text-emerald-800 dark:text-emerald-200 leading-relaxed">
+              Your words set: <strong>{compiledKnobs.join(', ')}</strong>. The FVG / liquidity-sweep / bias
+              and entry detection run on the platform's ICT engine (structure stop included). Run a backtest
+              to see the real win rate for your settings.
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-4">
+            <div className="text-[11px] font-bold uppercase tracking-widest text-amber-700 dark:text-amber-300 mb-1">Heads up — running the default engine</div>
+            <p className="text-xs text-amber-800 dark:text-amber-200 leading-relaxed">
+              I didn't detect any specific filters (VWAP, range take-profit) or a break-even choice in your
+              steps, so this strategy runs our <strong>generic default ICT logic</strong>. Add those to your
+              steps (or pick a break-even option) to tailor it.
+            </p>
+          </div>
+        )}
         <div className="flex justify-end gap-3">
           <button onClick={() => setPreviewMode(false)}
             className="px-5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold">Keep editing</button>
