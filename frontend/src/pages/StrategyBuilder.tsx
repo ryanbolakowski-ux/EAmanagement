@@ -655,7 +655,14 @@ export default function StrategyBuilder() {
                   </button>
                   <div className="flex-1 min-w-0">
                     <h3 className="font-bold text-slate-900 text-sm truncate dark:text-slate-100">{s.name}</h3>
-                    <span className={`badge ${STATUS_COLORS[s.status] || 'badge-grey'} mt-1`}>{s.status}</span>
+                    <div className="flex flex-wrap items-center gap-1 mt-1">
+                      <span className={`badge ${STATUS_COLORS[s.status] || 'badge-grey'}`}>{s.status}</span>
+                      {/* STRAT-CARD-HONESTY-V1: flag strategies running the generic default */}
+                      {!(String(s.engine_version).toLowerCase() === 'v2' && s.v2_available) && (
+                        <span className="badge badge-grey"
+                          title="No dedicated/compiled rules for this strategy — it runs our generic default ICT logic in backtests and live trading, not a custom-translated setup.">generic default</span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-1">

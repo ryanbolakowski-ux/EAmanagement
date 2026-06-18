@@ -60,6 +60,11 @@ class StrategyConfig:
     rsi_long_max: float = 70.0    # block longs when RSI is overheated
     rsi_short_min: float = 30.0   # block shorts when RSI is oversold
     use_vwap_filter: bool = False
+    # RULE-TREE-PLUMB-V1: the compiled/declared rule tree (jsonb on the
+    # strategy). Carries engine_version ('v1'/'v2'), ict_setup id, and any
+    # Plain-English-compiler primitives. Must be set for the v2 dispatch
+    # and dedicated setups to run; default {} keeps v1 behaviour unchanged.
+    rule_tree: dict = field(default_factory=dict)
 
     # ── Options-specific config (used by the options engine, ignored elsewhere) ──
     # The user-provided framework defines five swing-options modes:

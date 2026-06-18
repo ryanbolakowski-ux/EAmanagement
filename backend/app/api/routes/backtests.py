@@ -366,6 +366,10 @@ async def _run_backtest_task(backtest_run_id: str):
                     use_rsi_filter=bool((strategy_model.rule_tree or {}).get("use_rsi_filter", False)),
                     use_vwap_filter=bool((strategy_model.rule_tree or {}).get("use_vwap_filter", False)),
                 )
+                # RULE-TREE-PLUMB-V1: carry the full rule_tree into the engine
+                # (engine_version / ict_setup / compiled rules). Without this the
+                # v2 dispatch never fires and every strategy runs the generic model.
+                config.rule_tree = strategy_model.rule_tree or {}
 
                 strategy = ICTStrategy(config, instrument=run.instrument)
 

@@ -108,6 +108,49 @@ async def list_strategies(
     ]
 
 
+
+# ── NAME-MODERATION-V1: block offensive strategy names (metadata hygiene) ──
+_NM_LEET = {"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+            "@": "a", "$": "s", "!": "i"}
+#: Always-block substrings (chosen to avoid common-word collisions).
+_NM_HARD = ("nigg", "niglet", "faggot", "kike", "wetback", "beaner",
+            "tranny", "retard", "rapist")
+#: Block only as a WHOLE normalized token (avoids "suspicious"->spic, "grape"->rape).
+_NM_EXACT = {"fag", "fags", "spic", "spics", "chink", "coon", "coons", "gook",
+             "paki", "kkk", "rape", "cunt", "cunts", "whore", "slut", "jap", "nig"}
+
+
+def _nm_normalize(tok: str) -> str:
+    # Substitute leet BEFORE dropping non-alnum, else "@/$/!" are removed before
+    # they can map to a/s/i (so "f@g" must normalize to "fag", not "fg").
+    tok = "".join(_NM_LEET.get(c, c) for c in (tok or "").lower())
+    return "".join(c for c in tok if c.isalnum())
+
+
+def is_offensive_name(name: str) -> bool:
+    """True if `name` contains a slur / strong profanity (leet-normalized)."""
+    import re as _re
+    raw = (name or "").lower()
+    toks = [_nm_normalize(t) for t in _re.split(r"[^a-z0-9@$!]+", raw) if t]
+    for t in toks:
+        if not t:
+            continue
+        if t in _NM_EXACT:
+            return True
+        if any(h in t for h in _NM_HARD):
+            return True
+    return False
+
+
+def _reject_offensive_name(name: str) -> None:
+    if is_offensive_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail="That strategy name isn't allowed. Please choose a name without "
+                   "profanity or slurs — names appear in logs, emails and exports.",
+        )
+
+
 @router.post("/", response_model=StrategyResponse, status_code=status.HTTP_201_CREATED)
 async def create_strategy(
     data: StrategyCreate,
@@ -115,6 +158,7 @@ async def create_strategy(
     db: AsyncSession = Depends(get_db),
 ):
     payload = data.model_dump()
+    _reject_offensive_name(payload.get("name"))  # NAME-MODERATION-V1
     _status_raw = (payload.pop("status", None) or "active")
     try:
         _status_enum = StrategyStatus(_status_raw)
@@ -182,6 +226,7 @@ async def update_strategy(
         raise HTTPException(status_code=404, detail="Strategy not found.")
 
     payload = data.model_dump()
+    _reject_offensive_name(payload.get("name"))  # NAME-MODERATION-V1
     _status_raw = payload.pop("status", None)
     for key, value in payload.items():
         setattr(strategy, key, value)

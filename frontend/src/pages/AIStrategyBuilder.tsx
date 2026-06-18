@@ -37,15 +37,22 @@ function quickScan(text: string) {
   const tfRe = /\b(\d{1,2})\s*-?\s*(\d{1,2})?\s*(m|min|minute|h|hr|hour|d|day|w|week)s?\b/gi
   const tfs = new Set<string>()
   let m
+  // PE-BUILDER-SAFEFIX-V1 / TF-RANGE-FIX: "15-4h" means 15-minute->4-hour.
+  // A two-number range can't share one unit when it's descending (15 > 4),
+  // so the FIRST number takes the next-SMALLER unit (h->m, d->h, w->d).
+  // Old code read "15-4h" as 15h+4h, inventing a bogus 15h timeframe.
+  const STEP_DOWN: Record<string, string> = { m: 'm', h: 'm', d: 'h', w: 'd' }
+  const unitKey = (u: string) => u.startsWith('m') ? 'm' : u.startsWith('h') ? 'h' : u.startsWith('d') ? 'd' : 'w'
   while ((m = tfRe.exec(text))) {
     const a = parseInt(m[1])
-    const unit = (m[3] || '').toLowerCase()
-    const norm = unit.startsWith('m') ? `${a}m` : unit.startsWith('h') ? `${a}h` : unit.startsWith('d') ? `${a}d` : `${a}w`
-    tfs.add(norm)
+    const u = unitKey((m[3] || '').toLowerCase())
     if (m[2]) {
       const b = parseInt(m[2])
-      const normB = unit.startsWith('m') ? `${b}m` : unit.startsWith('h') ? `${b}h` : unit.startsWith('d') ? `${b}d` : `${b}w`
-      tfs.add(normB)
+      const aUnit = a > b ? STEP_DOWN[u] : u
+      tfs.add(`${a}${aUnit}`)
+      tfs.add(`${b}${u}`)
+    } else {
+      tfs.add(`${a}${u}`)
     }
   }
   const concepts: string[] = []
@@ -109,6 +116,20 @@ const STEP_TEMPLATES: { kind: Step['kind']; title: string; placeholder: string }
   { kind: 'risk',    title: 'Step 6 — Risk',         placeholder: 'e.g. Risk 1% of equity per trade. Max 2 trades per day.' },
   { kind: 'session', title: 'Step 7 — Session',      placeholder: 'e.g. Only trade during NY AM (9:30-12 ET) and London open (3-5 ET).' },
 ]
+
+// PE-BUILDER-SAFEFIX-V1 — client mirror of the server NAME-MODERATION-V1 guard
+// (the server is the real gate). The strategy NAME is metadata only and is
+// deliberately NEVER passed to quickScan()/the parser — it is not trading logic.
+const _LEET: Record<string, string> = { '0':'o','1':'i','3':'e','4':'a','5':'s','7':'t','@':'a','$':'s','!':'i' }
+const _HARD = ['nigg','niglet','faggot','kike','wetback','beaner','tranny','retard','rapist']
+const _EXACT = new Set(['fag','fags','spic','spics','chink','coon','coons','gook','paki','kkk','rape','cunt','cunts','whore','slut','jap','nig'])
+function _normTok(t: string): string {
+  return t.toLowerCase().split('').map(c => _LEET[c] ?? c).filter(c => /[a-z0-9]/.test(c)).join('')
+}
+function looksOffensive(name: string): boolean {
+  const toks = (name || '').toLowerCase().split(/[^a-z0-9@$!]+/).filter(Boolean).map(_normTok)
+  return toks.some(t => !!t && (_EXACT.has(t) || _HARD.some(h => t.includes(h))))
+}
 
 export default function AIStrategyBuilder() {
   const navigate = useNavigate()
@@ -211,6 +232,7 @@ export default function AIStrategyBuilder() {
 
   const hasContent = steps.some(s => s.body.trim().length > 10)
   const allQuestions = steps.flatMap(s => s.questions.map(q => ({ stepId: s.id, q })))
+  const nameOffensive = looksOffensive(name)  // PE-BUILDER-SAFEFIX-V1
 
   if (previewMode) {
     return (
@@ -266,11 +288,24 @@ export default function AIStrategyBuilder() {
           </div>
         )}
 
+        {nameOffensive && (
+          <div className="rounded-xl border border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-700 p-3 text-xs font-semibold text-red-700 dark:text-red-300">
+            That strategy name isn't allowed — please remove profanity/slurs before saving.
+          </div>
+        )}
+        <div className="rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 p-4">
+          <div className="text-[11px] font-bold uppercase tracking-widest text-amber-700 dark:text-amber-300 mb-1">Heads up — no exact rules yet</div>
+          <p className="text-xs text-amber-800 dark:text-amber-200 leading-relaxed">
+            I can read your timeframes and concepts, but I can't yet translate these words into precise
+            entry/exit rules. Until rules are defined, this strategy runs our <strong>generic default ICT
+            logic</strong> in backtests and live trading — not your exact described setup.
+          </p>
+        </div>
         <div className="flex justify-end gap-3">
           <button onClick={() => setPreviewMode(false)}
             className="px-5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold">Keep editing</button>
           <button onClick={() => saveMutation.mutate()}
-            disabled={!hasContent || saveMutation.isPending || !name.trim()}
+            disabled={!hasContent || saveMutation.isPending || !name.trim() || nameOffensive}
             className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold inline-flex items-center gap-2">
             <Check size={14}/> {saveMutation.isPending ? 'Saving…' : 'Save Strategy'}
           </button>
@@ -297,6 +332,7 @@ export default function AIStrategyBuilder() {
           <input value={name} onChange={e => setName(e.target.value)}
             placeholder="e.g. My Inversion Hunter"
             className="w-full border border-slate-300 dark:border-slate-700 dark:bg-slate-800 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+          {nameOffensive && <p className="text-xs font-semibold text-red-600 dark:text-red-400 mt-1.5">That name isn't allowed — please remove profanity/slurs. (Names appear in logs, emails and exports.)</p>}
         </div>
         <div>
           <label className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400 block mb-1.5">
@@ -425,7 +461,7 @@ export default function AIStrategyBuilder() {
           {hasContent ? `${steps.filter(s => s.body.trim()).length} step(s) filled in` : 'Start by filling in at least one step'}
         </div>
         <button onClick={() => setPreviewMode(true)}
-          disabled={!hasContent || !name.trim()}
+          disabled={!hasContent || !name.trim() || nameOffensive}
           className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold inline-flex items-center gap-2">
           Review & Save <ChevronRight size={14}/>
         </button>
