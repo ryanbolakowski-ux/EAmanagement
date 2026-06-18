@@ -266,6 +266,7 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                                 mode="options_paper",
                                 open_positions_snapshot=snap,
                                 bar_time=latest_ts,  # GUARD-BARCLOCK-V1
+                                user_id=str(user_id) if user_id else None,
                             )
                             if not decision.allowed:
                                 # Guard already logged reason; skip this tick

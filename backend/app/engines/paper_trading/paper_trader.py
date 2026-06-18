@@ -226,6 +226,13 @@ class PaperTrader:
         if not self._position and self.strategy.check_risk_controls():
             signal = self.strategy.on_bar(bars_dict)
             if signal and signal.signal != SignalType.NONE:
+                # Reject malformed signals (no real stop/target) before sizing/entry.
+                if not getattr(signal, "stop_loss", 0) or not getattr(signal, "take_profit", 0):
+                    logger.warning(
+                        f"[PaperTrader] SKIP {self.instrument} {signal.signal.value} — "
+                        f"invalid stop/target (sl={getattr(signal,'stop_loss',None)} "
+                        f"tp={getattr(signal,'take_profit',None)})")
+                    return
                 # ── Overtrade guard (cooldown / max-trades / max-positions / dup) ──
                 # Centralized rules so paper/live/options-paper enforce identically.
                 # Reads strategy.cooldown_min, strategy.max_trades_per_day,
@@ -254,6 +261,7 @@ class PaperTrader:
                         open_positions_snapshot=snap,
                         bar_time=bar.get("timestamp"),  # PAPER-TRADER-GUARD-BARCLOCK-V1
                         entry_price=getattr(signal, "entry_price", None),
+                        user_id=str(self.user_id) if self.user_id else None,
                     )
                     if not decision.allowed:
                         # Guard already logged the reason; release any lock we may have

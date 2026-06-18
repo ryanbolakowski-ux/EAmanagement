@@ -116,11 +116,22 @@ async def _get_strategy_limits(strategy_id: str, instrument: str) -> dict:
                 "max_open_positions": default_max_open}
 
 
+def _setup_redis():
+    """Redis client for the account-level setup claim (ACCOUNT-SETUP-DEDUP-V1)."""
+    try:
+        import redis as _rd
+        return _rd.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+                                  decode_responses=True)
+    except Exception:
+        return None
+
+
 async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
                     direction: str, mode: str = "paper",
                     open_positions_snapshot: Optional[list] = None,
                     bar_time: Optional[datetime] = None,
-                    entry_price: Optional[float] = None) -> Decision:
+                    entry_price: Optional[float] = None,
+                    user_id: Optional[str] = None) -> Decision:
     """Run all four checks. Returns Decision(allowed=False, reason=...) on
     first failure; Decision(allowed=True, reason='ok', debug={...}) when
     all checks pass. Logs an info line at every decision point so an operator
@@ -155,6 +166,43 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
             ref_now = _bt
         except Exception:
             ref_now = now
+
+    # ── ACCOUNT-SETUP-DEDUP-V1: one trade per (account, symbol, direction,
+    # price band) across ALL of a user's sessions. Many ICT strategies share
+    # the engine and fire the identical setup on the same bar; without this
+    # each session enters it -> N identical trades. First claimant wins.
+    if user_id and entry_price is not None:
+        try:
+            _band = round(float(entry_price))
+            _dedup_min = int(os.environ.get("ACCOUNT_SETUP_DEDUP_MIN", "15"))
+            _ttl = max(_dedup_min, cooldown_min) * 60
+            _key = f"paper:setup:{user_id}:{inst}:{direction}:{_band}"
+            _rc = _setup_redis()
+            if _rc is not None:
+                if not _rc.set(_key, sid, nx=True, ex=_ttl):
+                    _holder = _rc.get(_key)
+                    logger.info(
+                        f"[paper-runner] sid={sid} REJECTED reason=account_duplicate_setup "
+                        f"user={user_id} inst={inst} dir={direction} price~{_band} "
+                        f"held_by_session={_holder}")
+                    return Decision(False, "account_duplicate_setup",
+                                    {"held_by": _holder, "band": _band})
+            else:
+                async with async_session_factory() as _db:
+                    _since = ref_now - timedelta(minutes=_dedup_min)
+                    _dup = (await _db.execute(text("""
+                        SELECT 1 FROM trades
+                         WHERE user_id = :uid AND instrument = :inst AND direction = :dir
+                           AND entry_time >= :since AND round(entry_price) = :band LIMIT 1
+                    """), {"uid": str(user_id), "inst": inst, "dir": direction,
+                           "since": _since, "band": _band})).fetchone()
+                    if _dup:
+                        logger.info(
+                            f"[paper-runner] sid={sid} REJECTED reason=account_duplicate_setup "
+                            f"(db) user={user_id} inst={inst} dir={direction} price~{_band}")
+                        return Decision(False, "account_duplicate_setup", {"band": _band})
+        except Exception as _ae:
+            logger.warning(f"[entry-guard] account-dedup skipped sid={sid}: {_ae}")
 
     logger.info(
         f"[paper-runner] sid={sid} considering entry inst={inst} dir={direction} "

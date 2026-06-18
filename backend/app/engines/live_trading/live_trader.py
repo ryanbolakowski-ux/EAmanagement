@@ -175,6 +175,7 @@ class LiveTrader:
                         open_positions_snapshot=snap,
                         bar_time=bar.get("timestamp"),  # GUARD-BARCLOCK-V1
                         entry_price=getattr(signal, "entry_price", None),
+                        user_id=str(getattr(self, "user_id", None)) if getattr(self, "user_id", None) else None,
                     )
                     if not decision.allowed:
                         return
