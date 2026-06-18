@@ -90,7 +90,7 @@ export function TradeChartModal({ tradeId, onClose }: { tradeId: string; onClose
       .then((res) => { if (!cancelled) setData(res.data) })
       .then(() => {
         fetch(`${_API_BASE}/api/v1/paper-trading/trades/${tradeId}/comments`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('edge_token') || ''}` },
+          headers: { Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
         }).then(r => r.ok ? r.json() : []).then((cs: any[]) => { if (!cancelled) setComments(cs || []) }).catch(() => {})
       })
       .catch((e) => {
@@ -122,13 +122,13 @@ export function TradeChartModal({ tradeId, onClose }: { tradeId: string; onClose
     try {
       const r = await fetch(`${_API_BASE}/api/v1/paper-trading/trades/${tradeId}/comments`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('edge_token') || ''}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
         body: JSON.stringify({ body: newComment.trim(), mark_label: step.label }),
       })
       if (r.ok) {
         setNewComment('')
         const refreshed = await fetch(`${_API_BASE}/api/v1/paper-trading/trades/${tradeId}/comments`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('edge_token') || ''}` },
+          headers: { Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
         }).then(r => r.json())
         setComments(refreshed || [])
       }
