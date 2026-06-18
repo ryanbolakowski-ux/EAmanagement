@@ -71,9 +71,19 @@ def validate_geometry(direction: str, entry: float, stop: float,
         return {"valid": False, "error": "zero risk (entry==stop)", "warnings": warnings,
                 "risk": 0.0, "reward": reward, "rr": 0.0, "direction": d}
 
-    # Soft warnings (do not block the send)
-    min_stop = MIN_STOP_POINTS.get((instrument or "").upper(), DEFAULT_MIN_STOP_POINTS)
+    # TINY-RANGE-HARD-REJECT. For FUTURES (instrument in MIN_STOP_POINTS) a
+    # sub-floor stop is a meaningless/noise bracket -> HARD REJECT (blocks the
+    # email, the signal, and any routed paper/live entry). For non-futures the
+    # floor is only a soft default, so a small dollar stop on a stock warns.
+    _inst_u = (instrument or "").upper()
+    min_stop = MIN_STOP_POINTS.get(_inst_u, DEFAULT_MIN_STOP_POINTS)
     if risk < min_stop:
+        if _inst_u in MIN_STOP_POINTS:
+            return {"valid": False,
+                    "error": f"stop too tight: {risk:.2f}pt risk on {instrument} "
+                             f"< {min_stop:.2f}pt floor (meaningless/noise range)",
+                    "warnings": warnings, "risk": _round(risk),
+                    "reward": _round(reward), "rr": _round(rr, 2), "direction": d}
         warnings.append(
             f"stop is very tight: {risk:.2f}pt risk on {instrument or '?'} "
             f"(min realistic ~{min_stop:.2f}pt) — likely noise"

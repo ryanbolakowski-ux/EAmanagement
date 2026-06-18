@@ -38,10 +38,12 @@ def test_zero_risk_rejected():
     assert g["valid"] is False
 
 
-def test_tight_es_stop_warns_but_valid():
+def test_tight_es_stop_now_hard_rejected():
+    # TINY-RANGE-HARD-REJECT: a sub-floor futures stop (0.5pt < ES 2.0
+    # floor) is now a HARD reject (meaningless/noise range), not a warning.
     g = validate_geometry("long", 5000.0, 4999.5, 5020.0, "ES")
-    assert g["valid"] is True            # geometry is fine
-    assert any("tight" in w for w in g["warnings"])  # but flagged
+    assert g["valid"] is False
+    assert "too tight" in g["error"]
 
 
 def test_unknown_direction_rejected():

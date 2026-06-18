@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-API_KEY = os.getenv("TWELVEDATA_API_KEY", "dd3adc961e864f25a2d4b17899e315e8")
+API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 BASE_URL = "https://api.twelvedata.com/time_series"
 
 SYMBOLS = {"SPY": "ES", "QQQ": "NQ", "IWM": "RTY", "DIA": "YM"}
