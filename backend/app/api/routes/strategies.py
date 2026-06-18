@@ -54,6 +54,9 @@ class StrategyCreate(BaseModel):
     fvg_max_size_ticks: Optional[int] = None
     max_daily_loss: Optional[float] = None
     max_trades_per_day: Optional[int] = None
+    # PE-COMPILER-V1: let the builder set break-even (columns exist on model).
+    breakeven_mode: str = "off"
+    breakeven_at_r: float = 0.0
     rule_tree: dict = {}
 
 

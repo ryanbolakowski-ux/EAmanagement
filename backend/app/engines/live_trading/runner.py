@@ -72,6 +72,12 @@ async def _run_session(session_id, strategy_id, user_id, broker_account_id, inst
             max_contracts=strat_row.max_contracts or 1,
             session_filters=strat_row.session_filters or [],
         )
+        # LIVE-PARITY-TPM-V1: live previously dropped rule_tree + the VWAP/RSI
+        # filters, so a strategy traded DIFFERENTLY live than in its backtest.
+        cfg.rule_tree = getattr(strat_row, "rule_tree", None) or {}
+        cfg.take_profit_mode = cfg.rule_tree.get("take_profit_mode", "auto")
+        cfg.use_vwap_filter = bool(cfg.rule_tree.get("use_vwap_filter", False))
+        cfg.use_rsi_filter = bool(cfg.rule_tree.get("use_rsi_filter", False))
         strategy = ICTStrategy(cfg, instrument=instrument)
         broker = get_broker(acct_row)
         await broker.connect()

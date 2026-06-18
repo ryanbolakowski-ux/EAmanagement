@@ -167,6 +167,8 @@ export default function AIStrategyBuilder() {
   })))
   const [editingStep, setEditingStep] = useState<string | null>('0')
   const [previewMode, setPreviewMode] = useState(false)
+  // PE-COMPILER-V1: explicit break-even choice (the biggest WR lever here).
+  const [breakevenMode, setBreakevenMode] = useState<'structure' | 'r' | 'off'>('structure')
 
   function updateStep(id: string, body: string) {
     setSteps(prev => prev.map(s => {
@@ -209,6 +211,15 @@ export default function AIStrategyBuilder() {
       const primary = setupCandidates.length ? setupCandidates[setupCandidates.length - 1] : '15m'
       const htfs = sorted.filter(t => tfRank(t) >= 60).slice(0, 2)
       const fullDescription = steps.filter(s => s.body.trim()).map(s => `${s.title}\n${s.body}`).join('\n\n---\n\n')
+      // PE-COMPILER-V1: compile the detected words into V1 engine knobs.
+      const allConcepts = Array.from(new Set(steps.flatMap(s => s.concepts)))
+      const vwapDetected = allConcepts.includes('VWAP')
+      const targetStep = steps.find(s => s.kind === 'target')
+      const tgt = (targetStep?.body || '').toLowerCase()
+      const rangeTP = /other side|opposite side|other end|range/.test(tgt)
+      const ruleTree: any = {}
+      if (vwapDetected) ruleTree.use_vwap_filter = true
+      if (rangeTP) ruleTree.take_profit_mode = 'range'
       return strategiesApi.create({
         name: name.trim() || 'My Custom Strategy',
         description: fullDescription,
@@ -221,7 +232,9 @@ export default function AIStrategyBuilder() {
         max_contracts: 10,
         session_filters: [],
         fvg_min_size_ticks: 4,
-        rule_tree: {},
+        breakeven_mode: breakevenMode,
+        breakeven_at_r: breakevenMode === 'r' ? 1.0 : 0.0,
+        rule_tree: ruleTree,
       } as any)
     },
     onSuccess: () => {
@@ -454,6 +467,28 @@ export default function AIStrategyBuilder() {
         className="w-full rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:border-blue-400 hover:text-blue-600 py-5 text-sm font-bold transition-colors inline-flex items-center justify-center gap-2">
         <Plus size={14}/> Add custom step
       </button>
+
+      {/* PE-COMPILER-V1: explicit break-even choice */}
+      <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5">
+        <div className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1.5">Break-even — when to move your stop to entry</div>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">Moving your stop to break-even after the trade works in your favor turns would-be losers into scratches — historically the single biggest win-rate lever on this platform. Pick how you want it handled.</p>
+        <div className="space-y-2">
+          {[
+            { v: 'structure', t: 'At structure (recommended)', d: 'Move to break-even when price breaks the prior swing in your favor.' },
+            { v: 'r', t: 'At 1R', d: 'Move to break-even once price moves 1× your risk in your favor.' },
+            { v: 'off', t: 'Off', d: 'Never move the stop; let it run to the original stop or target.' },
+          ].map(o => (
+            <label key={o.v}
+              className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer ${breakevenMode === o.v ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}`}>
+              <input type="radio" name="bemode" checked={breakevenMode === o.v} onChange={() => setBreakevenMode(o.v as any)} className="mt-0.5"/>
+              <div>
+                <div className="text-sm font-semibold text-slate-800 dark:text-slate-200">{o.t}</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">{o.d}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
 
       {/* Bottom action bar */}
       <div className="sticky bottom-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 flex items-center justify-between">

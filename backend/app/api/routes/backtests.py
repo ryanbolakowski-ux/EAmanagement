@@ -370,6 +370,7 @@ async def _run_backtest_task(backtest_run_id: str):
                 # (engine_version / ict_setup / compiled rules). Without this the
                 # v2 dispatch never fires and every strategy runs the generic model.
                 config.rule_tree = strategy_model.rule_tree or {}
+                config.take_profit_mode = (strategy_model.rule_tree or {}).get("take_profit_mode", "auto")  # RANGE-TP-V1
 
                 strategy = ICTStrategy(config, instrument=run.instrument)
 

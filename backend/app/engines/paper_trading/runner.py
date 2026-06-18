@@ -178,6 +178,9 @@ async def _run_paper_loop(session_id: str, strategy_id: str, user_id: str, instr
                 use_rsi_filter=bool((strategy_model.rule_tree or {}).get("use_rsi_filter", False)),
                 use_vwap_filter=bool((strategy_model.rule_tree or {}).get("use_vwap_filter", False)),
             )
+            # LIVE-PARITY-TPM-V1: carry rule_tree + take_profit_mode (match backtest)
+            config.rule_tree = strategy_model.rule_tree or {}
+            config.take_profit_mode = (strategy_model.rule_tree or {}).get("take_profit_mode", "auto")
             ict_strategy = ICTStrategy(config, instrument=instrument)
             trader = PaperTrader(
                 ict_strategy, instrument=instrument, session_id=session_id,

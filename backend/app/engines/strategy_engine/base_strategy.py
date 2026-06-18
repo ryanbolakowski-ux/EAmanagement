@@ -46,6 +46,9 @@ class StrategyConfig:
     higher_timeframes: list[str] = field(default_factory=list)
     risk_reward_ratio: float = 2.0
     stop_loss_type: str = "structure"       # "ticks" or "structure"
+    # RANGE-TP-V1: "auto" (existing swing/HTF-FVG/RR hierarchy) or "range"
+    # (target the opposite extreme of the swept dealing range).
+    take_profit_mode: str = "auto"
     stop_loss_ticks: Optional[int] = None
     max_contracts: int = 1
     session_filters: list[str] = field(default_factory=list)

@@ -892,6 +892,22 @@ class ICTStrategy(BaseStrategy):
         fallback_tp = (entry + risk * min_rr) if direction == "long" else (entry - risk * min_rr)
         buffer = 2 * self.tick_size
 
+        # RANGE-TP-V1: explicit "other side of the swept range" target. Only
+        # when the strategy opts in (rule_tree.take_profit_mode == 'range');
+        # default 'auto' leaves the swing/HTF-FVG/RR hierarchy below unchanged.
+        if str(getattr(self.config, 'take_profit_mode', 'auto')).lower() == 'range' \
+                and df is not None and len(df) >= 20:
+            _rng = df.tail(60)
+            if direction == 'long':
+                _far = float(_rng['high'].max()) - buffer
+                if (_far - entry) >= risk * 1.0:
+                    return self._clamp_tp(entry, sl, _far, direction)
+            else:
+                _far = float(_rng['low'].min()) + buffer
+                if (entry - _far) >= risk * 1.0:
+                    return self._clamp_tp(entry, sl, _far, direction)
+            # range too tight for a sane target -> fall through to default
+
         # Step 1: nearest swing in trade direction
         swing_level = None
         if df is not None and len(df) >= 10:
