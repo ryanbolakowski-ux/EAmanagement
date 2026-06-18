@@ -1131,6 +1131,139 @@ class _SCFixRequest(BaseModel):
     component: Optional[str] = None
 
 
+
+# ── SYSTEMS-CHECK-RUN-V1: explicit "Run Full Systems Check" w/ run tracking ──
+def _sc_redis():
+    try:
+        import redis as _rd
+        return _rd.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+                                  decode_responses=True)
+    except Exception:
+        return None
+
+
+async def _sc_safety_components(db) -> list:
+    """Recent safety-guard subsystems surfaced as systems-check components."""
+    import inspect
+    out = []
+    def _add(component, label, ok, msg, fix=None):
+        out.append({"component": component, "label": label, "section": "safety",
+                    "status": "green" if ok else "yellow",
+                    "severity": "ok" if ok else "warning",
+                    "message": None if ok else msg, "auto_fixable": False,
+                    "fix_action": None, "manual_instructions": None if ok else fix,
+                    "last_success": None})
+    try:
+        from app.engines.entry_guard import can_enter, _setup_redis
+        ok = ("ACCOUNT-SETUP-DEDUP-V1" in inspect.getsource(can_enter)) and (_setup_redis() is not None)
+        _add("dup_prevention", "Duplicate-trade prevention", ok,
+             "account-setup dedup missing or redis down", "Verify entry_guard ACCOUNT-SETUP-DEDUP-V1 + redis.")
+    except Exception:
+        _add("dup_prevention", "Duplicate-trade prevention", False, "check failed", "Inspect entry_guard.")
+    try:
+        import app.engines.account_signals.runner as _r
+        ok = "SIGNAL-PRICE-ALIGN-V1" in inspect.getsource(_r)
+        _add("signal_price_align", "Signal price alignment", ok,
+             "price-alignment guard missing", "Verify account_signals/runner SIGNAL-PRICE-ALIGN-V1.")
+    except Exception:
+        _add("signal_price_align", "Signal price alignment", False, "check failed", "")
+    try:
+        from app.engines.account_signals.signal_guard import MIN_STOP_POINTS
+        import app.engines.account_signals.signal_guard as _sg
+        ok = "TINY-RANGE-HARD-REJECT" in inspect.getsource(_sg) and bool(MIN_STOP_POINTS)
+        _add("quality_filters", "Scanner quality filters (futures tiny-range + R:R)", ok,
+             "tiny-range hard reject missing", "Verify signal_guard TINY-RANGE-HARD-REJECT.")
+    except Exception:
+        _add("quality_filters", "Scanner quality filters", False, "check failed", "")
+    try:
+        from app.core.sizing import unified_size
+        r = unified_size(entry_price=100, stop_loss=99, risk_per_trade_usd=500, point_value=1.0)
+        _add("risk_sizing", "Risk sizing (unified min-of)", bool(r.ok and r.final_size == 500),
+             "unified_size not returning expected size", "Inspect app/core/sizing.py.")
+    except Exception:
+        _add("risk_sizing", "Risk sizing", False, "check failed", "")
+    try:
+        from app.api.routes.legal import CURRENT_VERSIONS
+        ok = "fully_automated_trading" in CURRENT_VERSIONS
+        _add("automation_agreement", "Automation agreement system", ok,
+             "fully_automated_trading legal doc missing", "Deploy the fully_automated_trading legal doc.")
+    except Exception:
+        _add("automation_agreement", "Automation agreement system", False, "check failed", "")
+    try:
+        from app.engines.pipeline_alerts import _fetch_admin_emails
+        admins = await _fetch_admin_emails()
+        _add("admin_alerts", "Admin alert delivery", bool(admins),
+             "no active admin recipients", "Set is_admin=true on an active account.")
+    except Exception:
+        _add("admin_alerts", "Admin alert delivery", False, "check failed", "")
+    return out
+
+
+@router.post("/systems-check/run")
+async def systems_check_run(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run the FULL systems check (the same one the dashboard shows), record who
+    ran it + when, and email admins if the result is RED. Admin-only."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    report = await systems_check(current_user, db)
+    try:
+        report.setdefault("safety", {})
+        for c in await _sc_safety_components(db):
+            report["safety"][c["component"]] = {"status": c["status"], "label": c["label"]}
+            if c["status"] != "green":
+                report.setdefault("errors", []).append(c)
+        report["overall"]["error_count"] = len(report.get("errors", []))
+    except Exception as _se:
+        logger.warning(f"[systems-check-run] safety components failed: {_se}")
+
+    run_at = datetime.now(timezone.utc)
+    ran_by = current_user.email
+    overall = (report.get("overall") or {}).get("status")
+    rc = _sc_redis()
+    if rc is not None:
+        try:
+            import json as _j
+            rc.set("systems_check:last_run", _j.dumps(
+                {"at": run_at.isoformat(), "by": ran_by, "overall": overall}))
+        except Exception:
+            pass
+    if overall == "red":
+        try:
+            from app.api.routes.security import notify_admins_security
+            reds = [e for e in report.get("errors", []) if e.get("severity") == "critical"]
+            html = (f"<p><b>Systems Check: RED</b> — run by {ran_by} at {run_at.isoformat()}.</p>"
+                    "<ul>" + "".join(
+                        f"<li><b>{e.get('label')}</b>: {e.get('message')}</li>" for e in reds[:20]) + "</ul>")
+            await notify_admins_security("Systems Check found a RED issue", html)
+            logger.warning(f"[systems-check-run] RED — admin alert emailed (run_by={ran_by})")
+        except Exception as _ee:
+            logger.error(f"[systems-check-run] admin alert failed: {_ee}")
+    report["run_at"] = run_at.isoformat()
+    report["ran_by"] = ran_by
+    report["last_run"] = {"at": run_at.isoformat(), "by": ran_by, "overall": overall}
+    logger.info(f"[systems-check-run] admin={ran_by} overall={overall}")
+    return report
+
+
+@router.get("/systems-check/last")
+async def systems_check_last(current_user: User = Depends(get_current_user)):
+    """The last persisted Run Full Systems Check (timestamp + who + overall)."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    rc = _sc_redis()
+    if rc is None:
+        return {"last_run": None}
+    try:
+        import json as _j
+        raw = rc.get("systems_check:last_run")
+        return {"last_run": _j.loads(raw) if raw else None}
+    except Exception:
+        return {"last_run": None}
+
+
 @router.post("/systems-check/fix")
 async def systems_check_fix(
     req: "_SCFixRequest",

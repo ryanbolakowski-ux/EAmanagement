@@ -239,6 +239,8 @@ export default function SystemsCheck({ token }: { token: string | null }) {
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [lastFetch, setLastFetch] = useState<Date | null>(null)
+  const [running, setRunning] = useState(false)
+  const [lastRun, setLastRun] = useState<{ at?: string; by?: string; overall?: string } | null>(null)
   const [showErrors, setShowErrors] = useState(false)
   const [fixBusy, setFixBusy] = useState<string | null>(null)
   const [fixMsg, setFixMsg] = useState<Record<string, { ok: boolean; message: string }>>({})
@@ -256,6 +258,28 @@ export default function SystemsCheck({ token }: { token: string | null }) {
     } catch (e: any) {
       setErr(e?.message || 'fetch failed')
     } finally { setLoading(false) }
+  }, [token])
+
+  const runFull = useCallback(async () => {
+    if (!token) return
+    setRunning(true)
+    try {
+      const r = await fetch(API + '/systems-check/run', { method: 'POST', headers })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const j: any = await r.json()
+      setData(j); setErr(null); setLastFetch(new Date())
+      if (j.last_run) setLastRun(j.last_run)
+    } catch (e: any) {
+      setErr(e?.message || 'run failed')
+    } finally { setRunning(false) }
+  }, [token])
+
+  const fetchLast = useCallback(async () => {
+    if (!token) return
+    try {
+      const r = await fetch(API + '/systems-check/last', { headers })
+      if (r.ok) { const j = await r.json(); if (j.last_run) setLastRun(j.last_run) }
+    } catch { /* ignore */ }
   }, [token])
 
   const runFix = useCallback(async (action: string) => {
@@ -276,6 +300,7 @@ export default function SystemsCheck({ token }: { token: string | null }) {
 
   useEffect(() => {
     fetchData()
+    fetchLast()
     const i = setInterval(fetchData, 30000)
     return () => clearInterval(i)
   }, [fetchData])
@@ -309,6 +334,17 @@ export default function SystemsCheck({ token }: { token: string | null }) {
             <div className="font-mono text-sm tabular-nums text-slate-700 dark:text-slate-300">
               {lastFetch ? lastFetch.toLocaleTimeString() : '—'}
             </div>
+            {lastRun && (
+              <div className="text-[10px] text-slate-500 dark:text-slate-400 text-right">
+                Last full run: <span className="font-mono">{lastRun.at ? new Date(lastRun.at).toLocaleString() : '—'}</span>
+                {lastRun.by ? <> · by <span className="font-semibold">{lastRun.by}</span></> : null}
+              </div>
+            )}
+            <button onClick={runFull} disabled={running || loading}
+              className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl">
+              <Stethoscope size={14} className={running ? 'animate-pulse' : ''} />
+              {running ? 'Running full check…' : 'Run Full Systems Check'}
+            </button>
             <button onClick={fetchData} disabled={loading}
               className="inline-flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white font-bold text-xs px-3 py-2 rounded-xl">
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
