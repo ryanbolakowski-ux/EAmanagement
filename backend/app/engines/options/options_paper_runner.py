@@ -227,9 +227,20 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                     closes_buffer = [float(x) for x in df["Close"].tail(50).tolist()]
                     last_processed_minute = latest_ts
 
-                # If we hold a position — mark-to-market
+                # If we hold a position — mark-to-market ONLY during the
+                # regular cash session. Outside RTH the option isn't
+                # tradeable; freeze the mark so overnight underlying moves
+                # don't drift displayed P&L or trip SL/TP. (PNL-MARK-FREEZE-V1)
                 if trader._position:
-                    closed = trader.mark_to_market(spot=latest_close, today=today)
+                    from app.engines.pnl_marks import equity_market_live as _eml
+                    if _eml():
+                        closed = trader.mark_to_market(spot=latest_close, today=today)
+                    else:
+                        closed = None
+                        logger.debug(
+                            f"[options-paper-runner] sid={session_id} mark FROZEN "
+                            f"(market closed) — holding {underlying} option position"
+                        )
                     if closed:
                         completed_count += 1
                         logger.info(f"[OptionsPaperRunner] closed: {closed.exit_reason} | PnL=${closed.net_pnl:.2f}")
@@ -254,6 +265,7 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                                 instrument=underlying, direction=side,
                                 mode="options_paper",
                                 open_positions_snapshot=snap,
+                                bar_time=latest_ts,  # GUARD-BARCLOCK-V1
                             )
                             if not decision.allowed:
                                 # Guard already logged reason; skip this tick

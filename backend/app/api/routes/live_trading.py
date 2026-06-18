@@ -1,4 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from app.core.packages import is_fully_automated_tier  # PHASE-D-GUARD
+from app.api.routes.security import (
+    require_recent_verification, audit_log, notify_admins_security,
+    EVENT_AUTOMATION_ENABLED, EVENT_AUTOMATION_DISABLED, EVENT_RISK_CHANGE,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -18,6 +23,9 @@ from app.engines.strategy_classification import (
     broker_supports,
     supported_classes,
 )
+
+from app.engines.pnl_marks import (  # PNL-MARK-FREEZE-V1
+    pick_equity_mark, equity_session, market_session_label, is_futures_symbol)
 
 router = APIRouter()
 # 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
@@ -229,6 +237,7 @@ async def list_broker_accounts(
 async def set_account_trading_enabled(
     account_id: str,
     data: TradingEnabledRequest,
+    request: Request,
     current_user: User = Depends(require_kyc_verified),
     db: AsyncSession = Depends(get_db),
 ):
@@ -252,6 +261,18 @@ async def set_account_trading_enabled(
     if data.trading_enabled and not account.sandbox_mode:
         await require_current_ack(db, current_user.id, "live_trading_consent")
         await require_current_ack(db, current_user.id, "risk_disclosure")
+        # PHASE-D-GUARD: fully-automated (tier_5) activation also requires the
+        # Fully Automated Trading Agreement + a recent emailed-code verification.
+        if is_fully_automated_tier(current_user):
+            await require_current_ack(db, current_user.id, "fully_automated_trading")
+            await require_recent_verification(db, current_user.id, "enable_automation")
+        await audit_log(db, current_user.id, EVENT_AUTOMATION_ENABLED,
+                        {"account_id": str(account.id), "broker": account.broker}, request)
+        await notify_admins_security("Automated trading ENABLED",
+            f"{current_user.email} enabled automation on {account.broker} account {account.id}.")
+    elif not data.trading_enabled:
+        await audit_log(db, current_user.id, EVENT_AUTOMATION_DISABLED,
+                        {"account_id": str(account.id)}, request)
 
     account.trading_enabled = data.trading_enabled
     await db.commit()
@@ -304,6 +325,7 @@ def assert_broker_supports_strategy(strategy, broker_account) -> None:
 @router.post("/sessions", status_code=status.HTTP_201_CREATED)
 async def start_live_session(
     data: StartLiveSessionRequest,
+    request: Request,
     current_user: User = Depends(require_live_trading),
     db: AsyncSession = Depends(get_db),
 ):
@@ -312,6 +334,18 @@ async def start_live_session(
     # strategy is an options strategy (checked below once we have the row).
     await require_current_ack(db, current_user.id, "live_trading_consent")
     await require_current_ack(db, current_user.id, "risk_disclosure")
+    # PHASE-D-GUARD: an unattended live session runs the auto-trade engine,
+    # so it is tier_5-ONLY. Lower live tiers (tier_3 signals, tier_4 approve-
+    # to-place) trade via signal approval, never an unattended session — hard-
+    # block them so a misleading 'live' session can't even be created.
+    if not is_fully_automated_tier(current_user):
+        raise HTTPException(status_code=403, detail=(
+            "Unattended live sessions require the fully-automated package (tier_5). "
+            "Your plan trades via signal approval instead."))
+    await require_current_ack(db, current_user.id, "fully_automated_trading")
+    await require_recent_verification(db, current_user.id, "enable_automation")
+    await audit_log(db, current_user.id, EVENT_AUTOMATION_ENABLED,
+                    {"strategy_id": str(data.strategy_id), "kind": "live_session"}, request)
 
     # Validate strategy + account ownership
     strat = (await db.execute(
@@ -770,6 +804,7 @@ async def get_account_balance(
 async def update_account_sizing(
     account_id: str,
     data: SizingUpdate,
+    request: Request,
     current_user: User = Depends(require_kyc_verified),
     db: AsyncSession = Depends(get_db),
 ):
@@ -797,11 +832,38 @@ async def update_account_sizing(
     if data.max_position_usd is not None and data.max_position_usd <= 0:
         raise HTTPException(status_code=400, detail="max_position_usd must be positive.")
 
+    # PHASE-D-GUARD: RAISING any risk knob requires the risk_change agreement +
+    # a recent emailed-code verification + admin alert + old->new audit. Lowering
+    # (or first-time setup) is always allowed (a safety release).
+    def _raised(_new, _old):
+        return _new is not None and _old is not None and float(_new) > float(_old)
+    _increasing = (_raised(data.risk_per_trade_usd, account.risk_per_trade_usd)
+                   or _raised(data.risk_per_trade_pct, account.risk_per_trade_pct)
+                   or _raised(data.max_position_usd, account.max_position_usd))
+    _old_vals = {
+        "risk_per_trade_usd": account.risk_per_trade_usd,
+        "risk_per_trade_pct": account.risk_per_trade_pct,
+        "max_position_usd": account.max_position_usd,
+    }
+    if _increasing:
+        await require_current_ack(db, current_user.id, "risk_change")
+        await require_recent_verification(db, current_user.id, "risk_change")
+
     account.account_type = data.account_type
     account.risk_per_trade_usd = data.risk_per_trade_usd
     account.risk_per_trade_pct = data.risk_per_trade_pct
     account.max_position_usd = data.max_position_usd
+    if _increasing:
+        await audit_log(db, current_user.id, EVENT_RISK_CHANGE, {
+            "account_id": str(account.id), "old": _old_vals,
+            "new": {"risk_per_trade_usd": data.risk_per_trade_usd,
+                    "risk_per_trade_pct": data.risk_per_trade_pct,
+                    "max_position_usd": data.max_position_usd}}, request)
     await db.commit()
+    if _increasing:
+        await notify_admins_security("Risk settings RAISED",
+            f"{current_user.email} raised risk on account {account.id}: {_old_vals} -> "
+            f"usd={data.risk_per_trade_usd} pct={data.risk_per_trade_pct} maxpos={data.max_position_usd}.")
     await db.refresh(account)
     return BrokerAccountResponse(
         id=str(account.id), broker=account.broker, account_name=account.account_name,
@@ -1138,10 +1200,7 @@ async def get_portfolio_summary(
                 resp = _rq3.get(u3, params={"apiKey": k3}, timeout=3)
                 if resp.status_code != 200: continue
                 t3 = (resp.json() or {}).get("ticker") or {}
-                live = None
-                for fld, sub in (("lastTrade","p"),("min","c"),("day","c"),("prevDay","c")):
-                    v = (t3.get(fld) or {}).get(sub)
-                    if v and float(v) > 0: live = float(v); break
+                live, _src = pick_equity_mark(t3)  # PNL-MARK-FREEZE-V1
                 if live and r.entry_price and r.contracts:
                     today_unrealized_pnl += (live - float(r.entry_price)) * int(r.contracts)
             except Exception: continue
@@ -1178,10 +1237,7 @@ async def get_portfolio_summary(
                 rspU = _rqU.get(uU, params={"apiKey": kU}, timeout=3)
                 if rspU.status_code != 200: continue
                 tU = (rspU.json() or {}).get("ticker") or {}
-                live = None
-                for fld, sub in (("lastTrade","p"),("min","c"),("day","c"),("prevDay","c")):
-                    v = (tU.get(fld) or {}).get(sub)
-                    if v and float(v) > 0: live = float(v); break
+                live, _src = pick_equity_mark(tU)  # PNL-MARK-FREEZE-V1
                 if live and p.entry_price and p.qty:
                     total_unrealized_pnl += (live - float(p.entry_price)) * int(p.qty)
             except Exception:
@@ -1524,6 +1580,7 @@ async def get_unrealized_pnl(
         import yfinance as yf
     except Exception:
         yf = None
+    _eq_sess = equity_session()  # PNL-MARK-FREEZE-V1
 
     for r in open_trades:
         inst = r[1]
@@ -1531,20 +1588,25 @@ async def get_unrealized_pnl(
         qty  = r[3] or 1
         entry = r[4] or 0
         cur_price = entry  # fallback to entry if quote unavailable
-        # Use Polygon snapshot (real-time on Stocks Starter for some fields,
-        # delayed 15min for last-trade — better than yfinance which gets rate-limited).
+        price_source = "entry_fallback"
+        # PNL-MARK-FREEZE-V1: outside the regular cash session, mark equities/
+        # options at the official close (never an after-hours lastTrade tick).
         try:
             import os as _os_up, requests as _rq_up
+            from loguru import logger as _lg_pnl
             _k = _os_up.environ.get("POLYGON_API_KEY", "")
-            if _k:
+            if _k and not is_futures_symbol(inst):
                 _u = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{inst}"
                 _r = _rq_up.get(_u, params={"apiKey": _k}, timeout=3)
                 if _r.status_code == 200:
-                    _t = (_r.json() or {}).get("ticker") or {}
-                    for _fld, _sub in (("lastTrade","p"),("min","c"),("day","c"),("prevDay","c")):
-                        _v = (_t.get(_fld) or {}).get(_sub)
-                        if _v and float(_v) > 0:
-                            cur_price = float(_v); break
+                    _tj = (_r.json() or {}).get("ticker") or {}
+                    _mk, _src = pick_equity_mark(_tj, _eq_sess)
+                    if _mk is not None:
+                        cur_price = _mk; price_source = _src
+            _lg_pnl.info(
+                f"[pnl-mark] inst={inst} session={market_session_label(inst)} "
+                f"source={price_source} price={cur_price} entry={entry}"
+            )
         except Exception:
             pass
 
@@ -1561,6 +1623,8 @@ async def get_unrealized_pnl(
             "contracts": qty,
             "entry_price": entry,
             "current_price": round(cur_price, 4),
+            "market_session": market_session_label(inst),
+            "price_source": price_source,
             "unrealized_pnl": round(unrealized, 2),
             "stop_loss": r[5],
             "take_profit": r[6],
@@ -1570,6 +1634,7 @@ async def get_unrealized_pnl(
     return {
         "open_count": len(positions),
         "total_unrealized": round(total, 2),
+        "market_session": _eq_sess,
         "positions": positions,
     }
 

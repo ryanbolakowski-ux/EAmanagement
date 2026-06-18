@@ -286,8 +286,8 @@ def is_in_session(timestamp, session_filters: list[str]) -> bool:
 
     sessions = {
         "NY": (9 * 60 + 30, 16 * 60),
-        "NY_AM": (9 * 60 + 30, 12 * 60),
-        "NY_PM": (14 * 60, 15 * 60),
+        "NY_AM": (9 * 60 + 30, 11 * 60),
+        "NY_PM": (13 * 60 + 30, 16 * 60 + 30),
         "LONDON": (2 * 60, 5 * 60),
         "LONDON_CLOSE": (10 * 60, 12 * 60),
         "ASIA": (20 * 60, 24 * 60),

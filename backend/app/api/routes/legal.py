@@ -23,7 +23,8 @@ CURRENT_VERSIONS = {
     "risk_disclosure":          "v1",
     "live_trading_consent":     "v1",
     "options_trading_consent":  "v1",
-    "signals_disclosure":       "v1",
+    "signals_disclosure":       "v2",
+    "fully_automated_trading":  "v1",
     "risk_change":              "v1",
 }
 
@@ -84,10 +85,28 @@ DOCUMENTS = {
     },
     "signals_disclosure": {
         "title": "Signal-Only Mode Disclosure",
-        "version": "v1",
+        "version": "v2",
         "html": """
 <p>The <strong>Account Signals</strong> feature emits notifications (email, push, in-app) describing positions the Theta Algos algorithm is taking in its own proprietary book. These notifications are intended for prop-firm accounts and other contexts in which automated trading is prohibited or impractical.</p>
 <p>Signal-only notifications are <strong>not</strong> investment advice, a recommendation, an endorsement, a solicitation, or an offer to buy, sell, or hold any financial instrument. Whether you replicate any portion of a signal in your own account is entirely your decision and your responsibility. Past or hypothetical performance shown anywhere in the Service is not indicative of future results. You may lose money — possibly more than your initial deposit — and Theta Algos LLC is not liable for losses arising from your use of, or reliance on, any signal.</p>
+<p>Theta Algos LLC is <strong>not managing your account</strong>. Account management &mdash; where the system places, manages, and closes trades on your behalf &mdash; applies <strong>only</strong> if you are on the fully automated package and have separately accepted the <em>Fully Automated Trading Agreement</em>. Unless you are on that package and have accepted that agreement, every trade decision is yours to make and to execute.</p>
+<p>Trade ideas and signals are provided for <strong>educational and informational purposes only</strong> unless you are separately authorized for automated or assisted execution. Trading involves risk and you may lose money; <strong>no profits are guaranteed</strong>.</p>
+""",
+    },
+    "fully_automated_trading": {
+        "title": "Fully Automated Trading Agreement",
+        "version": "v1",
+        "html": """
+<p>You are enabling <strong>fully automated trading</strong>. This authorizes Theta Algos LLC ("we", "us") to <strong>automatically place, manage, and close trades</strong> in a brokerage account you control, according to the strategies and risk settings you have selected, <strong>without asking you to approve each individual trade</strong>. By accepting, you confirm and agree that:</p>
+<ol>
+  <li><strong>Automated execution.</strong> Once automation is enabled, the system may enter, manage, and exit positions on your behalf with no further manual approval. It may place <strong>entry orders, stop-loss orders, take-profit orders, trailing stops, break-even stop adjustments, and closing orders</strong> as the selected strategy logic and your configured risk settings dictate.</li>
+  <li><strong>Risk of loss.</strong> Trading involves substantial risk and losses are possible, including losses that may exceed your initial deposit. Past, simulated, and backtested performance is not indicative of future results.</li>
+  <li><strong>Your responsibilities.</strong> You are solely responsible for your brokerage account, your connected brokerage credentials, your risk settings (including maximum allocation, maximum risk, daily-loss limits, and contract/position limits), and for enabling or disabling automation. You confirm you are the lawful owner of the connected brokerage account and are authorized to place trades in it.</li>
+  <li><strong>No guarantee of profit.</strong> Theta Algos LLC does not guarantee any profit or any particular trading result.</li>
+  <li><strong>Not financial advice.</strong> Theta Algos LLC is not a registered investment adviser or broker-dealer, and nothing in the Service constitutes investment advice or a recommendation to buy, sell, or hold any instrument. The decision to enable automation is yours alone.</li>
+  <li><strong>You can turn it off.</strong> You may disable automation at any time from your account. Disabling automation stops new automated entries; you remain responsible for monitoring, managing, or closing any positions that are already open.</li>
+</ol>
+<p>If you do not accept every clause above, do <strong>not</strong> accept this agreement and do not enable fully automated trading.</p>
 """,
     },
 }

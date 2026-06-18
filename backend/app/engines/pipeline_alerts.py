@@ -107,6 +107,8 @@ async def send_pipeline_failure_alert(
     *,
     traceback_str: str | None = None,
     recipients: Iterable[str] | None = None,
+    dedup_key: str | None = None,
+    dedup_window_sec: int = 3600,
 ) -> int:
     """Send the URGENT failure alert. Returns the count of admins emailed
     (0 if nothing could be sent — caller should NOT treat 0 as an error
@@ -118,6 +120,19 @@ async def send_pipeline_failure_alert(
       * sorts to the top of admin inboxes when they wake up
     """
     try:
+        # Throttle duplicate alerts by reason+window via Redis so the SAME
+        # unresolved issue can't re-spam (esp. across restarts, which wiped
+        # the old in-memory latches). Fail-OPEN: if redis is down we still
+        # send, never masking a real outage.
+        try:
+            import hashlib as _hl, redis as _rd
+            _dk = dedup_key or _hl.sha256((reason or "").encode()).hexdigest()[:16]
+            _rc = _rd.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+            if not _rc.set(f"pipeline_alert:dedup:{_dk}", "1", ex=dedup_window_sec, nx=True):
+                logger.info(f"[pipeline-alert] throttled (deduped {dedup_window_sec}s) reason={reason!r}")
+                return 0
+        except Exception:
+            pass
         if recipients is not None:
             to_list = list(recipients)
         else:

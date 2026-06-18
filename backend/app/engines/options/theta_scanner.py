@@ -143,11 +143,11 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
     # 2. Pre-market liquidity: < $500k = HARD reject (illiquid micro-cap);
     #    $500k-$1M = WATCH-ONLY (thin but tradeable, user decides); >=$1M = clean.
     pm_dollar_vol = _premarket_dollar_volume(bars_1m)
-    if pm_dollar_vol < 500_000:
-        logger.info(f"[ThetaScanner] reject {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $500k (illiquid)")
-        return "reject", reasons
     if pm_dollar_vol < 1_000_000:
-        logger.info(f"[ThetaScanner] {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1M — thin, WATCH-ONLY")
+        logger.info(f"[ThetaScanner] reject {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1M (illiquid)")
+        return "reject", reasons
+    if pm_dollar_vol < 1_500_000:
+        logger.info(f"[ThetaScanner] {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1.5M — thin, WATCH-ONLY")
         soft_fail = True
     reasons.append(f"pm $-vol ${pm_dollar_vol/1e6:.1f}M")
 
@@ -155,8 +155,8 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
     vwap = _session_vwap(bars_1m)
     if vwap and vwap > 0:
         dist_pct = (price - vwap) / vwap * 100.0
-        if dist_pct > 8.0:
-            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} is {dist_pct:.1f}% above VWAP ${vwap:.2f} (>8% overextended)")
+        if dist_pct > 5.0:
+            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} is {dist_pct:.1f}% above VWAP ${vwap:.2f} (>5% overextended)")
             return "reject", reasons
         if price < vwap:
             logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} below VWAP ${vwap:.2f} (long-below-VWAP) — watch-only")
@@ -207,7 +207,7 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
             if not (5.0 <= gap_pct <= 25.0): continue
             if price < 10 or price > 200: continue  # raised floor to skip micro-caps (was 2)
             if today_vol * price < 5_000_000: continue
-            if prev_vol > 0 and today_vol / prev_vol < 2.0: continue
+            if prev_vol > 0 and today_vol / prev_vol < 2.5: continue
             rel_vol = today_vol / max(prev_vol, 1)
             cat_w, cat_reason = await _get_8k_catalyst(db, ticker)
             score = gap_pct * math.log(max(today_vol, 1)) * cat_w * min(rel_vol, 10) / 100
@@ -237,8 +237,8 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
     # MIN_SCORE floor (added 2026-06-05): only fire if the top candidate clears
     # the quality bar. After 4 losing micro-cap stop-outs in 5 days, the bar
     # is non-negotiable. Reject sub-floor days entirely.
-    MIN_SCORE = 12.0      # floor to CONSIDER (lowered 2026-06-11 from 15)
-    CONFIRM_SCORE = 15.0  # >= this = confirmed entry; MIN_SCORE..CONFIRM_SCORE = WATCH ONLY
+    MIN_SCORE = 15.0      # floor to CONSIDER (raised back to 15 on 2026-06-16: CBRL@14.55 fired + lost)
+    CONFIRM_SCORE = 20.0  # >= this = confirmed entry; MIN_SCORE..CONFIRM_SCORE = WATCH ONLY (raised 2026-06-16)
     if candidates[0]["score"] < MIN_SCORE:
         logger.info(
             f"[stock-scanner] no pick \u2014 best candidate {candidates[0]['ticker']} "

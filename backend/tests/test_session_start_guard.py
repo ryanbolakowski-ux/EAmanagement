@@ -79,6 +79,9 @@ def test_paper_allows_entry_on_fresh_bar():
     async def go():
         trader = PaperTrader(_AlwaysLong(), "NQ", session_id="t-sess2", user_id=None, strategy_id=None)
         await trader.start()
+        # Backdate session start past the 120s post-start settle window (a
+        # separate, later guard) so this test isolates the session-start guard.
+        trader._session_started_at = datetime.now(timezone.utc) - timedelta(seconds=200)
         fresh_ts = trader._session_started_at + timedelta(seconds=1)
         await trader.on_bar("1m", _bar(fresh_ts))
         return trader
@@ -96,6 +99,9 @@ def test_paper_grace_window_allows_mid_formation_bar():
     async def go():
         trader = PaperTrader(_AlwaysLong(), "NQ", session_id="t-sess3", user_id=None, strategy_id=None)
         await trader.start()
+        # Backdate session start past the 120s post-start settle window (a
+        # separate, later guard) so this test isolates the session-start guard.
+        trader._session_started_at = datetime.now(timezone.utc) - timedelta(seconds=200)
         within_grace = trader._session_started_at - timedelta(seconds=30)
         await trader.on_bar("1m", _bar(within_grace))
         return trader

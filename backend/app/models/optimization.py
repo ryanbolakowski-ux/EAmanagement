@@ -12,6 +12,8 @@ class OptimizationStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    RECOVERING = "recovering"   # orphaned by restart, being re-spawned
+    RESUMED = "resumed"         # picked back up from checkpoint, running again
 
 
 class OptimizationRun(Base):
@@ -39,6 +41,10 @@ class OptimizationRun(Base):
 
     total_combinations: Mapped[int] = mapped_column(Integer, default=0)
     completed_combinations: Mapped[int] = mapped_column(Integer, default=0)
+    # Checkpoint: per-distinct-config results persisted AS each combo finishes,
+    # so a restart can resume + skip already-computed combos instead of dying.
+    partial_results: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     status: Mapped[OptimizationStatus] = mapped_column(Enum(OptimizationStatus, name="optimizationstatus"), default=OptimizationStatus.QUEUED)
     celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

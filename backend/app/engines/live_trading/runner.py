@@ -15,7 +15,7 @@ from app.models.trade import TradeSession
 from app.models.user import BrokerAccount
 from app.models.strategy import Strategy
 from app.engines.live_trading.live_trader import LiveTrader
-from app.engines.live_trading.broker_factory import get_broker
+from app.engines.live_trading.broker_factory import build_broker_from_account as get_broker  # was get_broker (renamed)
 from app.engines.backtest_engine.ict_strategy import ICTStrategy
 from app.engines.strategy_engine.base_strategy import StrategyConfig
 
@@ -42,6 +42,9 @@ async def stop_live_session(session_id: str):
             await t
         except asyncio.CancelledError:
             pass
+
+
+_active_live_traders: dict = {}  # ROUTING (#156): session_id:instrument -> LiveTrader
 
 
 async def _run_session(session_id, strategy_id, user_id, broker_account_id, instrument):
@@ -80,8 +83,10 @@ async def _run_session(session_id, strategy_id, user_id, broker_account_id, inst
             session_id=session_id,
             user_id=user_id,
             strategy_id=strategy_id,
+            broker_account_id=broker_account_id,
         )
         trader._is_running = True
+        _active_live_traders[f"{session_id}:{instrument}"] = trader
         logger.info(f"[LiveRunner] Started session {session_id} | {instrument}")
 
         # Main loop — pull bars from broker every minute, push to strategy

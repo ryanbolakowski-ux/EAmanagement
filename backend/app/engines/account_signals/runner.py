@@ -748,3 +748,72 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
             )
         except Exception as e:
             logger.error(f"[Signals] push send failed: {e}")
+
+    # ROUTING (#156): fan the sent signal into eligible active paper/live sessions.
+    if locals().get("final_status") == "sent":
+        try:
+            await route_emitted_signal(sid, user_id, instrument, signal, strategy_id)
+        except Exception as _re:
+            logger.warning(f"[signal-route] dispatch failed signal={sid}: {_re}")
+
+
+async def route_emitted_signal(sid, user_id, instrument, signal, strategy_id=None):
+    """ROUTING (#156): route a just-emitted email signal into the user's ACTIVE
+    eligible paper/live sessions for `instrument`. Paper enters (safe); live is
+    gated by Phase E auto_trade_allowed. Logs + audits every decision."""
+    inst = (instrument or "").upper()
+    routed = []
+    try:
+        from app.engines.paper_trading.runner import _active_traders as _pt
+        for key, tr in list(_pt.items()):
+            if str(getattr(tr, "user_id", "")) == str(user_id) and getattr(tr, "instrument", "").upper() == inst and getattr(tr, "_is_running", False):
+                entered, reason = await tr.route_external_signal(signal, source_signal_id=str(sid))
+                routed.append(("paper", key, entered, reason))
+    except Exception as e:
+        logger.warning(f"[signal-route] paper enumerate error: {e}")
+    try:
+        from app.engines.live_trading.runner import _active_live_traders as _lt
+        from app.core.auto_trade_guard import auto_trade_allowed
+        for key, tr in list(_lt.items()):
+            if str(getattr(tr, "user_id", "")) == str(user_id) and getattr(tr, "instrument", "").upper() == inst and getattr(tr, "_is_running", False):
+                ok, why = await auto_trade_allowed(getattr(tr, "user_id", None), getattr(tr, "broker_account_id", None),
+                                                   context={"kind": "signal_route", "signal_id": str(sid), "instrument": inst})
+                if not ok:
+                    routed.append(("live", key, False, f"blocked:{why}")); continue
+                entered, reason = await tr.route_external_signal(signal, source_signal_id=str(sid))
+                routed.append(("live", key, entered, reason))
+    except Exception as e:
+        logger.warning(f"[signal-route] live enumerate error: {e}")
+    summary = "; ".join(f"{m}[{k}]={'ENTERED' if e else 'skip:' + r}" for m, k, e, r in routed) or "no active eligible sessions"
+    logger.info(f"[signal-route] signal={sid} inst={inst} -> {summary}")
+    try:
+        from app.api.routes.security import audit_log
+        async with async_session_factory() as _db:
+            for m, k, e, r in routed:
+                await audit_log(_db, user_id, "signal_routed",
+                                {"signal_id": str(sid), "mode": m, "session": k, "instrument": inst,
+                                 "entered": bool(e), "reason": r}, None)
+            await _db.commit()
+    except Exception:
+        pass
+    return routed
+
+
+async def run_signal_resolution_loop(interval_sec: int = 600):
+    """Self-healing: periodically resolve pending SENT Email Signals so the
+    backlog can't build up when nobody has the page open (frontend /stats
+    polling is otherwise the only thing that drives resolution). Lazy imports
+    keep this free of any import cycle with the routes module."""
+    import asyncio as _aio
+    await _aio.sleep(60)  # let the boot reconnect-storm settle before the first DB-heavy pass
+    while True:
+        try:
+            from app.database import async_session_factory
+            from app.api.routes.account_signals import _resolve_signal_outcomes
+            async with async_session_factory() as _db:
+                n = await _resolve_signal_outcomes(_db, limit=200)
+                if n:
+                    logger.info(f"[signals] scheduled resolution pass resolved {n}")
+        except Exception as _e:
+            logger.warning(f"[signals] scheduled resolution loop error: {_e}")
+        await _aio.sleep(interval_sec)

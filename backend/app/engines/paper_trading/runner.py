@@ -311,10 +311,14 @@ async def _save_new_trades(trader, session_id, strategy_id, user_id, instrument)
     # COUNT(trades)-then-slice. After restart the trader has empty
     # _completed_trades but DB holds N rows; old code computed [][N:] = []
     # forever, dropping every newly closed trade.
+    # _completed_trades holds ONLY trades closed during THIS trader run (starts
+    # empty in PaperTrader.__init__). The high-water mark indexes into THIS list
+    # and MUST start at 0 -- NOT the historical DB row count for the session.
+    # Sessions are reused across days, so the DB count (e.g. 24) was always >=
+    # len(_completed_trades) (e.g. 3), making trades[24:] = [] and silently
+    # dropping every newly-closed trade -> empty Today stats + "still open" UI.
     if not hasattr(trader, "_persisted_count"):
-        async with async_session_factory() as _db0:
-            _row = await _db0.execute(select(Trade).where(Trade.session_id == session_id))
-            trader._persisted_count = len(_row.scalars().all())
+        trader._persisted_count = 0
     existing_count = trader._persisted_count
     new_trades = trades[existing_count:]
     if not new_trades:
@@ -379,8 +383,13 @@ def get_open_positions():
         if hasattr(trader, '_position') and trader._position:
             p = trader._position
             last_price = getattr(trader, '_last_price', 0.0)
-            tick_size = 0.25 if p.instrument in ('ES', 'NQ', 'YM') else 0.10
-            tick_value = 12.50 if p.instrument in ('ES', 'NQ') else 5.0 if p.instrument == 'YM' else 5.0
+            # Use the canonical per-instrument tables so micros (MNQ/MES/...) get
+            # their real tick math. The old ES/NQ/YM-only branch defaulted MNQ to
+            # tick_size=0.10 + tick_value=$5.0 -> ~25x inflated unrealized P&L
+            # (a 48pt MNQ move showed -$2,400 instead of -$96).
+            from app.engines.paper_trading.paper_trader import TICK_SIZES as _TS, TICK_VALUES as _TV
+            tick_size = _TS.get(p.instrument, 0.25)
+            tick_value = _TV.get(p.instrument, 12.50)
             if p.direction == 'long':
                 unrealized = ((last_price - p.entry_price) / tick_size) * tick_value * p.contracts
             else:

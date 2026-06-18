@@ -18,6 +18,10 @@ from app.engines.strategy_engine.base_strategy import BaseStrategy, TradeSignal,
 # multiple sessions on the same setup all open identical trades simultaneously.
 _redis = redis_lib.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True, db=0)
 _SIGNAL_LOCK_TTL = 600  # seconds — matches typical max position holding window
+# Post-start settle window: ignore entry signals for this many seconds after a
+# strategy is started, so it doesn't jump into a setup already in progress at
+# activation. Exits + indicator seeding are unaffected.
+_ENTRY_SETTLE_SECONDS = 120
 
 TICK_VALUES = {
     "ES":  12.50, "NQ":  5.00, "RTY": 5.00, "YM":  5.00,
@@ -205,6 +209,19 @@ class PaperTrader:
         if self._warmup:
             return
 
+        # ── Post-start settle window ──────────────────────────────────────
+        # Do NOT open a position in the first _ENTRY_SETTLE_SECONDS after the
+        # session activates. Lets a setup FORM on post-start data instead of
+        # entering one that was already mid-move at start. (Exit management and
+        # buffer seeding above still run.)
+        if self._session_started_at is not None:
+            _elapsed = (datetime.now(timezone.utc) - self._session_started_at).total_seconds()
+            if _elapsed < _ENTRY_SETTLE_SECONDS:
+                if not getattr(self, "_settle_logged", False):
+                    logger.info(f"[PaperTrader] settle window — no new entries for the first {_ENTRY_SETTLE_SECONDS}s after start ({self.instrument})")
+                    self._settle_logged = True
+                return
+
         # Look for entry signal
         if not self._position and self.strategy.check_risk_controls():
             signal = self.strategy.on_bar(bars_dict)
@@ -235,6 +252,8 @@ class PaperTrader:
                         direction=signal.signal.value,
                         mode="paper",
                         open_positions_snapshot=snap,
+                        bar_time=bar.get("timestamp"),  # PAPER-TRADER-GUARD-BARCLOCK-V1
+                        entry_price=getattr(signal, "entry_price", None),
                     )
                     if not decision.allowed:
                         # Guard already logged the reason; release any lock we may have
@@ -328,6 +347,41 @@ class PaperTrader:
         n_m = self._pick_contract_size(entry, stop, ts_m, tv_m, strategy_cap * 10)
         return n_m, micro, ts_m, tv_m
 
+    async def route_external_signal(self, signal, source_signal_id=None):
+        """ROUTING (#156): enter an EXTERNAL (email) signal into this paper
+        session through the same guards as on_bar. Returns (entered, reason).
+        The signal-lock/entry-guard make this dedup-safe vs the trader's own
+        on_bar, so routing can't double-enter."""
+        from datetime import datetime as _dt, timezone as _tz
+        try:
+            if not getattr(self, "_is_running", False) or getattr(self, "_kill_switch", False):
+                return False, "session_not_running"
+            if getattr(self, "_warmup", False):
+                return False, "warmup"
+            if self._position:
+                return False, "already_in_position"
+            if getattr(self, "_session_started_at", None) is not None:
+                if (_dt.now(_tz.utc) - self._session_started_at).total_seconds() < _ENTRY_SETTLE_SECONDS:
+                    return False, "settle_window"
+            if not self.strategy.check_risk_controls():
+                return False, "risk_controls"
+            try:
+                from app.engines.entry_guard import can_enter
+                d = await can_enter(session_id=str(self.session_id or ""), strategy_id=str(self.strategy_id or ""),
+                                    instrument=self.instrument, direction=signal.signal.value, mode="paper",
+                                    open_positions_snapshot=[])
+                if not d.allowed:
+                    return False, f"entry_guard:{getattr(d, 'reason', 'blocked')}"
+            except Exception as _ge:
+                logger.error(f"[PaperTrader] route entry-guard error (fail-open): {_ge}")
+            if not self._acquire_signal_lock():
+                return False, "signal_locked_sibling"
+            self._routed_source_signal_id = source_signal_id
+            await self._open_position(signal, _dt.now(_tz.utc))
+            return (self._position is not None), ("entered" if self._position else "open_failed")
+        except Exception as e:
+            return False, f"error:{type(e).__name__}"
+
     async def _open_position(self, signal: TradeSignal, timestamp):
         # Recompute size from current equity & stop distance — never trust
         # signal.contracts (which is just strategy.max_contracts).
@@ -370,6 +424,13 @@ class PaperTrader:
         logger.info(
             f"[paper-runner] sid={self.session_id} ENTERED inst={traded_instrument} "
             f"dir={signal.signal.value} entry={signal.entry_price:.2f} contracts={contracts}"
+        )
+        # Issue 2: trade-creation-source + signal linkage for audit/grep.
+        logger.info(
+            f"[trade-source] mode=paper session={self.session_id} "
+            f"strategy_id={self.strategy_id} inst={traded_instrument} "
+            f"dir={signal.signal.value} source=strategy_signal "
+            f"source_signal_id={getattr(signal, 'source_signal_id', None)}"
         )
 
         # Email a signal receipt to the user — they want to know when paper
@@ -502,7 +563,10 @@ class PaperTrader:
             net_pnl=net_pnl,
             is_winner=is_winner,
             exit_reason=reason.value,
-            metadata=p.metadata,
+            # Issue 3: carry the real SL/TP so the persisted trade (and the
+            # chart modal) draw the levels instead of 0.
+            metadata={**(p.metadata or {}), "stop_loss": p.stop_loss,
+                      "take_profit": p.take_profit},
         )
 
         self._completed_trades.append(result)

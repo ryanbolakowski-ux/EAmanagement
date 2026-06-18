@@ -35,6 +35,16 @@ class ICTStrategy(BaseStrategy):
         self._bar_counter = 0
         self._cooldown_bars = 1  # minimum bars between signals (restored)
         self._ict_extra: dict = {}  # persistent per-setup ledger (V2 daily cap)
+        # Authoritative futures flag: set ONCE here, independent of the
+        # per-bar gate (which can throw). The session-block fallback relies
+        # on this never silently flipping to False on a gate error.
+        try:
+            from app.engines.strategy_engine.market_activity_gate import is_futures_symbol as _ifs
+            self._is_futures_inst = _ifs(instrument)
+        except Exception:
+            self._is_futures_inst = False
+        self._last_gate = None
+        self._last_gate_go = None
 
     def _build_ictcontext(self, bars):
         """Adapter: wrap on_bar inputs in an ICTContext for a V2 dedicated setup.
@@ -45,7 +55,66 @@ class ICTStrategy(BaseStrategy):
         ctx.extra = self._ict_extra
         return ctx
 
+    def _futures_activity_gate(self, bars):
+        """FUTURES-only GO/NO-GO via the Market Activity Gate. Returns a
+        GateResult, or None to ABSTAIN (non-futures, thin data, or error) —
+        None must NEVER block (fail-open). Uses the execution-timeframe bars
+        (the tf the strategy triggers on), falling back to the primary tf."""
+        if not self._is_futures_inst:
+            return None
+        self._last_gate = None       # clear prior snapshot so _gate_meta stays honest this bar
+        try:
+            from app.engines.strategy_engine.market_activity_gate import evaluate_activity_gate
+            etf = self.config.execution_timeframe
+            ptf = self.config.primary_timeframe
+            df = bars.get(etf)
+            if df is None or len(df) == 0:
+                df = bars.get(ptf)
+            if df is None or len(df) == 0:
+                return None
+            res = evaluate_activity_gate(self.instrument, df)
+            self._last_gate = res    # refresh every bar (None on abstain -> honest metadata)
+            if res is not None:
+                _prev = self._last_gate_go
+                if _prev != res.go:                       # log only on GO<->NO flips
+                    logger.info(
+                        f"[FUTURES-GATE/{self.instrument}] {'GO' if res.go else 'NO'} "
+                        f"score={res.score:.2f} in_window={res.in_window} "
+                        f"bias={res.bias} — {res.reason}"
+                    )
+                self._last_gate_go = res.go
+            return res
+        except Exception as _exc:
+            logger.warning(
+                f"[FUTURES-GATE/{self.instrument}] gate error "
+                f"{type(_exc).__name__}: {_exc}; abstaining (fail-open -> session block applies)"
+            )
+            return None
+
+    def _gate_meta(self):
+        """Compact JSON-safe snapshot of the last futures activity-gate
+        decision for signal metadata (None when the gate did not run)."""
+        g = getattr(self, "_last_gate", None)
+        if g is None:
+            return None
+        return {
+            "go": bool(g.go), "score": round(float(g.score), 3),
+            "bias": g.bias, "in_window": bool(g.in_window), "reason": g.reason,
+        }
+
     def on_bar(self, bars):
+        # === FUTURES MARKET-ACTIVITY GATE (Theta path) — source of truth ===
+        # For FUTURES instruments TIME IS NOT A GATE: the hard session-window
+        # block below is replaced by the multi-factor Market Activity Gate.
+        # A real off-hours move deploys; dead-volume / chop stands down.
+        # Placed FIRST so it governs both the V1 engine AND any V2 setup, and
+        # since email/paper/live all share this on_bar, all three get the
+        # identical GO/NO-GO decision. Abstains (no block) on non-futures /
+        # thin data; fail-open on error.
+        _gate = self._futures_activity_gate(bars)
+        if _gate is not None and not _gate.go:
+            self._last_reject_reason = f"activity_gate:{_gate.reason}"
+            return None
         # === STEP 0: dedicated-setup (V2) dispatch, gated PER-STRATEGY ===
         # Opt in via rule_tree.engine_version == "v2". Default "v1" skips this
         # entirely and runs the generic engine below UNCHANGED (zero behaviour
@@ -88,9 +157,15 @@ class ICTStrategy(BaseStrategy):
         if bar_idx - self._last_signal_bar < self._cooldown_bars:
             return None
 
-        # Session filter
+        # Session filter. FUTURES bypass the hard time window ONLY when the
+        # activity gate actually rendered a verdict THIS bar (_gate is not
+        # None — necessarily a GO, since a NO already returned at the top of
+        # on_bar). On gate ABSTAIN/ERROR (_gate is None) or for NON-futures,
+        # the hard session window still applies — a gate failure falls back
+        # to the prior time-gated behavior instead of removing both guards.
         session_filters = self.config.session_filters
-        if session_filters and not is_in_session(current_ts, session_filters):
+        _gate_governs = bool(getattr(self, "_is_futures_inst", False)) and (_gate is not None)
+        if session_filters and not _gate_governs and not is_in_session(current_ts, session_filters):
             self._last_reject_reason = "session_filter"
             logger.debug(f"[ICT/{self.instrument}] reject: outside session window")
             return None
@@ -143,17 +218,17 @@ class ICTStrategy(BaseStrategy):
         # HTF FVGs (strongest signal)
         htf_data = self._get_htf_data(bars, htfs)
         if htf_data is not None and len(htf_data) >= 10:
-            htf_fvgs = detect_fvgs(htf_data.tail(50), instrument=self.instrument, min_size_ticks=2)
+            htf_fvgs = detect_fvgs(htf_data.tail(50), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
             all_fvgs.extend(htf_fvgs)
 
         # Primary TF FVGs
-        mtf_fvgs = detect_fvgs(primary.tail(40), instrument=self.instrument, min_size_ticks=1)
+        mtf_fvgs = detect_fvgs(primary.tail(40), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
         all_fvgs.extend(mtf_fvgs)
 
         # Execution TF FVGs and IFVGs (finest resolution)
         exec_data = bars.get(etf, primary)
         if len(exec_data) >= 10:
-            ltf_fvgs = detect_fvgs(exec_data.tail(30), instrument=self.instrument, min_size_ticks=1)
+            ltf_fvgs = detect_fvgs(exec_data.tail(30), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
             ltf_ifvgs = detect_ifvgs(exec_data.tail(40), instrument=self.instrument, min_size_ticks=0.5)
             all_fvgs.extend(ltf_fvgs)
             all_fvgs.extend(ltf_ifvgs)
@@ -277,6 +352,7 @@ class ICTStrategy(BaseStrategy):
                     "chart_candles": chart_candles,
                     "chart_fvgs": chart_fvgs,
                     "primary_tf": ptf,
+                    "activity_gate": self._gate_meta(),
                     "inversion": inversion_fvg is not None,
                     "sweep_level": inversion_sweep,
                 },
@@ -312,6 +388,7 @@ class ICTStrategy(BaseStrategy):
                     "chart_candles": chart_candles,
                     "chart_fvgs": chart_fvgs,
                     "primary_tf": ptf,
+                    "activity_gate": self._gate_meta(),
                     "inversion": inversion_fvg is not None,
                     "sweep_level": inversion_sweep,
                 },

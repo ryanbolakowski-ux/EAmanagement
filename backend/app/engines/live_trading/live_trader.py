@@ -54,6 +54,7 @@ class LiveTrader:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         strategy_id: Optional[str] = None,
+        broker_account_id: Optional[str] = None,
     ):
         self.strategy   = strategy
         self.broker     = broker
@@ -65,6 +66,7 @@ class LiveTrader:
         self.session_id  = session_id
         self.user_id     = user_id
         self.strategy_id = strategy_id
+        self.broker_account_id = broker_account_id
 
         self._position: Optional[LivePosition] = None
         self._is_running: bool = False
@@ -171,6 +173,8 @@ class LiveTrader:
                         direction=signal.signal.value,
                         mode="live",
                         open_positions_snapshot=snap,
+                        bar_time=bar.get("timestamp"),  # GUARD-BARCLOCK-V1
+                        entry_price=getattr(signal, "entry_price", None),
                     )
                     if not decision.allowed:
                         return
@@ -234,7 +238,32 @@ class LiveTrader:
         n_m = self._pick_contract_size(entry, stop, ts_m, tv_m, cap * 10)
         return n_m, micro, ts_m, tv_m
 
+    async def route_external_signal(self, signal, source_signal_id=None):
+        """ROUTING (#156): enter an EXTERNAL (email) signal on this live session.
+        Goes through _execute_entry, which carries the Phase E auto-trade guard,
+        so an ineligible user can never place. Returns (entered, reason)."""
+        try:
+            if not getattr(self, "_is_running", False) or getattr(self, "_kill_switch", False):
+                return False, "session_not_running"
+            if self._position:
+                return False, "already_in_position"
+            self._routed_source_signal_id = source_signal_id
+            await self._execute_entry(signal)
+            return (self._position is not None), ("entered" if self._position else "blocked_or_open_failed")
+        except Exception as e:
+            return False, f"error:{type(e).__name__}"
+
     async def _execute_entry(self, signal):
+        # PHASE-E-GUARD: hard backstop — never auto-place a live trade unless the
+        # user is fully-automated (tier_5) + signed the agreement + trading_enabled.
+        from app.core.auto_trade_guard import auto_trade_allowed
+        _ok, _why = await auto_trade_allowed(
+            self.user_id, getattr(self, "broker_account_id", None),
+            context={"instrument": self.instrument, "strategy_id": str(self.strategy_id),
+                     "session_id": str(self.session_id), "kind": "live_auto_entry"})
+        if not _ok:
+            logger.warning(f"[LiveTrader] AUTO-TRADE BLOCKED on {self.instrument}: {_why} — not placing (audited)")
+            return
         side = OrderSide.BUY if signal.signal == SignalType.LONG else OrderSide.SELL
 
         # Bug #11 fix: risk-based sizing rather than trusting signal.contracts

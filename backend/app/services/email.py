@@ -38,8 +38,8 @@ def _fw_session_label() -> str:
     t = et.hour * 60 + et.minute
     if t >= 18*60 or t < 3*60:      return "ASIA"
     if 3*60 <= t < 9*60:            return "LONDON"
-    if 9*60+30 <= t < 12*60:        return "NY_AM"
-    if 14*60+30 <= t < 16*60+30:    return "NY_PM"
+    if 9*60+30 <= t < 11*60:        return "NY_AM"
+    if 13*60+30 <= t < 16*60+30:    return "NY_PM"
     return "DEAD"
 
 
@@ -342,6 +342,29 @@ def send_admin_new_user_notification(new_user_email: str, new_user_username: str
     if admin_to == "disabled":
         return False
     return _send(admin_to, subject, html)
+
+
+def send_verification_code_email(to: str, username: str, code: str,
+                                 purpose_label: str = "confirm a sensitive change",
+                                 ttl_min: int = 10) -> bool:
+    """6-digit email verification code for a sensitive action (enable automation,
+    risk-increasing change). The code is shown verbatim; it is stored only as a
+    hash server-side."""
+    subject = "Your Theta Algos verification code"
+    html = f"""
+    <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
+      {_logo_header()}
+      <h1 style="margin:0 0 16px;font-size:22px;">Verification code</h1>
+      <p style="margin:0 0 12px;color:#475569;line-height:1.55;">
+        Hi {username}, use this code to {purpose_label}. It expires in {ttl_min} minutes.
+      </p>
+      <p style="margin:16px 0 24px;font-size:32px;font-weight:700;letter-spacing:6px;">{code}</p>
+      <p style="margin:0;color:#94a3b8;font-size:12px;">
+        If you didn't request this, do <strong>not</strong> share this code &mdash; someone may be trying to change your account. You can ignore this email and nothing will change.
+      </p>
+    </div>
+    """
+    return _send(to, subject, html)
 
 
 def send_password_reset_email(to: str, username: str, token: str) -> bool:

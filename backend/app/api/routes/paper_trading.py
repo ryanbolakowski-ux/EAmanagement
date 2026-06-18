@@ -474,6 +474,39 @@ async def close_all_open_positions(
     return {"status": "ok", "closed": closed}
 
 
+# CHART-EQUITY-SOURCE-V1 — candle_cache only holds futures; equity trade
+# charts must source OHLC from the equity feed (yfinance).
+def _chart_is_futures(inst: str) -> bool:
+    from app.engines.pnl_marks import is_futures_symbol
+    return is_futures_symbol(inst)
+
+def _chart_equity_ohlc(inst, win_start, win_end, tf_min):
+    """Equity OHLC window from yfinance, resampled to tf_min, tail(150)."""
+    import pandas as _pd
+    try:
+        import yfinance as _yf
+    except Exception:
+        return []
+    interval = {1: "1m", 5: "5m", 15: "15m", 60: "60m", 240: "60m"}.get(int(tf_min), "5m")
+    try:
+        df = _yf.Ticker(inst).history(start=win_start, end=win_end,
+                                      interval=interval, prepost=False)
+        if df is None or df.empty:
+            return []
+        df = df.rename(columns={"Open": "open", "High": "high",
+                                "Low": "low", "Close": "close"})
+        df.index = _pd.to_datetime(df.index, utc=True)
+        df = df[["open", "high", "low", "close"]]
+        if int(tf_min) == 240 and interval == "60m":
+            df = df.resample("240min").agg({"open": "first", "high": "max",
+                "low": "min", "close": "last"}).dropna()
+        return [{"t": ts.isoformat(), "o": float(r["open"]), "h": float(r["high"]),
+                 "l": float(r["low"]), "c": float(r["close"])}
+                for ts, r in df.tail(150).iterrows()]
+    except Exception:
+        return []
+
+
 @router.get("/trades/{trade_id}/chart")
 async def get_trade_chart(
     trade_id: str,
@@ -514,12 +547,17 @@ async def get_trade_chart(
         window_min = 150
         win_start = trade.entry_time - _td(minutes=window_min)
         win_end   = (trade.exit_time or trade.entry_time) + _td(minutes=window_min)
-        rows = (await db.execute(text("""
-            SELECT timestamp, open, high, low, close FROM candle_cache
-             WHERE instrument = :inst
-               AND timestamp >= :s AND timestamp <= :e
-             ORDER BY timestamp
-        """), {"inst": trade.instrument, "s": win_start, "e": win_end})).all()
+        if not _chart_is_futures(trade.instrument):
+            # Equity trade — candle_cache has no rows; use the equity feed.
+            candles = _chart_equity_ohlc(trade.instrument, win_start, win_end, 5)
+            rows = []
+        else:
+            rows = (await db.execute(text("""
+                SELECT timestamp, open, high, low, close FROM candle_cache
+                 WHERE instrument = :inst
+                   AND timestamp >= :s AND timestamp <= :e
+                 ORDER BY timestamp
+            """), {"inst": trade.instrument, "s": win_start, "e": win_end})).all()
         # Downsample to 5m bars to keep the payload small
         import pandas as pd
         if rows:
@@ -557,6 +595,10 @@ async def get_trade_chart(
             try:
                 win_start = trade.entry_time - before
                 win_end   = (trade.exit_time or trade.entry_time) + after
+                if not _chart_is_futures(trade.instrument):
+                    candles_by_tf[tf] = _chart_equity_ohlc(
+                        trade.instrument, win_start, win_end, tf_minutes[tf])
+                    continue
                 rows = (await db.execute(text("""
                     SELECT timestamp, open, high, low, close FROM candle_cache
                      WHERE instrument = :inst
@@ -583,6 +625,16 @@ async def get_trade_chart(
             except Exception:
                 candles_by_tf[tf] = []
 
+    try:
+        from loguru import logger as _lg_chart
+        _csrc = "candle_cache" if _chart_is_futures(trade.instrument) else "equity_feed"
+        _lg_chart.info(
+            f"[chart-load] trade={trade.id} inst={trade.instrument} "
+            f"source={_csrc} candles={len(candles)} "
+            f"tfs={ {k: len(v) for k, v in candles_by_tf.items()} }"
+        )
+    except Exception:
+        pass
     return {
         "id": str(trade.id),
         "instrument": trade.instrument,

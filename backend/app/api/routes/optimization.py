@@ -510,12 +510,53 @@ async def _run_optimization_task(run_id: str):
                 _groups[_sig_rep[_key]].append(_i)
             _reps = list(_groups.keys())
 
-            _n_workers = min(len(_reps), max(1, (_os.cpu_count() or 2) - 1))
+            # Stable JSON-storable key per distinct config so checkpointed results
+            # can be matched back on resume (the tuple sig itself isn't JSON-safe).
+            def _sigkey(_p):
+                return repr(_sig(_p))
+
             _loop = asyncio.get_event_loop()
             _t0 = _time.monotonic()
             done_count = 0
             best = None
             _failed = 0
+
+            # ── RESUME from checkpoint ───────────────────────────────────────
+            # run.partial_results holds {sig, result} for every distinct config
+            # that already finished (persisted AS it completed). After a worker
+            # death / backend restart we replay those and run ONLY what's left,
+            # so a restart never loses computed work.
+            _done_map = {}
+            for _e in (run.partial_results or []):
+                if isinstance(_e, dict) and _e.get("sig") is not None:
+                    _done_map[_e["sig"]] = _e.get("result") or {}
+            _resuming = len(_done_map) > 0
+            if _resuming:
+                run.status = OptimizationStatus.RESUMED
+                run.last_heartbeat_at = datetime.now(timezone.utc)
+                await db.commit()
+                logger.info(f"[OPT RESUME] run={run.id} resuming from checkpoint: "
+                            f"{len(_done_map)} distinct configs already done, running the remainder")
+            _to_run = []
+            for _ridx in _reps:
+                _sk = _sigkey(_combo_params[_ridx])
+                if _sk in _done_map:
+                    res = _done_map[_sk]
+                    members = _groups.get(_ridx, [_ridx])
+                    for _m in members:
+                        mres = dict(res); mres["params"] = _combo_params[_m]
+                        all_results[_m] = mres
+                    done_count += len(members)
+                    if res.get("_error"):
+                        _failed += len(members)
+                    elif best is None or (res.get(metric_key, 0) or 0) > (best.get(metric_key, 0) or 0):
+                        best = res
+                else:
+                    _to_run.append(_ridx)
+            run.completed_combinations = done_count
+            await db.commit()
+
+            _n_workers = min(max(1, len(_to_run)), max(1, (_os.cpu_count() or 2) - 1))
             _ctx = _mp.get_context("spawn")
             _pool = _cf.ProcessPoolExecutor(
                 max_workers=_n_workers, mp_context=_ctx,
@@ -523,37 +564,43 @@ async def _run_optimization_task(run_id: str):
                 initargs=(_df_records, run.instrument, base_tf, list(possible_tfs)),
             )
             logger.info(f"[OPT] run={run.id} {len(combos)} combos -> {len(_reps)} distinct configs "
-                        f"({len(combos)-len(_reps)} duplicate no-op combos skipped); "
-                        f"running across {_n_workers} processes")
+                        f"({len(combos)-len(_reps)} duplicate no-op skipped); "
+                        f"{len(_reps)-len(_to_run)} from checkpoint, {len(_to_run)} to run "
+                        f"across {_n_workers} processes")
+            _new_done = 0
             try:
                 _futs = [
                     _loop.run_in_executor(_pool, _ow.run_combo, _ridx,
                                           dict(zip(param_keys, combos[_ridx])),
                                           _strat, run.start_date, run.end_date)
-                    for _ridx in _reps
+                    for _ridx in _to_run
                 ]
                 for _fut in asyncio.as_completed(_futs):
                     ridx, res = await _fut
+                    _sk = _sigkey(_combo_params[ridx])
                     members = _groups.get(ridx, [ridx])
                     for _m in members:                       # replicate to duplicate param sets
                         mres = dict(res); mres["params"] = _combo_params[_m]
                         all_results[_m] = mres
-                    done_count += len(members)
+                    done_count += len(members); _new_done += 1
                     if res.get("_error"):
                         _failed += len(members)
                         logger.error(f"[OPT COMBO-FAIL] run={run.id} config={res.get('params')} "
                                      f"err={res.get('_error')}")
                     elif best is None or (res.get(metric_key, 0) or 0) > (best.get(metric_key, 0) or 0):
                         best = res
+                    # ── CHECKPOINT this distinct config (reassign list so the JSON
+                    # column is flagged dirty; .append would not commit). ──
+                    run.partial_results = (run.partial_results or []) + [{"sig": _sk, "result": res}]
                     run.completed_combinations = done_count
+                    run.last_heartbeat_at = datetime.now(timezone.utc)
                     await db.commit()
                     _elapsed = _time.monotonic() - _t0
-                    _eta = int(_elapsed / done_count * (len(combos) - done_count)) if done_count else None
+                    _eta = int(_elapsed / _new_done * (len(_to_run) - _new_done)) if (_new_done and len(_to_run) > _new_done) else 0
                     logger.info(
                         f"[OPT PROGRESS] run={run.id} {done_count}/{len(combos)} "
-                        f"({done_count*100//max(1,len(combos))}%) config={res.get('params')} "
-                        f"{metric_key}={res.get(metric_key)} WR={res.get('win_rate')} "
-                        f"trades={res.get('total_trades')} best_{metric_key}={best.get(metric_key) if best else None} "
+                        f"({done_count*100//max(1,len(combos))}%) [checkpoint saved] config={res.get('params')} "
+                        f"{metric_key}={res.get(metric_key)} best_{metric_key}={best.get(metric_key) if best else None} "
                         f"failed={_failed} eta~{_eta}s"
                     )
             finally:
@@ -713,6 +760,9 @@ async def retry_optimization(
     # Clear any partial results + reset the run to QUEUED.
     await db.execute(delete(OptimizationResult).where(OptimizationResult.optimization_run_id == run.id))
     run.status = OptimizationStatus.QUEUED
+    run.partial_results = []        # fresh re-run -> drop old checkpoint so it won't resume
+    run.completed_combinations = 0
+    run.error_message = None
     run.completed_combinations = 0
     run.error_message = None
     run.started_at = None

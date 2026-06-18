@@ -126,15 +126,28 @@ async def lifespan(app: FastAPI):
                 "WHERE status IN ('RUNNING','PENDING') RETURNING id"
             ))
             n1 = len(r1.fetchall())
+            # Optimizations are RESUMABLE — each distinct config is checkpointed to
+            # optimization_runs.partial_results as it finishes. Instead of killing
+            # them, flag RECOVERING and re-spawn the task; it replays the checkpoint
+            # and runs only the unfinished configs.
             r2 = await _db_z.execute(_t_z(
-                "UPDATE optimization_runs SET status='FAILED', completed_at=NOW(), "
-                "error_message='Worker died during backend restart (auto-recovered on startup)' "
-                "WHERE status IN ('RUNNING','PENDING') RETURNING id"
+                "UPDATE optimization_runs SET status='RECOVERING', "
+                "error_message='Worker died during backend restart \u2014 auto-resuming from checkpoint' "
+                "WHERE status IN ('RUNNING','RESUMED','RECOVERING','PENDING') RETURNING id"
             ))
-            n2 = len(r2.fetchall())
+            _opt_ids = [str(row[0]) for row in r2.fetchall()]
             await _db_z.commit()
-            if n1 or n2:
-                logger.info(f"Startup recovery: marked {n1} stuck backtests + {n2} stuck optimizations FAILED")
+            if n1 or _opt_ids:
+                logger.info(f"Startup recovery: marked {n1} stuck backtests FAILED; "
+                            f"resuming {len(_opt_ids)} optimizations from checkpoint")
+        for _oid in _opt_ids:
+            try:
+                import asyncio as _aio_o
+                from app.api.routes.optimization import _run_optimization_wrapper as _orw
+                _aio_o.create_task(_orw(_oid))
+                logger.info(f"[OPT RECOVERY] re-spawned resume task for optimization {_oid}")
+            except Exception as _re:
+                logger.warning(f"opt recovery re-spawn failed for {_oid}: {_re}")
     except Exception as e:
         logger.warning(f"Startup zombie cleanup failed: {e}")
 
@@ -190,6 +203,12 @@ async def lifespan(app: FastAPI):
     from app.scripts.comp_expiry import run_comp_expiry_loop
     comp_expiry_task = asyncio.create_task(run_comp_expiry_loop())
     daily_fetch_task = asyncio.create_task(run_daily_loop())
+    try:
+        from app.engines.account_signals.runner import run_signal_resolution_loop as _rsrl
+        signal_resolution_task = asyncio.create_task(_rsrl())
+        logger.info('[signals] scheduled resolution loop started (every 10m)')
+    except Exception as _e:
+        logger.warning(f'[signals] failed to start resolution loop: {_e}')
     digest_task = asyncio.create_task(run_daily_digest_loop())
 
     # Pre-market universe scanner — daily 08:30 ET signal scan + 08:45 auto-execute
@@ -326,10 +345,12 @@ from app.api.routes import admin as admin_routes
 from app.api.routes import account_signals
 from app.api.routes import legal
 from app.api.routes import options as options_routes
+from app.api.routes import security
 from app.api.routes import support as support_routes
 app.include_router(stripe_billing.router, prefix="/api/v1/billing", tags=["billing"])
 app.include_router(admin_routes.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(legal.router, prefix="/api/v1/legal", tags=["legal"])
+app.include_router(security.router, prefix="/api/v1/security", tags=["Security"])
 app.include_router(options_routes.router, prefix="/api/v1/options", tags=["options"])
 app.include_router(support_routes.router, prefix="/api/v1/support", tags=["support"])
 app.include_router(account_signals.router, prefix="/api/v1/account-signals", tags=["account-signals"])

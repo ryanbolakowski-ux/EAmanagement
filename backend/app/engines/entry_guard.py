@@ -38,7 +38,10 @@ from app.database import async_session_factory
 # always over-trading the same setup.
 DEFAULT_COOLDOWN_MIN_FUTURES = int(os.environ.get("PAPER_COOLDOWN_MIN_FUTURES", "5"))
 DEFAULT_COOLDOWN_MIN_STOCKS = int(os.environ.get("PAPER_COOLDOWN_MIN_STOCKS", "15"))
-DEFAULT_MAX_TRADES_PER_DAY = int(os.environ.get("PAPER_MAX_TRADES_PER_DAY", "20"))
+DEFAULT_MAX_TRADES_PER_DAY = int(os.environ.get("PAPER_MAX_TRADES_PER_DAY", "6"))
+# ENTRY-GUARD-BARCLOCK-V1: refuse re-entering the SAME price level on the
+# same (session, instrument, direction) within this many minutes.
+SAME_PRICE_LOCKOUT_MIN = int(os.environ.get("PAPER_SAME_PRICE_LOCKOUT_MIN", "30"))
 DEFAULT_MAX_OPEN_POSITIONS_FUTURES = int(os.environ.get("PAPER_MAX_OPEN_POSITIONS_FUTURES", "1"))
 DEFAULT_MAX_OPEN_POSITIONS_STOCKS = int(os.environ.get("PAPER_MAX_OPEN_POSITIONS_STOCKS", "3"))
 
@@ -115,7 +118,9 @@ async def _get_strategy_limits(strategy_id: str, instrument: str) -> dict:
 
 async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
                     direction: str, mode: str = "paper",
-                    open_positions_snapshot: Optional[list] = None) -> Decision:
+                    open_positions_snapshot: Optional[list] = None,
+                    bar_time: Optional[datetime] = None,
+                    entry_price: Optional[float] = None) -> Decision:
     """Run all four checks. Returns Decision(allowed=False, reason=...) on
     first failure; Decision(allowed=True, reason='ok', debug={...}) when
     all checks pass. Logs an info line at every decision point so an operator
@@ -137,6 +142,19 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
     inst = (instrument or "").upper()
     direction = (direction or "").lower()
     now = datetime.now(timezone.utc)
+    # ENTRY-GUARD-BARCLOCK-V1 reference clock. The paper runner replays
+    # yfinance bars that lag wall-clock ~10-15min; comparing a stale
+    # entry_time to now() made the cooldown a no-op. Use the candidate
+    # bar's own clock when provided (live/options pass real-time bars).
+    ref_now = now
+    if bar_time is not None:
+        try:
+            _bt = bar_time
+            if getattr(_bt, "tzinfo", None) is None:
+                _bt = _bt.replace(tzinfo=timezone.utc)
+            ref_now = _bt
+        except Exception:
+            ref_now = now
 
     logger.info(
         f"[paper-runner] sid={sid} considering entry inst={inst} dir={direction} "
@@ -197,7 +215,7 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
                                     {"open": int(n_open), "limit": max_open})
 
             # ── Max trades per day (entry_time within today UTC) ─────────
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start = ref_now.replace(hour=0, minute=0, second=0, microsecond=0)
             n_today = (await db.execute(text("""
                 SELECT count(*) FROM trades
                  WHERE session_id = :sid AND entry_time >= :start
@@ -210,6 +228,35 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
                 return Decision(False, "max_trades_per_day",
                                 {"today": int(n_today), "limit": max_day})
 
+            # ── Same-price re-entry lockout (ENTRY-GUARD-BARCLOCK-V1) ────
+            # A setup that just closed must not immediately reopen at the
+            # same price level. Consults recently-CLOSED trades too (the
+            # paper engine persists only closed rows), keyed on the rounded
+            # entry price within SAME_PRICE_LOCKOUT_MIN.
+            if entry_price is not None:
+                try:
+                    _band = round(float(entry_price))
+                    _lock_min = max(cooldown_min, SAME_PRICE_LOCKOUT_MIN)
+                    _since = ref_now - timedelta(minutes=_lock_min)
+                    _recent = (await db.execute(text("""
+                        SELECT entry_price, entry_time FROM trades
+                         WHERE session_id = :sid AND instrument = :inst
+                           AND direction = :dir AND entry_time >= :since
+                         ORDER BY entry_time DESC LIMIT 20
+                    """), {"sid": sid, "inst": inst, "dir": direction,
+                           "since": _since})).fetchall()
+                    for _rp in _recent:
+                        if _rp[0] is not None and round(float(_rp[0])) == _band:
+                            logger.info(
+                                f"[paper-runner] sid={sid} REJECTED reason=same_price_reentry "
+                                f"inst={inst} dir={direction} price~{_band} "
+                                f"prev_entry={_rp[1]} lockout={_lock_min}m"
+                            )
+                            return Decision(False, "same_price_reentry",
+                                            {"price_band": _band, "lockout_min": _lock_min})
+                except Exception as _spe:
+                    logger.warning(f"[entry-guard] same-price check skipped sid={sid}: {_spe}")
+
             # ── Cooldown since last entry on this session ────────────────
             last_entry = (await db.execute(text("""
                 SELECT entry_time FROM trades
@@ -221,7 +268,7 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
                 # Normalize to aware datetime in UTC
                 if last_t.tzinfo is None:
                     last_t = last_t.replace(tzinfo=timezone.utc)
-                elapsed = (now - last_t).total_seconds()
+                elapsed = (ref_now - last_t).total_seconds()
                 cooldown_s = cooldown_min * 60
                 if elapsed < cooldown_s:
                     logger.info(

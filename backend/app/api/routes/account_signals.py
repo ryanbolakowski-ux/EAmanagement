@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -398,8 +398,8 @@ def send_signal_email(
         _t_min = _et.hour * 60 + _et.minute
         if _t_min >= 18*60 or _t_min < 3*60:        _sess = "ASIA"
         elif 3*60 <= _t_min < 9*60:                 _sess = "LONDON"
-        elif 9*60+30 <= _t_min < 12*60:             _sess = "NY_AM"
-        elif 14*60+30 <= _t_min < 16*60+30:         _sess = "NY_PM"
+        elif 9*60+30 <= _t_min < 11*60:             _sess = "NY_AM"
+        elif 13*60+30 <= _t_min < 16*60+30:         _sess = "NY_PM"
         else:                                        _sess = "DEAD"
         _rc = _r_sync.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
 
@@ -529,6 +529,9 @@ def send_signal_email(
 
       {_chart_img_html}
 
+      <a href="{settings.FRONTEND_URL}/app/signals/{_sid}/review" style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;font-weight:700;padding:11px 20px;border-radius:10px;font-size:14px;margin:4px 0 10px;">Review &amp; approve in app &rarr;</a>
+      <p style="margin:0 0 6px;color:#94a3b8;font-size:12px;line-height:1.5;">Open in the app to approve or decline this trade idea. Nothing is placed in your account unless you approve it and your plan permits placement.</p>
+
       <hr style="border:none;border-top:1px solid #e2e8f0;margin:18px 0 14px;"/>
 
       <p style="margin:0;color:#94a3b8;font-size:11px;line-height:1.6;">
@@ -643,84 +646,100 @@ async def send_push_to_user(user_id: str, title: str, body: str, data: Optional[
 from datetime import datetime, timezone, timedelta
 
 
-async def _resolve_signal_outcomes(db, max_age_hours: int = 168):
-    """Resolve any unresolved signals older than 30 minutes by checking
-    intraday candles against entry/stop/target. Signals older than
-    max_age_hours (default 7 days) that never hit either get marked 'expired'."""
+async def _resolve_signal_outcomes(db, max_age_hours: int = 168, limit: int = 200):
+    """EMAIL-SIGNALS-RESOLVER-V3. Resolve unresolved SENT signals (>30 min old)
+    against REAL-FUTURES 1m candle_cache (the SAME source the emitter + backtest
+    use). The old resolver used a drifting ETF-proxy scale that mis-aligned the
+    candles vs the emitted price (10-330 pts vs 3-50 pt stops), flipping outcomes.
+    It also ignored BREAK-EVEN: a trade that reaches +1R then retraces to entry is
+    a 'breakeven' (not a loss), exactly as the strategies + backtest book it.
+    Outcomes: win (target) / breakeven (+1R then stop) / loss (stop, never +1R) /
+    expired / needs_review. Suppressed rows are never resolved."""
     from sqlalchemy import text as _text
     rows = (await db.execute(_text("""
         SELECT id, instrument, direction, entry_price, stop_loss, take_profit, fired_at
           FROM account_signals
-         WHERE outcome IS NULL
+         WHERE outcome IS NULL AND status = 'sent'
            AND fired_at < NOW() - INTERVAL '30 minutes'
-           AND fired_at > NOW() - (INTERVAL '1 hour' * :max_age_hours)
-         ORDER BY fired_at ASC
-         LIMIT 50
-    """), {"max_age_hours": max_age_hours})).fetchall()
-
+         ORDER BY fired_at ASC LIMIT :limit
+    """), {"limit": limit})).fetchall()
     if not rows:
         return 0
-
+    from app.engines.data_feeds.local_cache import fetch_from_cache
     from app.engines.data_feeds.polygon_feed import fetch_polygon_data
     resolved = 0
     now = datetime.now(timezone.utc)
-
     for r in rows:
+        outcome = None; outcome_price = None; outcome_r = None; reason = None; had_data = False; src = None
         try:
             fired_at = r.fired_at if r.fired_at.tzinfo else r.fired_at.replace(tzinfo=timezone.utc)
-            df = await fetch_polygon_data(
-                instrument=r.instrument,
-                start_date=fired_at,
-                end_date=now,
-                interval="5m",
-            )
+            age_h = (now - fired_at).total_seconds() / 3600.0
+            # PRIMARY: real-futures 1m candle_cache (24h coverage, correct scale).
+            df = None
+            try:
+                df = await fetch_from_cache(r.instrument, fired_at, now, "1m")
+                if df is not None and len(df) > 0:
+                    src = "candle_cache"
+            except Exception:
+                df = None
             if df is None or len(df) == 0:
-                continue
-            entry = float(r.entry_price); stop = float(r.stop_loss); target = float(r.take_profit)
-            risk = abs(entry - stop)
-            outcome = None; outcome_price = None; outcome_r = None
-            for ts, row in df.iterrows():
-                hi, lo = float(row["high"]), float(row["low"])
-                if r.direction == "long":
-                    if lo <= stop:
-                        outcome, outcome_price, outcome_r = "loss", stop, -1.0; break
-                    if hi >= target:
-                        outcome, outcome_price = "win", target
-                        _raw_r = abs(target - entry) / risk if risk > 0 else 0
-                        if _raw_r > 50:
-                            outcome, outcome_price, outcome_r = "data_error", None, None
-                            logger.warning(f"[signals] data-error: signal id={r.id} computed R={_raw_r:.1f} (entry={entry} stop={stop} target={target}); marking as data_error")
-                            break
-                        outcome_r = _raw_r
+                try:
+                    df = await fetch_polygon_data(instrument=r.instrument, start_date=fired_at, end_date=now, interval="1m")
+                    if df is not None and len(df) > 0:
+                        src = "proxy_fallback"
+                except Exception as _fe:
+                    df = None
+                    logger.warning(f"[signals] resolve price-fetch failed id={r.id} {r.instrument}: {_fe}")
+            if df is not None and len(df) > 0:
+                had_data = True
+                entry = float(r.entry_price); stop = float(r.stop_loss); target = float(r.take_profit)
+                risk = abs(entry - stop)
+                be_trigger = (entry + risk) if r.direction == "long" else (entry - risk)   # +1R
+                reached_be = False
+                for _ts, _row in df.iterrows():
+                    hi = float(_row["high"]); lo = float(_row["low"])
+                    if r.direction == "long":
+                        if hi >= be_trigger:
+                            reached_be = True
+                        hit_t = hi >= target; hit_s = lo <= stop
+                    else:
+                        if lo <= be_trigger:
+                            reached_be = True
+                        hit_t = lo <= target; hit_s = hi >= stop
+                    if hit_t and hit_s:
+                        outcome, outcome_price, outcome_r, reason = "breakeven", entry, 0.0, "ambiguous_bar"; break
+                    if hit_t:
+                        _raw = abs(target - entry) / risk if risk > 0 else 0
+                        if _raw > 50:
+                            outcome, reason = "data_error", f"r_explosion_{_raw:.0f}"
+                            logger.warning(f"[signals] data-error id={r.id} R={_raw:.1f} (e={entry} s={stop} t={target})"); break
+                        outcome, outcome_price, outcome_r, reason = "win", target, _raw, "target_hit"; break
+                    if hit_s:
+                        if reached_be:
+                            outcome, outcome_price, outcome_r, reason = "breakeven", entry, 0.0, "breakeven"
+                        else:
+                            outcome, outcome_price, outcome_r, reason = "loss", stop, -1.0, "stop_hit"
                         break
-                else:  # short
-                    if hi >= stop:
-                        outcome, outcome_price, outcome_r = "loss", stop, -1.0; break
-                    if lo <= target:
-                        outcome, outcome_price = "win", target
-                        _raw_r = abs(entry - target) / risk if risk > 0 else 0
-                        if _raw_r > 50:
-                            outcome, outcome_price, outcome_r = "data_error", None, None
-                            logger.warning(f"[signals] data-error: signal id={r.id} computed R={_raw_r:.1f} (entry={entry} stop={stop} target={target}); marking as data_error")
-                            break
-                        outcome_r = _raw_r
-                        break
-            # If signal is older than max_age and never hit, mark expired
-            if outcome is None and (now - fired_at) > timedelta(hours=max_age_hours):
-                outcome = "expired"
+            if outcome is None and age_h > max_age_hours:
+                if had_data:
+                    outcome, reason = "expired", f"no_hit_after_{int(age_h)}h"
+                else:
+                    outcome, reason = "needs_review", "no_price_data"
+            logger.info(f"[signals] resolve id={r.id} {r.instrument} {r.direction} age={age_h:.1f}h "
+                        f"src={src} had_data={had_data} -> {outcome or 'still_pending'} ({reason or '-'})")
             if outcome:
                 await db.execute(_text("""
                     UPDATE account_signals
                        SET outcome = :o, outcome_price = :op, outcome_r = :or_,
-                           resolved_at = NOW()
+                           outcome_reason = :rs, resolved_at = NOW()
                      WHERE id = :id
-                """), {"o": outcome, "op": outcome_price, "or_": outcome_r, "id": str(r.id)})
+                """), {"o": outcome, "op": outcome_price, "or_": outcome_r, "rs": reason, "id": str(r.id)})
                 resolved += 1
         except Exception as e:
             logger.warning(f"[signals] resolve failed for {r.id}: {e}")
     if resolved > 0:
         await db.commit()
-        logger.info(f"[signals] resolved {resolved} signals")
+        logger.info(f"[signals] resolved {resolved}/{len(rows)} pending sent signals this pass")
     return resolved
 
 
@@ -746,6 +765,7 @@ async def signals_stats(
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE outcome = 'win') AS wins,
             COUNT(*) FILTER (WHERE outcome = 'loss') AS losses,
+            COUNT(*) FILTER (WHERE outcome = 'breakeven') AS breakeven,
             COUNT(*) FILTER (WHERE outcome = 'expired') AS expired,
             COUNT(*) FILTER (WHERE outcome IS NULL) AS pending,
             COALESCE(SUM(outcome_r) FILTER (WHERE outcome IN ('win','loss')
@@ -755,7 +775,7 @@ async def signals_stats(
             COUNT(*) FILTER (WHERE outcome IN ('win','loss')
                               AND ABS(outcome_r) > :rmax) AS excluded_outliers
           FROM account_signals
-         WHERE user_id = :uid
+         WHERE user_id = :uid AND status = 'sent'
     """), {"uid": str(current_user.id), "rmax": BAD_R_THRESHOLD})).first()
     if rows and int(rows.excluded_outliers or 0) > 0:
         logger.warning(f"[signals/stats] user={current_user.email} excluded {rows.excluded_outliers} outlier signals with |outcome_r|>{BAD_R_THRESHOLD} from aggregates")
@@ -763,10 +783,15 @@ async def signals_stats(
     total = int(rows.total or 0)
     wins = int(rows.wins or 0)
     losses = int(rows.losses or 0)
-    resolved = wins + losses
-    win_rate = (wins / resolved * 100.0) if resolved > 0 else 0.0
+    breakeven = int(getattr(rows, "breakeven", 0) or 0)
+    # Decided trades include break-even. win_rate counts BE as "not a loss"
+    # (matches the backtest is_winner); effective_win_rate excludes BE.
+    resolved = wins + losses + breakeven
+    win_rate = ((wins + breakeven) / resolved * 100.0) if resolved > 0 else 0.0
+    effective_win_rate = (wins / (wins + losses) * 100.0) if (wins + losses) > 0 else 0.0
     return {
-        "total": total, "wins": wins, "losses": losses,
+        "total": total, "wins": wins, "losses": losses, "breakeven": breakeven,
+        "effective_win_rate": round(effective_win_rate, 1),
         "expired": int(rows.expired or 0), "pending": int(rows.pending or 0),
         "resolved": resolved,
         "win_rate": round(win_rate, 1),
@@ -774,3 +799,172 @@ async def signals_stats(
         "avg_r": round(float(rows.avg_r or 0), 2),
         "excluded_outliers": int(rows.excluded_outliers or 0),
     }
+
+
+@router.get("/resolution-report")
+async def resolution_report(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: how SENT Email Signals have resolved + how many are still pending,
+    by age. Surfaces whether the backlog is being cleared."""
+    tier = current_user.subscription_tier.value if hasattr(current_user.subscription_tier, "value") else str(current_user.subscription_tier)
+    if tier != "tier_5":
+        raise HTTPException(status_code=403, detail="Admin only.")
+    from sqlalchemy import text as _text
+    by = (await db.execute(_text("""
+        SELECT COALESCE(outcome, 'pending') AS o, count(*) AS n
+          FROM account_signals WHERE status = 'sent' GROUP BY 1 ORDER BY 2 DESC
+    """))).fetchall()
+    age = (await db.execute(_text("""
+        SELECT count(*) FILTER (WHERE fired_at <  now() - interval '7 days') AS gt7d,
+               count(*) FILTER (WHERE fired_at >= now() - interval '7 days') AS le7d,
+               min(fired_at) AS oldest
+          FROM account_signals WHERE status = 'sent' AND outcome IS NULL
+    """))).first()
+    last = (await db.execute(_text("""
+        SELECT max(resolved_at) AS last_resolved,
+               count(*) FILTER (WHERE resolved_at > now() - interval '24 hours') AS last24h
+          FROM account_signals WHERE status = 'sent'
+    """))).first()
+    return {
+        "sent_by_outcome": {row.o: int(row.n) for row in by},
+        "pending_over_7d": int(age.gt7d or 0),
+        "pending_under_7d": int(age.le7d or 0),
+        "oldest_pending": age.oldest.isoformat() if age.oldest else None,
+        "last_resolved_at": last.last_resolved.isoformat() if last and last.last_resolved else None,
+        "resolved_last_24h": int(last.last24h or 0) if last else 0,
+    }
+
+
+# ── PHASE-F-APPROVE-DECLINE: non-automated users review trade ideas ──────────
+
+def _signal_to_tradesignal(row):
+    from app.engines.strategy_engine.base_strategy import TradeSignal, SignalType
+    return TradeSignal(
+        signal=SignalType.LONG if row.direction == "long" else SignalType.SHORT,
+        instrument=row.instrument, entry_price=float(row.entry_price),
+        stop_loss=float(row.stop_loss), take_profit=float(row.take_profit), contracts=1,
+    )
+
+
+@router.get("/{signal_id}/review")
+async def get_signal_for_review(signal_id: str, current_user: User = Depends(get_current_user),
+                                db: AsyncSession = Depends(get_db)):
+    """Detail for the in-app review page (owner-only). Powers the approve/decline UI."""
+    from sqlalchemy import text as _t
+    r = (await db.execute(_t("""
+        SELECT id, instrument, direction, entry_price, stop_loss, take_profit, bias,
+               fired_at, status, outcome, decision, decided_at, placed_ref
+          FROM account_signals WHERE id = :id AND user_id = :uid
+    """), {"id": signal_id, "uid": str(current_user.id)})).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+    from app.core.packages import requires_manual_approval, can_place_on_approval
+    return {
+        "id": str(r.id), "instrument": r.instrument, "direction": r.direction,
+        "entry_price": float(r.entry_price), "stop_loss": float(r.stop_loss),
+        "take_profit": float(r.take_profit), "bias": r.bias,
+        "fired_at": r.fired_at.isoformat() if r.fired_at else None,
+        "status": r.status, "outcome": r.outcome, "decision": r.decision,
+        "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+        "placed_ref": r.placed_ref,
+        "requires_manual_approval": requires_manual_approval(current_user),
+        "can_place_on_approval": can_place_on_approval(current_user),
+    }
+
+
+async def _record_decision(db, signal_id, current_user, request, decision: str):
+    from sqlalchemy import text as _t
+    r = (await db.execute(_t("""
+        SELECT id, instrument, direction, entry_price, stop_loss, take_profit, strategy_id, decision
+          FROM account_signals WHERE id = :id AND user_id = :uid AND status = 'sent'
+    """), {"id": signal_id, "uid": str(current_user.id)})).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+    if r.decision:
+        raise HTTPException(status_code=409, detail=f"Already {r.decision}.")
+    ip = request.client.host if request and request.client else None
+    ua = request.headers.get("user-agent") if request else None
+    await db.execute(_t("""
+        UPDATE account_signals SET decision = :d, decided_at = NOW(), decided_by = :uid,
+               decided_via = 'app', decision_ip = :ip, decision_user_agent = :ua
+         WHERE id = :id
+    """), {"d": decision, "uid": str(current_user.id), "ip": ip, "ua": ua, "id": signal_id})
+    return r, ip, ua
+
+
+@router.post("/{signal_id}/decline")
+async def decline_signal(signal_id: str, request: Request,
+                         current_user: User = Depends(get_current_user),
+                         db: AsyncSession = Depends(get_db)):
+    """Decline a trade idea — recorded + audited, NO trade is placed."""
+    from app.api.routes.security import audit_log, EVENT_TRADE_DECLINED
+    r, ip, ua = await _record_decision(db, signal_id, current_user, request, "declined")
+    await audit_log(db, current_user.id, EVENT_TRADE_DECLINED,
+                    {"signal_id": signal_id, "instrument": r.instrument}, request)
+    await db.commit()
+    logger.info(f"[signal-decision] DECLINED signal={signal_id} user={current_user.id}")
+    return {"signal_id": signal_id, "decision": "declined", "placed": False}
+
+
+@router.post("/{signal_id}/approve")
+async def approve_signal(signal_id: str, request: Request,
+                         current_user: User = Depends(get_current_user),
+                         db: AsyncSession = Depends(get_db)):
+    """Approve a trade idea — recorded + audited. The trade is placed ONLY if the
+    tier may place on approval AND an eligible active session can take it; the
+    exact result (or why not) is recorded in placed_ref + the audit log."""
+    from app.api.routes.security import audit_log, EVENT_TRADE_APPROVED
+    from app.core.packages import can_place_on_approval
+    r, ip, ua = await _record_decision(db, signal_id, current_user, request, "approved")
+    placed_ref = "approved"
+    if not can_place_on_approval(current_user):
+        placed_ref = "approved_signal_only(tier_not_eligible_to_place)"
+    else:
+        try:
+            from app.engines.account_signals.runner import route_emitted_signal
+            routed = await route_emitted_signal(signal_id, str(current_user.id), r.instrument,
+                                                _signal_to_tradesignal(r),
+                                                str(r.strategy_id) if r.strategy_id else None)
+            placed_ref = ("; ".join(f"{m}:{'entered' if e else 'skip:'+rs}" for m, k, e, rs in routed)
+                          if routed else "approved_no_active_eligible_session")
+        except Exception as _pe:
+            placed_ref = f"approved_place_error:{type(_pe).__name__}"
+    from sqlalchemy import text as _t2
+    await db.execute(_t2("UPDATE account_signals SET placed_ref = :pr WHERE id = :id"),
+                     {"pr": placed_ref[:500], "id": signal_id})
+    await audit_log(db, current_user.id, EVENT_TRADE_APPROVED,
+                    {"signal_id": signal_id, "instrument": r.instrument, "placed_ref": placed_ref}, request)
+    await db.commit()
+    logger.info(f"[signal-decision] APPROVED signal={signal_id} user={current_user.id} -> {placed_ref}")
+    return {"signal_id": signal_id, "decision": "approved", "placed_ref": placed_ref}
+
+
+@router.get("/my-access")
+async def my_access(current_user: User = Depends(get_current_user),
+                    db: AsyncSession = Depends(get_db)):
+    """The signed-in user's plan access: tier, automation status (agreement_required
+    / pending / disabled / enabled / not_eligible), capabilities, and which
+    agreements are accepted. The frontend badge + access explainer read this."""
+    from app.core.packages import (is_fully_automated_tier, gets_signals,
+        requires_manual_approval, can_place_on_approval, automation_status, tier_value)
+    from app.api.routes.legal import has_current_ack
+    from sqlalchemy import select as _select
+    from app.models.user import BrokerAccount as _BA
+    has_fat = await has_current_ack(db, current_user.id, "fully_automated_trading")
+    has_sig = await has_current_ack(db, current_user.id, "signals_disclosure")
+    acct = (await db.execute(_select(_BA).where(_BA.user_id == current_user.id))).scalars().first()
+    trading_enabled = getattr(acct, "trading_enabled", None) if acct else None
+    return {
+        "tier": tier_value(current_user),
+        "fully_automated": is_fully_automated_tier(current_user),
+        "gets_signals": gets_signals(current_user),
+        "requires_manual_approval": requires_manual_approval(current_user),
+        "can_place_on_approval": can_place_on_approval(current_user),
+        "automation_status": automation_status(current_user, has_agreement=has_fat,
+                                                trading_enabled=trading_enabled),
+        "agreements": {"fully_automated_trading": has_fat, "signals_disclosure_v2": has_sig},
+        "has_broker_account": acct is not None,
+    }
+

@@ -290,8 +290,8 @@ def _current_session_label() -> str:
     # ASIA wraps midnight, so split it
     if t >= 18*60 or t < 3*60:        return "ASIA"
     if 3*60 <= t < 9*60:              return "LONDON"
-    if 9*60+30 <= t < 12*60:          return "NY_AM"
-    if 14*60+30 <= t < 16*60+30:      return "NY_PM"
+    if 9*60+30 <= t < 11*60:          return "NY_AM"
+    if 13*60+30 <= t < 16*60+30:      return "NY_PM"
     return "DEAD"  # quiet zones: 9:00-9:30, 12:00-14:30, 16:30-18:00
 
 
@@ -1127,23 +1127,15 @@ async def _check_and_run_theta_scanner():
                 already_fired_via_redis = fired_today_bool
             if not already_fired_via_redis:
                 _theta_no_pick_alerted_for_date.add(today_key_visible)
-                try:
-                    from app.engines.pipeline_alerts import send_pipeline_failure_alert
-                    await send_pipeline_failure_alert(
-                        reason="Theta Scanner produced no pick today",
-                        context={
-                            "job": "premarket_scheduler._check_and_run_theta_scanner",
-                            "et_now": et.strftime("%H:%M ET"),
-                            "trading_date": today_key_visible,
-                            "explanation": (
-                                "Scan window 6:00-9:50 ET closed without firing. "
-                                "Either no qualifying setup, scanner threw silently, "
-                                "or upstream data was unavailable."
-                            ),
-                        },
-                    )
-                except Exception as _ae:
-                    logger.error(f"[ThetaScanner] failed to send no-pick alert: {_ae}")
+                # No-pick is an EXPECTED outcome (no qualifying setup, or a news
+                # blackout such as FOMC) — NOT a pipeline failure. Do NOT send the
+                # URGENT failure email (it was re-spamming admins on every restart).
+                # The restart-safe redis-deduped user-facing note below + the yellow
+                # systems-check status already surface no-pick days as a warning.
+                logger.warning(
+                    f"[ThetaScanner] no pick for {today_key_visible} "
+                    f"(expected on no-setup / news-blackout days) — not alerting as failure"
+                )
 
                 # --- user-facing "no pick today" note + dashboard sentinel ---
                 try:

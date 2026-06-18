@@ -234,7 +234,7 @@ async def scan_for_momentum(
     min_price: float = 1.0,
     max_price: float = 20.0,
     min_day_volume: int = 500_000,
-    min_vol_ratio: float = 1.5,     # day_volume / prev_volume
+    min_vol_ratio: float = 2.5,     # day_volume / prev_volume (raised 2026-06-16 to cut weak gappers)
     top_k: int = 10,
     include_negative: bool = True,  # catch -X% drops too (for puts)
 ) -> list[MomentumHit]:
