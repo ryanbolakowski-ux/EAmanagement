@@ -244,6 +244,27 @@ def _fetch_futures_via_alpaca(instrument: str, timeframe: str, count: int = 50):
     } for ts, r2 in df.iterrows()]
 
 
+
+def _latest_real_close(sym: str):
+    """SIGNAL-PRICE-ALIGN-V1: latest REAL futures close from candle_cache (the
+    source of truth that the chart + resolver use). Used to validate proxy
+    price levels + the stale-entry guard. Returns float or None."""
+    import psycopg2, os as _os2
+    try:
+        psy_url = _os2.environ.get("DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
+        cn = psycopg2.connect(psy_url, connect_timeout=5)
+        try:
+            with cn.cursor() as cur:
+                cur.execute("SELECT close FROM candle_cache WHERE symbol = %s "
+                            "ORDER BY timestamp DESC LIMIT 1", ((sym or "").upper(),))
+                r = cur.fetchone()
+            return float(r[0]) if r and r[0] else None
+        finally:
+            cn.close()
+    except Exception:
+        return None
+
+
 def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     """Bug #27 fix: read from candle_cache (populated nightly by our own
     Polygon/Databento fetchers) instead of relying on yfinance bulk pulls
@@ -261,6 +282,25 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     # SPY/QQQ/IWM/DIA — the cheapest fix for ~15-min-late futures emails),
     # (2) Polygon proxy (existing fallback), (3) yfinance (final fallback below).
     if sym in _FUTURES_PROXY_ETF:
+        # SIGNAL-PRICE-ALIGN-V1: validate any proxy's price LEVEL against the
+        # real futures close (candle_cache = source of truth) and DISCARD the
+        # proxy if it drifts too far (the stale-scale bug priced NQ ~1.4% low).
+        _real_anchor = _latest_real_close(sym)
+        _max_drift = float(os.environ.get("FUTURES_PROXY_MAX_DRIFT_PCT", "0.4")) / 100.0
+        def _proxy_ok(bars):
+            if not bars:
+                return False
+            if not _real_anchor or _real_anchor <= 0:
+                return True  # no real anchor available — keep prior behavior
+            px = float(bars[-1]["close"])
+            drift = abs(px - _real_anchor) / _real_anchor
+            if drift > _max_drift:
+                logger.warning(
+                    f"[Signals] futures {sym} PROXY DISCARDED: proxy close {px:.2f} vs "
+                    f"real {_real_anchor:.2f} drift {drift*100:.2f}% > {_max_drift*100:.2f}% "
+                    f"— using real candle_cache for correct price levels")
+                return False
+            return True
         # (1) Alpaca IEX — preferred when keys are configured. Real-time, so no
         # freshness-discard guard is applied to its bars (handled in the helper).
         try:
@@ -268,7 +308,7 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
         except Exception as e:
             logger.warning(f"[Signals] futures {sym}: Alpaca proxy path crashed ({type(e).__name__}: {e}); falling back")
             alpaca_bars = None
-        if alpaca_bars:
+        if _proxy_ok(alpaca_bars):
             return alpaca_bars
         # (2) Polygon proxy — fallback (delayed; keeps its own 900s freshness guard).
         try:
@@ -276,7 +316,7 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
         except Exception as e:
             logger.warning(f"[Signals] futures {sym}: Polygon proxy path crashed ({type(e).__name__}: {e}); falling back")
             proxy_bars = None
-        if proxy_bars:
+        if _proxy_ok(proxy_bars):
             logger.info(f"[Signals] futures {sym} source=polygon proxy={_FUTURES_PROXY_ETF.get(sym)}")
             return proxy_bars
     # Map timeframes to candle_cache resampling. The cache stores 1m bars.
@@ -604,6 +644,37 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         return
     for _w in geo["warnings"]:
         logger.warning(f"[Signals] geometry warning watcher={watcher_id} {instrument} {direction}: {_w}")
+
+    # SIGNAL-PRICE-ALIGN-V1 stale-entry guard: never email/route a signal whose
+    # entry has drifted too far from the CURRENT real market price (source of
+    # truth = candle_cache). Catches proxy-drift / stale setups before send.
+    _real_now = _latest_real_close(instrument)
+    _max_entry_drift = float(_os.environ.get("SIGNAL_MAX_ENTRY_DRIFT_PCT", "0.5")) / 100.0
+    _sym_map = YAHOO_SYMBOLS.get(instrument.upper(), (instrument or "") + "=F")
+    if _real_now and _real_now > 0:
+        _drift = abs(entry - _real_now) / _real_now
+        logger.info(
+            f"[signal-source] {instrument}->{_sym_map} provider=candle_cache "
+            f"entry={entry} real_now={_real_now:.2f} drift={_drift*100:.2f}%")
+        if _drift > _max_entry_drift:
+            async with async_session_factory() as _db:
+                await _db.execute(text("""
+                    INSERT INTO account_signals
+                        (id, watcher_id, user_id, strategy_id, instrument, direction,
+                         entry_price, stop_loss, take_profit, bias, fired_at, status,
+                         detected_at, duplicate_suppressed_count, outcome_reason)
+                    VALUES (:id, :wid, :uid, :sid, :inst, :dir, :entry, :sl, :tp, :bias,
+                            :now, 'suppressed', :detected, 0, :reason)
+                """), {"id": str(uuid.uuid4()), "wid": watcher_id, "uid": user_id,
+                       "sid": strategy_id, "inst": instrument, "dir": direction,
+                       "entry": entry, "sl": stop, "tp": tp, "bias": bias,
+                       "now": now, "detected": detected_at,
+                       "reason": f"stale_entry_drift {_drift*100:.2f}% vs real {_real_now:.2f}"})
+                await _db.commit()
+            logger.warning(
+                f"[Signals] STALE-ENTRY suppressed {instrument} {direction} entry={entry} "
+                f"vs real {_real_now:.2f} drift {_drift*100:.2f}% > {_max_entry_drift*100:.2f}% — NOT sent/routed")
+            return
 
     # ── Bug 4: content idempotency key + cooldown-window suppression ──
     # NOTE: bar_ts is intentionally NOT part of the idem key — the key now
