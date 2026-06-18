@@ -134,9 +134,12 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
 
     if not bars_1m:
         # No intraday data pre-market for this ticker — degrade gracefully.
-        logger.info(f"[ThetaScanner] {ticker}: no Polygon intraday bars — quality bar-filters skipped (graceful)")
-        reasons.append("bars n/a (filters skipped)")
-        return "accept", reasons
+        # THETA-UNCONFIRMED-WATCH-V1: no intraday data -> we CANNOT confirm
+        # liquidity / VWAP / continuation, so this is NOT a tradeable pick.
+        # Downgrade to WATCH-ONLY ("no trade > unconfirmed pick"), kept visible.
+        logger.info(f"[ThetaScanner] {ticker}: no Polygon intraday bars — UNCONFIRMED, downgraded to watch-only")
+        reasons.append("unconfirmed: no intraday bars (watch-only)")
+        return "watch", reasons
 
     soft_fail = False  # VWAP-below or continuation fail → watch-only
 
@@ -475,7 +478,12 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 # Only queue if not already queued (idempotent — the daily
                 # fire-slot already ensures one pick per day, but in case
                 # emit_theta_pick re-fires for any reason we do not want dupes).
-                if await _redis.set(entry_key, _j2.dumps(entry_payload), ex=36*3600, nx=True):
+                if pick.get("watch_only"):
+                    logger.info(
+                        f"[stock-entry] SKIP live queue ticker={pick['ticker']} user={user.email} "
+                        f"— watch_only/unconfirmed pick (informational only, no live entry)"
+                    )
+                elif await _redis.set(entry_key, _j2.dumps(entry_payload), ex=36*3600, nx=True):
                     logger.info(
                         f"[stock-entry] QUEUED ticker={pick['ticker']} user={user.email} "
                         f"qty={qty} pick_price=${pick['price']:.2f} — waiting for timing gate"
