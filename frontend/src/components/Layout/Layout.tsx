@@ -8,6 +8,7 @@ import ThetaLogo from '../ThetaLogo'
 import { useAuthStore } from '../../stores/authStore'
 import { authApi } from '../../api/endpoints'
 import ChatBubble from '../ChatBubble'
+import AutomationStatusBadge from '../AutomationStatusBadge'
 import { ENABLE_AI_CHAT } from '../../utils/featureFlags'
 import { getDevicePref } from '../DevicePicker'
 
@@ -133,6 +134,11 @@ export default function Layout() {
                   <X size={18}/>
                 </button>
               </div>
+              {!isAdmin && (
+                <div className="px-4 pb-3">
+                  <AutomationStatusBadge/>
+                </div>
+              )}
               <nav className="flex-1 px-3 py-3 space-y-1 overflow-y-auto">
                 {navItems.map(({ to, icon: Icon, label }) => (
                   <NavLink
@@ -261,6 +267,11 @@ export default function Layout() {
               <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate">{user?.email}</div>
             </div>
           </div>
+          {!isAdmin && (
+            <div className="mb-2">
+              <AutomationStatusBadge/>
+            </div>
+          )}
           <Link
             to="/help"
             className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-violet-600 dark:hover:text-violet-400 transition-colors w-full"

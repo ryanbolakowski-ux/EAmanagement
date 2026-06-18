@@ -3,6 +3,7 @@ import type {
   TokenResponse, User, Strategy, StrategyCreate,
   BacktestRun, BacktestMetrics, Trade, DashboardSummary,
 } from '../types'
+import type { MyAccess, BrokerAccountLite } from '../types/access'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Auth
@@ -138,7 +139,7 @@ export const paperTradingApi = {
 }
 
 export const liveTradingApi = {
-  listAccounts: () => api.get('/api/v1/live-trading/accounts'),
+  listAccounts: () => api.get<BrokerAccountLite[]>('/api/v1/live-trading/accounts'),
   addAccount: (data: { account_name: string; broker: string; is_demo: boolean; credentials: object }) =>
     api.post('/api/v1/live-trading/accounts', data),
   testConnection: (data: { broker: string; is_demo: boolean; credentials: object }) =>
@@ -297,6 +298,7 @@ export type LegalKind =
   | 'risk_disclosure'
   | 'live_trading_consent'
   | 'options_trading_consent'
+  | 'fully_automated_trading'
   | 'signals_disclosure'
   | 'risk_change'
 
@@ -318,6 +320,39 @@ export const legalApi = {
     api.get<LegalAckStatus>('/api/v1/legal/status'),
   acknowledge: (kind: LegalKind, detail?: string) =>
     api.post('/api/v1/legal/acknowledge', { kind, detail }),
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plan access (Phase G) — tier capabilities + automation status
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const accountSignalsApi = {
+  myAccess: () => api.get<MyAccess>('/api/v1/account-signals/my-access'),
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Security — email verification codes (e.g. enable_automation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type VerifyPurpose = 'enable_automation' | string
+
+export type VerifyCodeRequestResult = {
+  sent: boolean
+  purpose: string
+  expires_in_min: number
+}
+
+export type VerifyCodeConfirmResult = {
+  verified: boolean
+  purpose: string
+  valid_for_min: number
+}
+
+export const securityApi = {
+  requestCode: (purpose: VerifyPurpose) =>
+    api.post<VerifyCodeRequestResult>('/api/v1/security/verify-code/request', { purpose }),
+  confirmCode: (purpose: VerifyPurpose, code: string) =>
+    api.post<VerifyCodeConfirmResult>('/api/v1/security/verify-code/confirm', { purpose, code }),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { dashboardApi, liveTradingApi, type DailyBias } from '../api/endpoints'
 import { useAuthStore } from '../stores/authStore'
@@ -5,12 +6,14 @@ import { Link } from 'react-router-dom'
 import {
   TrendingUp, FlaskConical, PlayCircle, Zap, Sparkles,
   ArrowUpRight, ArrowDownRight, BarChart2, Activity, Minus, CheckCircle2,
-  Briefcase, Target, Sliders, BookOpen,
+  Briefcase, Target, Sliders, BookOpen, Crown,
 } from 'lucide-react'
 import {
   HeroHeader, MetricRow, MetricCard, SectionHeader, EmptyState,
   Sparkline, fmt, fmtUsd, pnlColor, pnlSign,
 } from '../components/DashboardKit'
+import { useMyAccess } from '../hooks/useMyAccess'
+import PlanAccessModal from '../components/PlanAccessModal'
 
 const BIAS_STYLE: Record<DailyBias['bias'], { label: string; tone: string; bar: string; icon: any }> = {
   strong_bullish: { label: 'Strong Bullish', tone: 'bg-emerald-600 text-white border-emerald-600',  bar: 'bg-emerald-500', icon: ArrowUpRight   },
@@ -102,6 +105,8 @@ function QuickActionCard({
 
 export default function Dashboard() {
   const { user } = useAuthStore()
+  const [planOpen, setPlanOpen] = useState(false)
+  const { data: access } = useMyAccess()
 
   const { data, isLoading } = useQuery({
     queryKey: ['dashboard'],
@@ -138,6 +143,34 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto px-4 sm:px-6 py-6">
+
+      {/* YOUR PLAN & ACCESS — non-admins only */}
+      {!user?.is_admin && access && (
+        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300 flex items-center justify-center flex-shrink-0">
+            <Crown size={18}/>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-extrabold text-slate-900 dark:text-slate-100">Your plan &amp; access</div>
+            <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+              {access.fully_automated
+                ? (access.automation_status === 'enabled' ? 'Fully automated · automation ON' : 'Fully automated · activate to start')
+                : access.can_place_on_approval
+                  ? 'Signals · we place trades when you approve'
+                  : access.gets_signals
+                    ? 'Trade-idea signals'
+                    : 'Paper trading'}
+            </div>
+          </div>
+          <button
+            onClick={() => setPlanOpen(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white rounded-xl px-4 py-2 text-xs font-semibold flex-shrink-0"
+          >
+            Manage
+          </button>
+        </div>
+      )}
+      {planOpen && <PlanAccessModal onClose={() => setPlanOpen(false)}/>}
 
       {/* HERO — compact today-focused */}
       {(() => {
