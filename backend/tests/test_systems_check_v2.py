@@ -105,6 +105,37 @@ def test_overall_optional_service_does_not_force_yellow():
     assert sc.overall_status(comps) == "green"
 
 
+import datetime as _dt
+import inspect as _inspect
+
+
+# ── Holiday awareness (round 2): a weekday in-hours is still CLOSED on a holiday ──
+def test_juneteenth_2026_is_market_holiday():
+    assert sc.is_market_holiday(_dt.date(2026, 6, 19)) is True
+
+
+def test_regular_weekday_not_holiday():
+    assert sc.is_market_holiday(_dt.date(2026, 6, 18)) is False
+
+
+def test_open_monitor_on_holiday_is_green_even_if_stale():
+    eff_open = True and not sc.is_market_holiday(_dt.date(2026, 6, 19))  # in-window but holiday
+    assert sc.open_monitor_status(1, eff_open, _ago(6000), NOW) == "green"
+
+
+# ── resync 'Fix' safety (round 2): re-price-only must never place an order ──
+def test_trailing_watcher_has_reprice_only_param():
+    from app.engines.options import premarket_scheduler as ps
+    assert "reprice_only" in _inspect.signature(ps._run_trailing_stop_watcher).parameters
+
+
+def test_reprice_only_gates_the_broker_sell():
+    from app.engines.options import premarket_scheduler as ps
+    src = _inspect.getsource(ps._run_trailing_stop_watcher)
+    assert "if exit_reason and not reprice_only:" in src   # SELL path is gated off in re-price mode
+    assert "place_order" in src                             # the SELL path exists (and is gated above)
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

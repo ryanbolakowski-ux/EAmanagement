@@ -88,3 +88,24 @@ def overall_status(components: Iterable[Tuple[str, bool]]) -> str:
     has_critical_red = any(bool(crit) and status == "red" for status, crit in comps)
     has_issue = any(status in ("red", "yellow") for status, crit in comps)
     return "red" if has_critical_red else ("yellow" if has_issue else "green")
+
+
+# ── NYSE full-day closures (fixed list; extend yearly). Half-days are treated
+# as open — a slightly-strict freshness on a half-day is harmless. ────────────
+US_MARKET_HOLIDAYS = {
+    # 2026
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    # 2027
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+}
+
+
+def is_market_holiday(d) -> bool:
+    """True if date `d` is a known NYSE full-day closure (so 'market open' must
+    be False even on a weekday within trading hours)."""
+    try:
+        return d.isoformat() in US_MARKET_HOLIDAYS
+    except Exception:
+        return False

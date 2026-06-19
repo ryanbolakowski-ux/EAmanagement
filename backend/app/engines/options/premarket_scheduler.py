@@ -1352,7 +1352,7 @@ async def _check_and_refresh_news_calendar():
 
 
 # ===== TRAILING-STOP WATCHER (3% trail on every Theta Scanner position) =====
-async def _run_trailing_stop_watcher():
+async def _run_trailing_stop_watcher(reprice_only: bool = False):
     """Walk open_positions_watch rows. Update trail_high. If price falls
     >= trail_pct from trail_high, submit market SELL + mark closed."""
     from app.database import async_session_factory
@@ -1426,7 +1426,13 @@ async def _run_trailing_stop_watcher():
                 exit_reason = None
                 if price <= effective_stop and effective_stop > 0:
                     exit_reason = stop_label
-                if exit_reason:
+                # reprice_only (admin System Check 'Fix'): re-price + heartbeat
+                # ONLY — never place an order. The scheduled watcher tick still
+                # handles real exits, so a breached stop fires on its next run.
+                if exit_reason and reprice_only:
+                    logger.info(f"[TrailWatch] reprice_only: {r.ticker} would exit "
+                                f"({exit_reason}) but skipping SELL (admin re-price).")
+                if exit_reason and not reprice_only:
                     # Submit market SELL via the broker
                     try:
                         from app.engines.live_trading.broker_factory import build_broker_from_account

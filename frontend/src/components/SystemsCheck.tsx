@@ -282,19 +282,19 @@ export default function SystemsCheck({ token }: { token: string | null }) {
     } catch { /* ignore */ }
   }, [token])
 
-  const runFix = useCallback(async (action: string) => {
+  const runFix = useCallback(async (action: string, key: string) => {
     if (!token) return
-    setFixBusy(action)
+    setFixBusy(key)
     try {
       const r = await fetch(API + '/systems-check/fix', {
         method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       })
       const j = await r.json()
-      setFixMsg(m => ({ ...m, [action]: { ok: !!j.ok, message: j.message || (r.ok ? 'Done' : `HTTP ${r.status}`) } }))
+      setFixMsg(m => ({ ...m, [key]: { ok: !!j.ok, message: j.message || (r.ok ? 'Done' : `HTTP ${r.status}`) } }))
       fetchData()
     } catch (e: any) {
-      setFixMsg(m => ({ ...m, [action]: { ok: false, message: e?.message || 'fix failed' } }))
+      setFixMsg(m => ({ ...m, [key]: { ok: false, message: e?.message || 'fix failed' } }))
     } finally { setFixBusy(null) }
   }, [token, fetchData])
 
@@ -374,9 +374,9 @@ export default function SystemsCheck({ token }: { token: string | null }) {
                   <span className="text-[10px] text-slate-400">({e.component})</span>
                 </div>
                 {e.auto_fixable && e.fix_action && (
-                  <button onClick={() => runFix(e.fix_action!)} disabled={fixBusy === e.fix_action}
+                  <button onClick={() => runFix(e.fix_action!, e.component)} disabled={fixBusy === e.component}
                     className="inline-flex items-center gap-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white font-bold text-[11px] px-3 py-1.5 rounded-lg">
-                    {fixBusy === e.fix_action ? 'Fixing…' : 'Fix'}
+                    {fixBusy === e.component ? 'Fixing…' : 'Fix'}
                   </button>
                 )}
                 {!(e.auto_fixable && e.fix_action) && (
@@ -389,11 +389,11 @@ export default function SystemsCheck({ token }: { token: string | null }) {
                 {e.at && <span>Detected: {new Date(e.at).toLocaleTimeString()}</span>}
                 {e.last_success && <span>Last OK: {new Date(e.last_success).toLocaleString()}</span>}
               </div>
-              {e.manual_instructions && !e.auto_fixable && (
+              {e.manual_instructions && (
                 <div className="text-[11px] text-slate-600 dark:text-slate-300 mt-1.5 bg-slate-100 dark:bg-slate-800 rounded p-2"><b>To fix:</b> {e.manual_instructions}</div>
               )}
-              {e.fix_action && fixMsg[e.fix_action] && (
-                <div className={`text-[11px] mt-1.5 font-mono ${fixMsg[e.fix_action].ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{fixMsg[e.fix_action].message}</div>
+              {fixMsg[e.component] && (
+                <div className={`text-[11px] mt-1.5 font-mono ${fixMsg[e.component].ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{fixMsg[e.component].message}</div>
               )}
             </div>
           ))}

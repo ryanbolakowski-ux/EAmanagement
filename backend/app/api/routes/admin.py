@@ -724,6 +724,7 @@ async def systems_check(
         try:
             return (await db.execute(text(sql), params)).scalar()
         except Exception as e:
+            logger.warning(f"[systems-check] scalar query failed: {e}")
             return None
 
     async def _first(sql: str, **params):
@@ -749,7 +750,9 @@ async def systems_check(
     # ── SYSTEMS-CHECK-V2: facts for accurate, non-stale component health ──
     try:
         from app.engines.options.premarket_scheduler import _within_market_window
-        _mkt_open = bool(_within_market_window(et_now))
+        # Holiday-aware (round 2): a weekday inside trading hours is still CLOSED on
+        # an NYSE holiday (e.g. Juneteenth), so positions/balances aren't expected fresh.
+        _mkt_open = bool(_within_market_window(et_now)) and not _sc.is_market_holiday(et_now.date())
     except Exception:
         _mkt_open = True  # fail toward 'should be fresh' (never hides a real stall)
     # KYC webhook health = signing secret CONFIGURED (events are rare; absence
@@ -1113,7 +1116,8 @@ async def systems_check(
         "theta_scanner": "rerun_scanner_check", "open_position_monitor": "resync_positions",
         "broker_sync": "resync_broker", "email_provider": "refresh_email_health",
         "queue": "clear_stale_jobs", "redis": "refresh_health", "database": "refresh_health",
-        "market_data": "refresh_health",
+        # market_data intentionally NOT auto-fixable: its only failure mode is a
+        # missing POLYGON_API_KEY, which a re-check cannot set -> show instructions.
     }
     errors = []
     for _sname, _sect in (("scanners", scanners), ("trading", trading),
@@ -1136,7 +1140,8 @@ async def systems_check(
                     _affected = f"{open_positions} open position(s)"
                 _sc_msgs = {
                     "open_position_monitor": "Open positions haven't been re-priced recently (market is open) — click Fix to re-price now.",
-                    "queue": f"{int(queue_depth)} trade(s) genuinely awaiting confirmation.",
+                    "queue": (f"{int(queue_depth)} trade(s) awaiting confirmation"
+                              + (f"; {int(_queue_abandoned)} abandoned (Fix retires those — a live backlog needs review)." if _queue_abandoned else ".")),
                     "kyc_webhooks": "KYC webhook signing secret is not configured.",
                     "tradier_api": "A real-money live Tradier session is active but its account credentials are missing.",
                     "broker_sync": "Broker balance sync is stale.",
@@ -1157,9 +1162,12 @@ async def systems_check(
     _email_subs = ("trade_alert_status", "futures_email_status", "options_swing_status", "heartbeat_status")
 
     # ── overall (criticality-aware) ─────────────────────────────────────
-    _has_critical_red = any(e["severity"] == "critical" for e in errors)
-    _has_any_issue = bool(errors) or any(emails.get(k) in ("red", "yellow") for k in _email_subs)
-    worst = "red" if _has_critical_red else ("yellow" if _has_any_issue else "green")
+    # Round 2: roll up through the unit-tested sc_logic.overall_status so the
+    # executed path is the one the tests cover. Each error -> (status, is_critical);
+    # degraded email sub-statuses contribute non-critical yellow.
+    _overall_pairs = [(e["status"], e["severity"] == "critical") for e in errors]
+    _overall_pairs += [(emails[k], False) for k in _email_subs if emails.get(k) in ("red", "yellow")]
+    worst = _sc.overall_status(_overall_pairs)
     summary_map = {
         "green":  "All systems operating normally.",
         "yellow": "Some subsystems are degraded or stale — review the flagged cards (non-critical).",
@@ -1341,12 +1349,17 @@ async def systems_check_fix(
     ok = False; msg = ""; detail = {}
     try:
         if action == "resync_positions":
-            # SYSTEMS-CHECK-V2: actually re-price open positions NOW (was a no-op).
-            from app.engines.options.premarket_scheduler import _run_trailing_stop_watcher
-            await _run_trailing_stop_watcher()
-            _np = (await db.execute(text("SELECT COUNT(*) FROM open_positions_watch WHERE status='open'"))).scalar() or 0
-            ok = True
-            msg = f"Re-priced {int(_np)} open position(s) now. The stale flag clears on the refreshed check."
+            # Round 2: re-price ONLY (never trades), and don't claim success when
+            # the real blocker is a missing Polygon key.
+            if not os.environ.get("POLYGON_API_KEY"):
+                ok = False
+                msg = "Cannot re-price: POLYGON_API_KEY is not configured (set it, then retry)."
+            else:
+                from app.engines.options.premarket_scheduler import _run_trailing_stop_watcher
+                await _run_trailing_stop_watcher(reprice_only=True)
+                _np = (await db.execute(text("SELECT COUNT(*) FROM open_positions_watch WHERE status='open'"))).scalar() or 0
+                ok = True
+                msg = f"Re-priced {int(_np)} open position(s) now (no orders placed). The stale flag clears on the refreshed check."
         elif action in ("refresh_health", "refresh_email_health"):
             from app.engines.scanner_health import check_health
             h = await check_health()
