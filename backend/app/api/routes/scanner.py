@@ -1,5 +1,6 @@
 """Read endpoint for the most recent Theta Scanner pick."""
 import os, json
+from loguru import logger
 from datetime import date
 from fastapi import APIRouter, Depends
 from app.core.auth import require_2fa_when_paid as get_current_user
@@ -611,11 +612,19 @@ async def force_close_all_tradier(
     ok = await broker.connect()
     if not ok:
         return {"closed": [], "count": 0, "error": "broker connect failed"}
-    positions = await broker.get_positions()
+    # MANUAL-CLOSE-FIX: close from OUR ledger (open_positions_watch), not the
+    # broker's position list. Tradier SANDBOX returns no positions, so the old
+    # broker-ledger loop closed NOTHING and rows stuck open forever.
+    _owrows = (await db.execute(text(
+        "SELECT ticker, qty FROM open_positions_watch "
+        "WHERE user_id = CAST(:uid AS uuid) AND status='open'"
+    ), {"uid": str(current_user.id)})).fetchall()
     results = []
     key = _os_fc.environ.get("POLYGON_API_KEY", "")
-    for p in positions:
-        sym = p.get("symbol"); qty = int(p.get("quantity", 0))
+    if not _owrows:
+        return {"closed": [], "count": 0, "error": "no open positions on record to close"}
+    for p in _owrows:
+        sym = p.ticker; qty = int(p.qty or 0)
         if not sym or qty <= 0: continue
         try:
             resp_o = await broker.place_order(OrderRequest(
@@ -733,29 +742,37 @@ async def close_specific_trade(
     # Get live price
     ep = _polygon_snapshot_price(row.instrument)
     broker = build_broker_from_account(acct)
-    await broker.connect()
-    side = OrderSide.SELL if row.direction == "long" else OrderSide.BUY
-    sess = _market_session_flags()
-    if sess["is_open"]:
-        resp = await broker.place_order(OrderRequest(
-            instrument=row.instrument, side=side, quantity=int(row.contracts),
-            order_type=OrderType.MARKET, time_in_force="day",
-        ))
-    elif ep and sess["duration"] in ("pre", "post"):
-        limit_px = round(ep * (0.99 if side == OrderSide.SELL else 1.01), 2)
-        resp = await broker.place_order(OrderRequest(
-            instrument=row.instrument, side=side, quantity=int(row.contracts),
-            order_type=OrderType.LIMIT, price=limit_px, time_in_force=sess["duration"],
-        ))
-    else:
-        resp = await broker.place_order(OrderRequest(
-            instrument=row.instrument, side=side, quantity=int(row.contracts),
-            order_type=OrderType.MARKET, time_in_force="day",
-        ))
-    # Update DB optimistically
-    if ep:
-        ep_str = f"{ep:.4f}"
-        await db.execute(text(f"UPDATE trades SET status='closed', exit_price={ep_str}, exit_time=NOW(), pnl=({ep_str} - entry_price) * contracts, net_pnl=({ep_str} - entry_price) * contracts, exit_reason='manual_per_row' WHERE id='{row.id}'"))
-        await db.execute(text(f"UPDATE open_positions_watch SET status='closed', exit_price={ep_str}, exit_reason='manual_per_row', closed_at=NOW() WHERE ticker='{row.instrument}' AND user_id='{current_user.id}' AND status='open'"))
-        await db.commit()
-    return {"ok": True, "order_id": resp.broker_order_id, "ticker": row.instrument, "exit_price": ep}
+    # MANUAL-CLOSE-FIX: surface broker errors instead of a swallowed 500.
+    try:
+        await broker.connect()
+        side = OrderSide.SELL if row.direction == "long" else OrderSide.BUY
+        sess = _market_session_flags()
+        if sess["is_open"]:
+            resp = await broker.place_order(OrderRequest(
+                instrument=row.instrument, side=side, quantity=int(row.contracts),
+                order_type=OrderType.MARKET, time_in_force="day"))
+        elif ep and sess["duration"] in ("pre", "post"):
+            limit_px = round(ep * (0.99 if side == OrderSide.SELL else 1.01), 2)
+            resp = await broker.place_order(OrderRequest(
+                instrument=row.instrument, side=side, quantity=int(row.contracts),
+                order_type=OrderType.LIMIT, price=limit_px, time_in_force=sess["duration"]))
+        else:
+            resp = await broker.place_order(OrderRequest(
+                instrument=row.instrument, side=side, quantity=int(row.contracts),
+                order_type=OrderType.MARKET, time_in_force="day"))
+    except Exception as _ce:
+        logger.error(f"[close-trade] broker error {row.instrument}: {_ce}")
+        return {"ok": False, "error": f"broker rejected the close: {_ce}"}
+    # MANUAL-CLOSE-FIX: ALWAYS record the close (+commit), even with no live
+    # price — otherwise the SELL fires but the row stays 'open' forever.
+    await db.execute(text(
+        "UPDATE trades SET status='closed', exit_time=NOW(), exit_reason='manual_per_row', "
+        "exit_price=:ep, pnl=CASE WHEN :ep IS NULL THEN pnl ELSE (CAST(:ep AS NUMERIC)-entry_price)*contracts END, "
+        "net_pnl=CASE WHEN :ep IS NULL THEN net_pnl ELSE (CAST(:ep AS NUMERIC)-entry_price)*contracts END "
+        "WHERE id = CAST(:tid AS uuid)"), {"ep": ep, "tid": str(row.id)})
+    await db.execute(text(
+        "UPDATE open_positions_watch SET status='closed', exit_reason='manual_per_row', "
+        "exit_price=:ep, closed_at=NOW() WHERE ticker=:tk AND user_id=CAST(:uid AS uuid) AND status='open'"),
+        {"ep": ep, "tk": row.instrument, "uid": str(current_user.id)})
+    await db.commit()
+    return {"ok": True, "order_id": getattr(resp, "broker_order_id", None), "ticker": row.instrument, "exit_price": ep, "priced": ep is not None}

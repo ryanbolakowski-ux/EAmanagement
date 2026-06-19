@@ -1363,7 +1363,7 @@ async def _run_trailing_stop_watcher(reprice_only: bool = False):
     async with async_session_factory() as db:
         rows = (await db.execute(_t("""
             SELECT id, user_id, broker_account_id, ticker, qty, entry_price,
-                   trail_pct, trail_high, hard_stop, target
+                   trail_pct, trail_high, hard_stop, target, opened_at, source
               FROM open_positions_watch
              WHERE status = 'open'
              ORDER BY opened_at ASC LIMIT 100
@@ -1426,6 +1426,42 @@ async def _run_trailing_stop_watcher(reprice_only: bool = False):
                 exit_reason = None
                 if price <= effective_stop and effective_stop > 0:
                     exit_reason = stop_label
+                # TAKE-PROFIT (was missing — the watcher never sold at target):
+                if exit_reason is None and r.target and price >= float(r.target):
+                    exit_reason = "target"
+                # STAGNANT-EXIT-V1: stock pick that hasn't hit TP/SL and hasn't
+                # meaningfully moved after >=2 TRADING days.
+                if exit_reason is None and getattr(r, "source", None) == "theta_scanner":
+                    try:
+                        from app.engines.market_calendar import trading_days_elapsed
+                        _days = trading_days_elapsed(r.opened_at)
+                        _moved = abs(price - entry) / entry if entry else 0.0
+                        _below_tgt = (not r.target) or (price < float(r.target))
+                        _above_stop = (base_hard_stop <= 0) or (price > base_hard_stop)
+                        if _days >= 2 and _moved < 0.03 and _below_tgt and _above_stop:
+                            from app.models.user import BrokerAccount as _BA
+                            from sqlalchemy import select as _sel2
+                            _ba = (await db.execute(_sel2(_BA).where(_BA.id == r.broker_account_id))).scalar_one_or_none()
+                            _is_real = bool(_ba) and (not getattr(_ba, "is_demo", False)) and (not getattr(_ba, "sandbox_mode", False))
+                            if _is_real:
+                                # NEVER silently market-sell a real-money position on a soft
+                                # signal — flag it (advisory), throttled to once per ET day.
+                                try:
+                                    import redis as _rd2
+                                    _rc = _rd2.Redis.from_url(_os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+                                    _k = f"stagnant_flag:{r.id}:{_today_et().date().isoformat()}"
+                                    _fresh = _rc.set(_k, "1", nx=True, ex=26*3600)
+                                except Exception:
+                                    _fresh = True
+                                if _fresh:
+                                    logger.warning(f"[TrailWatch] STAGNANT-FLAG {r.ticker}: flat {_days} trading days, "
+                                                   f"move={_moved*100:.1f}% — REAL account, advisory only (not auto-sold).")
+                            else:
+                                exit_reason = "stagnant_2d"
+                                logger.info(f"[TrailWatch] STAGNANT {r.ticker}: flat {_days} trading days, "
+                                            f"move={_moved*100:.1f}% — auto-closing (paper/sandbox).")
+                    except Exception as _se:
+                        logger.warning(f"[TrailWatch] stagnant check skipped {r.ticker}: {_se}")
                 # reprice_only (admin System Check 'Fix'): re-price + heartbeat
                 # ONLY — never place an order. The scheduled watcher tick still
                 # handles real exits, so a breached stop fires on its next run.

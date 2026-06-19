@@ -1113,13 +1113,17 @@ export default function LiveTradingV2() {
     onError: (e: any) => setDeployError(e?.response?.data?.detail || 'Failed to start session.'),
   })
 
+  const _refetchTrades = () => { qc.invalidateQueries({ queryKey: ['live-trades'] }); qc.invalidateQueries({ queryKey: ['unrealized-pnl'] }); qc.invalidateQueries({ queryKey: ['scanner-open-positions'] }) }
   const closeOneTrade = useMutation({
     mutationFn: (id: string) => api.post(`/api/v1/scanner/close-trade/${id}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['live-trades'] }); qc.invalidateQueries({ queryKey: ['unrealized-pnl'] }); qc.invalidateQueries({ queryKey: ['scanner-open-positions'] }) },
+    // MANUAL-CLOSE-FIX: surface backend ok:false (broker reject) instead of silently doing nothing.
+    onSuccess: (res: any) => { const d = res?.data; if (d && d.ok === false) alert(`Close failed: ${d.error || 'unknown error'}`); _refetchTrades() },
+    onError: (e: any) => alert(`Close failed: ${e?.response?.data?.detail || e?.message || 'request error'}`),
   })
   const closeAllOpenTrades = useMutation({
     mutationFn: () => api.post('/api/v1/scanner/force-close-all'),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['live-trades'] }); qc.invalidateQueries({ queryKey: ['unrealized-pnl'] }) },
+    onSuccess: (res: any) => { const d = res?.data; if (d?.error) alert(`Close-all: ${d.error}`); else alert(`Closed ${d?.count ?? 0} position(s).`); _refetchTrades() },
+    onError: (e: any) => alert(`Close-all failed: ${e?.response?.data?.detail || e?.message || 'request error'}`),
   })
   const openPositions = liveTrades.filter((t: any) => t.status === 'open' || t.status === 'pending')
   const closedTrades = liveTrades.filter((t: any) => t.status === 'closed')

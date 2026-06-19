@@ -130,3 +130,24 @@ def market_status(now: datetime | None = None) -> dict:
         'next_open_et': nxt_open.isoformat(),
         'now_et': n.isoformat(),
     }
+
+
+def trading_days_elapsed(opened_at_utc, now_utc=None) -> int:
+    """Count TRADING days strictly AFTER the open date up to & including today
+    (ET, holiday-aware). A Monday-opened position is 2 trading days old on Wed."""
+    from datetime import datetime, timezone
+    if opened_at_utc is None:
+        return 0
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    try:
+        d0 = opened_at_utc.astimezone(ET).date()
+        d1 = now_utc.astimezone(ET).date()
+    except Exception:
+        return 0
+    n = 0
+    d = next_trading_day(d0)
+    while d <= d1:
+        n += 1
+        d = next_trading_day(d)
+    return n

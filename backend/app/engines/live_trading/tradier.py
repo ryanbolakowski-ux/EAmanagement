@@ -461,7 +461,12 @@ class TradierBroker(BrokerBase):
         try:
             async with self._session.get(url) as r:
                 data = await r.json()
-                p = (data.get("positions") or {}).get("position")
+                # Tradier sandbox serializes 'no positions' as the string sentinel
+                # 'null' (not a dict). Guard so .get('position') can't crash.
+                _pos_root = data.get("positions")
+                if not isinstance(_pos_root, dict):
+                    return []
+                p = _pos_root.get("position")
                 if not p:
                     return []
                 if isinstance(p, dict):
