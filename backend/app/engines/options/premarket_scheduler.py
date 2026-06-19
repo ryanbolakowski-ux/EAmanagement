@@ -1386,6 +1386,14 @@ async def _run_trailing_stop_watcher():
                     if v and float(v) > 0: price = float(v); break
                 if not price: continue
 
+                # SYSTEMS-CHECK-V2 heartbeat: record that we SUCCESSFULLY priced
+                # this position this tick, even when the high didn't move. Without
+                # this, last_priced_at only advanced on a NEW high, so a quiet
+                # position read as 'stale' forever in the admin System Check.
+                await db.execute(_t(
+                    "UPDATE open_positions_watch SET last_priced_at = NOW() WHERE id = :id"
+                ), {"id": r.id})
+
                 entry = float(r.entry_price); trail = float(r.trail_pct)
                 trail_high = max(float(r.trail_high), price)
                 pct_from_entry = (trail_high - entry) / entry  # peak unrealized %

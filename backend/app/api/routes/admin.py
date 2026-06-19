@@ -29,6 +29,7 @@ router = APIRouter()
 # never displayed in the UI, and only known to the human admin.
 
 import redis as _redis_lib
+from app.core import sc_logic as _sc  # SYSTEMS-CHECK-V2 pure decision helpers
 from app.core.security import verify_password as _verify_password
 
 _admin_redis = _redis_lib.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True, db=0)
@@ -745,6 +746,36 @@ async def systems_check(
         if delta < 30: return "yellow"
         return "red" if crit else "yellow"
 
+    # ── SYSTEMS-CHECK-V2: facts for accurate, non-stale component health ──
+    try:
+        from app.engines.options.premarket_scheduler import _within_market_window
+        _mkt_open = bool(_within_market_window(et_now))
+    except Exception:
+        _mkt_open = True  # fail toward 'should be fresh' (never hides a real stall)
+    # KYC webhook health = signing secret CONFIGURED (events are rare; absence
+    # of recent events is NOT a failure).
+    _kyc_configured = bool(os.environ.get("STRIPE_IDENTITY_WEBHOOK_SECRET"))
+    # Live Tradier execution uses PER-ACCOUNT credentials; the global
+    # TRADIER_API_KEY env is unused, so health follows real live Tradier sessions.
+    _live_tradier_any = await _scalar(
+        "SELECT COUNT(*) FROM trade_sessions ts JOIN broker_accounts ba ON ba.id = ts.broker_account_id "
+        "WHERE ts.mode='live' AND ts.is_active=true AND LOWER(ba.broker)='tradier'") or 0
+    _live_tradier_realnocreds = await _scalar(
+        "SELECT COUNT(*) FROM trade_sessions ts JOIN broker_accounts ba ON ba.id = ts.broker_account_id "
+        "WHERE ts.mode='live' AND ts.is_active=true AND LOWER(ba.broker)='tradier' "
+        "AND COALESCE(ba.is_demo,false)=false AND COALESCE(ba.sandbox_mode,false)=false "
+        "AND (ba.encrypted_credentials IS NULL OR ba.encrypted_credentials='')") or 0
+    # Job queue: only genuinely-actionable pending trades are a real backlog —
+    # NOT terminal (executed/declined/expired) or time-expired rows.
+    _queue_live = await _scalar(
+        "SELECT COUNT(*) FROM pending_trades WHERE confirmed_at IS NULL AND declined_at IS NULL "
+        "AND LOWER(COALESCE(status,'')) NOT IN ('executed','declined','expired','cancelled','failed') "
+        "AND (expires_at IS NULL OR expires_at > NOW())") or 0
+    _queue_abandoned = await _scalar(
+        "SELECT COUNT(*) FROM pending_trades WHERE confirmed_at IS NULL AND declined_at IS NULL "
+        "AND LOWER(COALESCE(status,'')) NOT IN ('executed','declined','expired','cancelled','failed') "
+        "AND expires_at < NOW()") or 0
+
     # ── scanners ────────────────────────────────────────────────────────
     theta_today = await _first(
         "SELECT ticker, picked_at FROM email_signals_history "
@@ -867,9 +898,13 @@ async def systems_check(
             "active_sessions": int(paper_active),
         },
         "open_position_monitor": {
-            "status": _staleness(last_priced, crit=False) if open_positions > 0 else "green",
+            # Only 'degraded' if positions are open AND the market is OPEN yet
+            # they haven't been re-priced recently. Market closed -> positions
+            # legitimately don't re-price, so that's green (informational).
+            "status": _sc.open_monitor_status(open_positions, _mkt_open, last_priced, now_utc),
             "last_check_at": last_priced.isoformat() if last_priced else None,
             "open_count": int(open_positions),
+            "market_open": _mkt_open,
         },
         "position_closing_job": {
             "status": "green",
@@ -898,7 +933,11 @@ async def systems_check(
     # the secrets are present in env — without ever echoing the secret value.
     stripe_status = "green" if os.environ.get("STRIPE_WEBHOOK_SECRET") else "yellow"
     resend_status = "green" if os.environ.get("RESEND_API_KEY") else "red"
-    tradier_status = "green" if os.environ.get("TRADIER_API_KEY") else "yellow"
+    # SYSTEMS-CHECK-V2: the global TRADIER_API_KEY env is NOT used by the broker
+    # adapter (per-account encrypted creds are), so it must not drive status.
+    # RED only when a REAL-money live Tradier session is active but its account
+    # has no stored credentials; otherwise green (not-in-use / sandbox / configured).
+    tradier_status = _sc.tradier_status(_live_tradier_realnocreds)
 
     # Probe Resend with a HEAD-like check (its domains endpoint) so we get a
     # real recent status code rather than a stale boolean. 2s timeout so this
@@ -917,12 +956,20 @@ async def systems_check(
 
     integrations = {
         "kyc_webhooks": {
-            "status": _staleness(kyc_last, crit=False) if kyc_today > 0 else "yellow",
+            # Health = webhook CONFIGURED + reachable. KYC events fire only on
+            # signup/verification (rare), so 'no recent events' is informational,
+            # never degraded. Yellow ONLY when the signing secret is missing.
+            "status": _sc.kyc_status(_kyc_configured),
+            "configured": _kyc_configured,
             "last_received_at": kyc_last.isoformat() if kyc_last else None,
             "today_count": int(kyc_today),
         },
         "broker_sync": {
-            "status": _staleness(broker_last, crit=False) if broker_n > 0 else "yellow",
+            # broker balance freshness (SC-V2): caches refresh on a ~15-min
+            # schedule and balances do not move second-by-second. Green within
+            # 60 min, or when the market is closed; yellow only if the refresh
+            # job genuinely stalls >60 min during market hours.
+            "status": _sc.broker_status(broker_n, _mkt_open, broker_last, now_utc),
             "last_sync_at": broker_last.isoformat() if broker_last else None,
             "accounts": broker_n,
         },
@@ -943,6 +990,8 @@ async def systems_check(
         },
         "tradier_api": {
             "status": tradier_status,
+            "in_use": bool(_live_tradier_any),
+            "live_sessions": int(_live_tradier_any),
             "last_call_at": None,
         },
     }
@@ -965,10 +1014,9 @@ async def systems_check(
     except Exception:
         redis_ok = False
 
-    # queue depth: count pending_trades not-yet-confirmed as a proxy
-    queue_depth = await _scalar(
-        "SELECT COUNT(*) FROM pending_trades WHERE confirmed_at IS NULL"
-    ) or 0
+    # queue depth: SYSTEMS-CHECK-V2 — only genuinely-actionable pending trades
+    # (computed in the facts block: excludes executed/declined/expired/old rows).
+    queue_depth = int(_queue_live)
 
     stuck_runs = await _scalar(
         "SELECT COUNT(*) FROM backtest_runs "
@@ -979,8 +1027,9 @@ async def systems_check(
         "database": {"status": "green" if db_ok else "red"},
         "redis": {"status": "green" if redis_ok else "red"},
         "queue": {
-            "status": "green" if int(queue_depth) < 10 else "yellow",
+            "status": _sc.queue_status(queue_depth),
             "depth": int(queue_depth),
+            "abandoned": int(_queue_abandoned),
         },
         "scheduler": {
             "status": "green",
@@ -1054,7 +1103,11 @@ async def systems_check(
         "redis": "Redis unreachable — check the edge_redis container and REDIS_URL.",
         "stripe_webhook": "STRIPE_WEBHOOK_SECRET not set in prod env — add it so Stripe events verify.",
         "market_data": "POLYGON_API_KEY not set — fallbacks (cache/yfinance) still work, but the primary provider is unconfigured.",
-        "tradier_api": "TRADIER_API_KEY not set — Tradier live execution is unavailable until configured.",
+        "tradier_api": "A real-money live Tradier session is active but its broker account has no stored "
+                       "credentials. Reconnect the Tradier account under Settings → Brokers. (The global "
+                       "TRADIER_API_KEY env var is NOT used — credentials are per-account.)",
+        "kyc_webhooks": "STRIPE_IDENTITY_WEBHOOK_SECRET is not set — add it so Stripe Identity (KYC) "
+                        "webhooks verify. Note: KYC events are rare, so 'no recent events' alone is normal.",
     }
     _fixable = {
         "theta_scanner": "rerun_scanner_check", "open_position_monitor": "resync_positions",
@@ -1081,7 +1134,16 @@ async def systems_check(
                     _affected = f"{broker_n} broker account(s)"
                 elif _k == "open_position_monitor":
                     _affected = f"{open_positions} open position(s)"
-                _msg = {"red": "Critical: component down", "yellow": "Degraded / stale"}.get(_v["status"])
+                _sc_msgs = {
+                    "open_position_monitor": "Open positions haven't been re-priced recently (market is open) — click Fix to re-price now.",
+                    "queue": f"{int(queue_depth)} trade(s) genuinely awaiting confirmation.",
+                    "kyc_webhooks": "KYC webhook signing secret is not configured.",
+                    "tradier_api": "A real-money live Tradier session is active but its account credentials are missing.",
+                    "broker_sync": "Broker balance sync is stale.",
+                    "market_data": "Primary market-data key (Polygon) is not configured.",
+                    "stripe_webhook": "Stripe webhook signing secret is not configured.",
+                }
+                _msg = _sc_msgs.get(_k) or {"red": "Critical: component down", "yellow": "Degraded / stale"}.get(_v["status"])
                 if _k == "email_provider" and last_failure and last_failure.error_message:
                     _msg = (last_failure.error_message or _msg)[:200]
                 errors.append({
@@ -1278,13 +1340,19 @@ async def systems_check_fix(
     logger.info(f"[systems-check-fix] admin={current_user.email} action={action} component={req.component}")
     ok = False; msg = ""; detail = {}
     try:
-        if action in ("refresh_health", "refresh_email_health", "resync_positions"):
+        if action == "resync_positions":
+            # SYSTEMS-CHECK-V2: actually re-price open positions NOW (was a no-op).
+            from app.engines.options.premarket_scheduler import _run_trailing_stop_watcher
+            await _run_trailing_stop_watcher()
+            _np = (await db.execute(text("SELECT COUNT(*) FROM open_positions_watch WHERE status='open'"))).scalar() or 0
+            ok = True
+            msg = f"Re-priced {int(_np)} open position(s) now. The stale flag clears on the refreshed check."
+        elif action in ("refresh_health", "refresh_email_health"):
             from app.engines.scanner_health import check_health
             h = await check_health()
             detail = {k: bool(v.get("ok")) for k, v in (h.get("components") or {}).items()}
             ok = True
-            msg = ("Re-checked; open positions re-price on the monitor's next tick (~1 min)."
-                   if action == "resync_positions" else "Re-ran health check.")
+            msg = "Re-ran health check."
         elif action == "clear_stale_jobs":
             r1 = await db.execute(text("UPDATE backtest_runs SET status='FAILED', completed_at=NOW(), "
                 "error_message='cleared via admin System Check (stale >1h)' "
@@ -1292,8 +1360,15 @@ async def systems_check_fix(
             r2 = await db.execute(text("UPDATE optimization_runs SET status='FAILED', completed_at=NOW(), "
                 "error_message='cleared via admin System Check (stale >1h)' "
                 "WHERE LOWER(status::text)='running' AND created_at < NOW() - INTERVAL '1 hour'"))
+            # SYSTEMS-CHECK-V2: also retire genuinely-abandoned pending trades
+            # (unconfirmed, non-terminal, and already past their expiry).
+            r3 = await db.execute(text("UPDATE pending_trades SET declined_at=NOW(), status='expired' "
+                "WHERE confirmed_at IS NULL AND declined_at IS NULL "
+                "AND LOWER(COALESCE(status,'')) NOT IN ('executed','declined','expired','cancelled','failed') "
+                "AND expires_at < NOW()"))
             await db.commit()
-            ok = True; msg = f"Cleared {r1.rowcount} stale backtest(s) + {r2.rowcount} stale optimization(s)."
+            ok = True; msg = (f"Cleared {r1.rowcount} stale backtest(s), {r2.rowcount} stale optimization(s), "
+                              f"and retired {r3.rowcount} abandoned pending-trade(s).")
         elif action == "rerun_scanner_check":
             from app.engines.options.theta_scanner import find_best_premarket_pick
             pick = await find_best_premarket_pick(db)

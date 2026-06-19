@@ -379,6 +379,9 @@ export default function SystemsCheck({ token }: { token: string | null }) {
                     {fixBusy === e.fix_action ? 'Fixing…' : 'Fix'}
                   </button>
                 )}
+                {!(e.auto_fixable && e.fix_action) && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300" title="This is a configuration item — it can't be auto-fixed. See the instructions below.">Not auto-fixable</span>
+                )}
               </div>
               <div className="text-xs text-slate-600 dark:text-slate-300 mt-1.5">{e.message}</div>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">
