@@ -676,8 +676,10 @@ async def _run_optimization_task(run_id: str):
                 )
                 run = result.scalar_one_or_none()
                 if run:
+                    # OPT-VISIBILITY-V1: never leave a blank failure reason.
                     run.status = OptimizationStatus.FAILED
-                    run.error_message = str(e)
+                    run.error_message = (f"{type(e).__name__}: {e}".strip() or "optimization crashed (no detail)")[:480]
+                    run.completed_at = datetime.now(timezone.utc)
                     await db.commit()
         except:
             pass

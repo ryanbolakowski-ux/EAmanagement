@@ -657,6 +657,19 @@ export default function StrategyBuilder() {
                     <h3 className="font-bold text-slate-900 text-sm truncate dark:text-slate-100">{s.name}</h3>
                     <div className="flex flex-wrap items-center gap-1 mt-1">
                       <span className={`badge ${STATUS_COLORS[s.status] || 'badge-grey'}`}>{s.status}</span>
+                      {/* QUALITY-GATE-V1: flag unproven/unstable strategies (best completed-backtest WR + stability). */}
+                      {s.quality_label === 'unproven' && (
+                        <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                          title={(s.quality_reasons || []).join('; ') || 'Not yet proven by a clean backtest'}>Unproven</span>
+                      )}
+                      {s.quality_label === 'unstable' && (
+                        <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+                          title={(s.quality_reasons || []).join('; ')}>Unstable</span>
+                      )}
+                      {s.quality_label === 'proven' && (
+                        <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                          title={`Best backtest win-rate ${Math.round((s.best_win_rate || 0) * 100)}% over ${s.best_total_trades} trades`}>Proven {Math.round((s.best_win_rate || 0) * 100)}%</span>
+                      )}
                       {/* STRAT-CARD-HONESTY-V1 + PE-HONESTY-V2: distinguish compiled vs truly-empty */}
                       {!(String(s.engine_version).toLowerCase() === 'v2' && s.v2_available) && (!s.rule_tree || Object.keys(s.rule_tree).length === 0) && (
                         <span className="badge badge-grey"

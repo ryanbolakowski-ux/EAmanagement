@@ -83,9 +83,51 @@ class StrategyResponse(BaseModel):
     rule_tree: dict = {}
     engine_version: str = "v1"
     v2_available: bool = False
+    # QUALITY-GATE-V1: best completed-backtest WR + a stability verdict so the
+    # UI can flag unproven/unstable strategies instead of showing them as proven.
+    best_win_rate: Optional[float] = None
+    best_total_trades: int = 0
+    quality_label: str = "none"   # proven | unstable | unproven | none
+    quality_reasons: list = []
 
     class Config:
         from_attributes = True
+
+
+_QUALITY_DEFAULT = {"best_win_rate": None, "best_total_trades": 0,
+                    "quality_label": "unproven", "quality_reasons": ["no completed backtest yet"]}
+
+
+async def _quality_map(db, uid: str) -> dict:
+    """QUALITY-GATE-V1: per-strategy best completed-backtest WR + stability label."""
+    try:
+        rows = (await db.execute(text("""
+            SELECT br.strategy_id::text AS sid, MAX(m.win_rate) AS best_wr,
+                   MAX(m.total_trades) AS best_trades,
+                   COALESCE(MAX(m.win_rate)-MIN(m.win_rate),0) AS spread, COUNT(*) AS n
+              FROM backtest_runs br JOIN backtest_metrics m ON m.backtest_run_id = br.id
+             WHERE br.user_id = CAST(:uid AS uuid) AND LOWER(br.status::text)='completed'
+             GROUP BY br.strategy_id
+        """), {"uid": uid})).fetchall()
+    except Exception:
+        return {}
+    out = {}
+    for q in rows:
+        best = float(q.best_wr or 0); tr = int(q.best_trades or 0)
+        sp = float(q.spread or 0); n = int(q.n or 0)
+        reasons = []
+        if best < 0.65: reasons.append(f"best win-rate {best*100:.0f}% is below 65%")
+        if tr < 30: reasons.append(f"only {tr} trades in the best run")
+        if n >= 2 and sp > 0.15: reasons.append(f"win-rate swings {sp*100:.0f}% across runs")
+        if not reasons:
+            label = "proven"
+        elif n >= 2 and sp > 0.15:
+            label = "unstable"
+        else:
+            label = "unproven"
+        out[q.sid] = {"best_win_rate": best, "best_total_trades": tr,
+                      "quality_label": label, "quality_reasons": reasons}
+    return out
 
 
 @router.get("/", response_model=list[StrategyResponse])
@@ -96,6 +138,7 @@ async def list_strategies(
     result = await db.execute(
         select(Strategy).where(Strategy.user_id == current_user.id)
     )
+    _qmap = await _quality_map(db, str(current_user.id))  # QUALITY-GATE-V1
     return [
         StrategyResponse(
             id=str(s.id), name=s.name, description=s.description,
@@ -106,6 +149,7 @@ async def list_strategies(
             session_filters=s.session_filters, starred=getattr(s, "starred", False),
             asset_class=classify_asset_class(s.instruments), **_engine_meta(s),
             created_at=s.created_at.isoformat(),
+            **_qmap.get(str(s.id), _QUALITY_DEFAULT),
         )
         for s in result.scalars().all()
     ]

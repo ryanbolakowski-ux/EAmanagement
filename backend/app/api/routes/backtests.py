@@ -161,6 +161,26 @@ async def run_backtest(
                 data.breakeven_mode if data.breakeven_mode is not None
                 else (getattr(strategy, "breakeven_mode", None) or "off")
             ),
+            # SNAPSHOT-V2: full, self-contained config so two runs can be diffed
+            # authoritatively (this is what makes 'nearly identical but not' explainable).
+            "rule_tree": (getattr(strategy, "rule_tree", None) or {}),
+            "engine_version": str((getattr(strategy, "rule_tree", None) or {}).get("engine_version", "v1") or "v1"),
+            "use_vwap_filter": bool((getattr(strategy, "rule_tree", None) or {}).get("use_vwap_filter", False)),
+            "take_profit_mode": (getattr(strategy, "rule_tree", None) or {}).get("take_profit_mode", "auto"),
+            "instruments": (getattr(strategy, "instruments", None) or []),
+            "higher_timeframes": (getattr(strategy, "higher_timeframes", None) or []),
+            "stop_loss_type": getattr(strategy, "stop_loss_type", None),
+            "fvg_max_size_ticks": getattr(strategy, "fvg_max_size_ticks", None),
+            "max_contracts": getattr(strategy, "max_contracts", None),
+            "max_daily_loss": getattr(strategy, "max_daily_loss", None),
+            "max_trades_per_day": getattr(strategy, "max_trades_per_day", None),
+            "initial_capital": data.initial_capital,
+            "commission_per_side": data.commission_per_side,
+            "slippage_ticks": data.slippage_ticks,
+            "risk_per_trade_pct": data.risk_per_trade_pct,
+            "trailing_drawdown": data.trailing_drawdown,
+            "daily_loss_limit": data.daily_loss_limit,
+            "engine_code_version": "2026-06-19-rangeTP+vwap+be",
         },
         status=BacktestStatus.QUEUED,
     )
@@ -346,6 +366,18 @@ async def _run_backtest_task(backtest_run_id: str):
                     run.status = BacktestStatus.FAILED
                     await db.commit()
                     return
+                # PROFILE-V1 + SNAPSHOT-V2: record actual data coverage + start engine timer.
+                import time as _tprof
+                logger.info(f"[PROFILE] run={run.id} data_loaded rows={len(df)} "
+                            f"range={df.index[0]}..{df.index[-1]}")
+                try:
+                    run.strategy_params_snapshot = {**(run.strategy_params_snapshot or {}),
+                        "data_rows": int(len(df)), "data_first_ts": str(df.index[0]),
+                        "data_last_ts": str(df.index[-1])}
+                    await db.commit()
+                except Exception:
+                    pass
+                _prof_engine0 = _tprof.perf_counter()
 
                 # Build strategy
                 config = StrategyConfig(
@@ -411,6 +443,8 @@ async def _run_backtest_task(backtest_run_id: str):
                     _r.set(f"backtest:{run.id}:progress", str(pct), ex=3600)
                 runner = BacktestRunner(strategy, data_handler, bt_config, progress_callback=_progress_cb)
                 metrics = await asyncio.to_thread(runner.run)
+                logger.info(f"[PROFILE] run={run.id} engine_run={_tprof.perf_counter()-_prof_engine0:.1f}s "
+                            f"trades={getattr(metrics,'total_trades',0)}")
 
                 run.progress = 80.0
                 await db.commit()
@@ -473,6 +507,83 @@ async def _run_backtest_task(backtest_run_id: str):
         import traceback
         traceback.print_exc()
 
+
+
+
+@router.get("/compare")
+async def compare_backtests(
+    ids: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """COMPARE-BACKTESTS-V1: side-by-side diagnostic for 2+ runs.
+
+    For each run: full config (snapshot incl. rule_tree/vwap/tp/engine + run-level
+    fees/capital), metrics, data coverage (rows + first/last candle), and trade
+    count by month. Plus `config_diff`: the exact keys that DIFFER across runs —
+    which is what makes 'adjacent ranges, wildly different results' explainable.
+    """
+    run_ids = [x.strip() for x in (ids or "").split(",") if x.strip()][:6]
+    if not run_ids:
+        raise HTTPException(status_code=400, detail="Pass ?ids=runId1,runId2")
+    import json as _json
+    out = []
+    for rid in run_ids:
+        try:
+            run = (await db.execute(select(BacktestRun).where(
+                BacktestRun.id == rid, BacktestRun.user_id == current_user.id))).scalar_one_or_none()
+        except Exception:
+            run = None
+        if not run:
+            out.append({"id": rid, "error": "not found"}); continue
+        m = (await db.execute(select(BacktestMetrics).where(
+            BacktestMetrics.backtest_run_id == run.id))).scalar_one_or_none()
+        snap = dict(run.strategy_params_snapshot or {})
+        # run-level columns belong in the comparable config too
+        snap.setdefault("initial_capital", run.initial_capital)
+        snap.setdefault("commission_per_side", run.commission_per_side)
+        snap.setdefault("slippage_ticks", run.slippage_ticks)
+        try:
+            rows = (await db.execute(text(
+                "SELECT to_char(date_trunc('month', entry_time),'YYYY-MM') AS m, COUNT(*) AS n "
+                "FROM backtest_trades WHERE backtest_run_id = :rid GROUP BY 1 ORDER BY 1"
+            ), {"rid": str(run.id)})).fetchall()
+            by_month = [{"month": r.m, "trades": int(r.n)} for r in rows]
+        except Exception:
+            by_month = []
+        out.append({
+            "id": str(run.id), "instrument": run.instrument,
+            "start_date": run.start_date.isoformat(), "end_date": run.end_date.isoformat(),
+            "timeframe": run.timeframe,
+            "status": run.status.value if hasattr(run.status, "value") else str(run.status),
+            "created_at": run.created_at.isoformat(),
+            "config": snap,
+            "data_coverage": {"rows": snap.get("data_rows"),
+                              "first_ts": snap.get("data_first_ts"),
+                              "last_ts": snap.get("data_last_ts")},
+            "metrics": ({
+                "total_trades": m.total_trades, "win_rate": m.win_rate,
+                "profit_factor": m.profit_factor, "net_profit": m.net_profit,
+                "max_drawdown_pct": m.max_drawdown_pct, "avg_rr": m.avg_rr,
+                "sharpe_ratio": m.sharpe_ratio,
+                "effective_win_rate": getattr(m, "effective_win_rate", None),
+            } if m else None),
+            "trade_count_by_month": by_month,
+        })
+    valid = [o for o in out if "config" in o]
+    config_diff = []
+    if len(valid) >= 2:
+        allkeys = set()
+        for o in valid:
+            allkeys |= set((o["config"] or {}).keys())
+        for k in sorted(allkeys):
+            sig = [_json.dumps((o["config"] or {}).get(k), sort_keys=True, default=str) for o in valid]
+            if len(set(sig)) > 1:
+                config_diff.append({"key": k,
+                                    "values": {o["id"]: (o["config"] or {}).get(k) for o in valid}})
+    return {"runs": out, "config_diff": config_diff,
+            "summary": (f"{len(config_diff)} config field(s) differ across the selected runs."
+                        if config_diff else "Configs are identical across the selected runs.")}
 
 
 @router.get("/{backtest_id}/progress")

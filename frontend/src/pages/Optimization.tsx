@@ -112,10 +112,10 @@ export default function Optimization() {
           <h2 className="text-base font-bold text-slate-900 mb-3 dark:text-slate-100">Optimization Runs</h2>
           <div className="space-y-2">
             {runs.map((r: any) => (
-              <div key={r.id} onClick={() => { setRunId(r.id); if (r.status === 'running' || r.status === 'queued') setPolling(true); else setPolling(false); }}
+              <div key={r.id} onClick={() => { setRunId(r.id); if (['running','queued','recovering','resumed'].includes(r.status)) setPolling(true); else setPolling(false); /* OPT-VISIBILITY-V1 */ }}
                 className={`flex items-center justify-between p-4 rounded-xl border cursor-pointer transition-all ${ runId === r.id ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-slate-50 hover:border-slate-300' } dark:bg-slate-900`}>
                 <div className="flex items-center gap-3">
-                  <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${ r.status === 'completed' ? 'bg-green-500' : r.status === 'running' ? 'bg-amber-500 animate-pulse' : r.status === 'failed' ? 'bg-red-500' : 'bg-slate-300' }`}/>
+                  <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${ r.status === 'completed' ? 'bg-green-500' : (r.status === 'running' || r.status === 'recovering' || r.status === 'resumed') ? 'bg-amber-500 animate-pulse' : r.status === 'failed' ? 'bg-red-500' : 'bg-slate-300' }`}/>
                   <div className="min-w-0">
                     <div className="text-sm font-semibold text-slate-900 truncate dark:text-slate-100">{r.strategy_name || 'Strategy'}</div>
                     <div className="text-[11px] text-slate-500 mt-0.5 dark:text-slate-400">{r.instrument} · {r.total_combinations} combos</div>
@@ -165,10 +165,18 @@ export default function Optimization() {
             className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-sm font-semibold">
             {retryMutation.isPending ? 'Retrying…' : 'Retry run'}</button>
         </div>
-      ) : selectedRun && (selectedRun.status === 'running' || selectedRun.status === 'queued') ? (
+      ) : selectedRun && ['running','queued','recovering','resumed'].includes(selectedRun.status) ? (
         <div className="bg-amber-50 dark:bg-amber-900/20 rounded-2xl border border-amber-200 dark:border-amber-800 p-8 text-center">
-          <p className="font-semibold text-amber-700 dark:text-amber-300 mb-1">Optimization {selectedRun.status}…</p>
-          <p className="text-sm text-amber-600 dark:text-amber-400">{selectedRun.completed_combinations}/{selectedRun.total_combinations} combinations · {Math.round(selectedRun.progress || 0)}%</p>
+          {/* OPT-VISIBILITY-V1: don't show a bare 0% — each combo is a full backtest, so the
+              first result lands after combo 1. Show a warming-up state + elapsed/ETA. */}
+          <p className="font-semibold text-amber-700 dark:text-amber-300 mb-1">
+            {selectedRun.status === 'recovering' ? 'Resuming after restart…' : `Optimization ${selectedRun.status}…`}</p>
+          {(selectedRun.completed_combinations || 0) === 0 ? (
+            <p className="text-sm text-amber-600 dark:text-amber-400">Warming up — loading market data &amp; preparing combos. The first result appears after combo 1 completes (each combo is a full backtest).</p>
+          ) : (
+            <p className="text-sm text-amber-600 dark:text-amber-400">{selectedRun.completed_combinations}/{selectedRun.total_combinations} combinations · {Math.round(selectedRun.progress || 0)}%{selectedRun.eta_seconds ? ` · ~${Math.ceil(selectedRun.eta_seconds/60)} min left` : ''}</p>
+          )}
+          {selectedRun.error_message && <p className="text-xs text-amber-500 mt-2">{selectedRun.error_message}</p>}
         </div>
       ) : results.length > 0 ? (
         <div>

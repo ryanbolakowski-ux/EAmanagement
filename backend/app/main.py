@@ -133,7 +133,8 @@ async def lifespan(app: FastAPI):
             r2 = await _db_z.execute(_t_z(
                 "UPDATE optimization_runs SET status='RECOVERING', "
                 "error_message='Worker died during backend restart \u2014 auto-resuming from checkpoint' "
-                "WHERE status IN ('RUNNING','RESUMED','RECOVERING','PENDING') RETURNING id"
+                "WHERE status IN ('RUNNING','RESUMED','RECOVERING','PENDING') "
+                "AND (last_heartbeat_at IS NULL OR last_heartbeat_at < NOW() - INTERVAL '90 seconds') RETURNING id"
             ))
             _opt_ids = [str(row[0]) for row in r2.fetchall()]
             await _db_z.commit()
