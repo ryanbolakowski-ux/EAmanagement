@@ -69,7 +69,12 @@ def broker_status(account_count: int, market_open: bool,
                   last_sync: Optional[datetime], now: datetime, window_sec: int = 3600) -> str:
     """Broker balance sync. No accounts OR market closed -> green (balances
     don't move). Green within `window_sec` of the last sync; yellow only if the
-    refresh genuinely stalls during market hours."""
+    refresh genuinely stalls during market hours.
+
+    NOTE (V3.1): currently UNUSED by the live systems-check — broker balances
+    refresh on-demand (no background loop), so freshness isn't a health signal
+    and broker_sync is reported as a connectivity check instead. Retained for
+    when a periodic broker-sync loop is added; tests still cover the logic."""
     if int(account_count or 0) <= 0 or not market_open:
         return "green"
     if last_sync is not None:

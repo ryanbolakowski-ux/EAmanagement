@@ -799,27 +799,27 @@ async def systems_check(
         "ORDER BY picked_at DESC LIMIT 1"
     )
 
-    # A no-pick day is a VALID outcome, not a failure. GREEN if a pick fired, or
-    # the scanner cleanly stood down (Redis no-pick sentinel), or it is simply
-    # not done running yet (pre-9:25 ET / weekend). YELLOW only if the window has
-    # passed with no pick AND no clean stand-down record. NEVER falsely RED for
-    # "no setup today" — a real scanner crash surfaces in recent_errors instead.
-    _theta_pre_window = (et_now.weekday() >= 5) or (et_now.hour < 9) or (et_now.hour == 9 and et_now.minute < 25)
-    _theta_status = "green" if (theta_today or _theta_pre_window) else "yellow"  # no-pick after window = yellow (not red)
+    # A no-pick / no-signal day is a VALID, frequent outcome of the scan, NOT a
+    # failure (the scanner stands down whenever nothing clears the quality bar; a
+    # no-pick day is normal on weekdays too). So "no output today" is GREEN, not
+    # degraded — the admin gets the actual state from the data fields below
+    # (today_pick / count / last_run_at). A genuine scanner CRASH surfaces in the
+    # Recent errors card. (SYSTEMS-CHECK-V3.1 — per Ryan: a no-pick day must never
+    # make the dashboard yellow, on weekends OR weekdays.)
     scanners = {
         "theta_scanner": {
-            "status": _theta_status,
+            "status": "green",
             "last_run_at": theta_today.picked_at.isoformat() if theta_today else None,
             "today_pick": theta_today.ticker if theta_today else None,
             "next_run_at": None,  # premarket scheduler-driven, not cron
         },
         "futures_scanner": {
-            "status": "green" if futures_count > 0 else "yellow",
+            "status": "green",
             "last_run_at": futures_last.at.isoformat() if futures_last and futures_last.at else None,
             "today_signal_count": int(futures_count),
         },
         "options_scanner": {
-            "status": "green" if options_today else "yellow",
+            "status": "green",
             "last_run_at": options_today.picked_at.isoformat() if options_today else None,
             "today_pick": options_today.ticker if options_today else None,
         },
@@ -866,9 +866,11 @@ async def systems_check(
         } if last_failure else None),
         "sent_today": int(sent_today_count),
         "suppressed_today": int(suppressed_today),
-        "trade_alert_status": "green" if sent_today_count > 0 else "yellow",
-        "futures_email_status": "green" if futures_count > 0 else "yellow",
-        "options_swing_status": "green" if options_today else "yellow",
+        # Activity-driven and a no-send day is normal (no signal => no email), so
+        # these are informational GREEN, never a degraded alarm. (SYSTEMS-CHECK-V3.1)
+        "trade_alert_status": "green",
+        "futures_email_status": "green",
+        "options_swing_status": "green",
         "heartbeat_status": "green",  # heartbeat is single-recipient, always armed
     }
 
@@ -893,11 +895,14 @@ async def systems_check(
 
     trading = {
         "live_trading": {
-            "status": "green" if live_active > 0 else "yellow",
+            # The live-trading monitor is always armed; zero active sessions is a
+            # normal IDLE state (e.g. overnight / nobody trading), not degraded.
+            # Count is informational. (SYSTEMS-CHECK-V3)
+            "status": "green",
             "active_sessions": int(live_active),
         },
         "paper_trading": {
-            "status": "green" if paper_active > 0 else "yellow",
+            "status": "green",  # idle (0 sessions) is normal, not degraded
             "active_sessions": int(paper_active),
         },
         "open_position_monitor": {
@@ -968,11 +973,15 @@ async def systems_check(
             "today_count": int(kyc_today),
         },
         "broker_sync": {
-            # broker balance freshness (SC-V2): caches refresh on a ~15-min
-            # schedule and balances do not move second-by-second. Green within
-            # 60 min, or when the market is closed; yellow only if the refresh
-            # job genuinely stalls >60 min during market hours.
-            "status": _sc.broker_status(broker_n, _mkt_open, broker_last, now_utc),
+            # Connectivity/config check (SYSTEMS-CHECK-V3.1). Broker balances are
+            # refreshed ON-DEMAND only — GET /accounts/{id}/balance, the scanner
+            # view, or the resync_broker Fix. There is NO background sync loop, so
+            # a cache being "old" just means nobody has viewed balances recently
+            # (e.g. over a weekend), NOT a stall — flagging that yellow every
+            # market morning is a false alarm. Green when an account is connected;
+            # last_sync_at is informational; broken creds on a live-money session
+            # surface via tradier_api, and fetch failures via Recent errors.
+            "status": "green",
             "last_sync_at": broker_last.isoformat() if broker_last else None,
             "accounts": broker_n,
         },
@@ -1111,13 +1120,19 @@ async def systems_check(
                        "TRADIER_API_KEY env var is NOT used — credentials are per-account.)",
         "kyc_webhooks": "STRIPE_IDENTITY_WEBHOOK_SECRET is not set — add it so Stripe Identity (KYC) "
                         "webhooks verify. Note: KYC events are rare, so 'no recent events' alone is normal.",
+        "futures_scanner": "Futures signals are event-driven during market hours; zero by the 4:00 PM ET "
+                           "close means no qualifying setup occurred today (valid). If you expected signals, "
+                           "check the futures scanner/runner in Recent errors and the Scheduler card.",
     }
     _fixable = {
-        "theta_scanner": "rerun_scanner_check", "open_position_monitor": "resync_positions",
+        "theta_scanner": "rerun_scanner_check", "options_scanner": "rerun_scanner_check",
+        "open_position_monitor": "resync_positions",
         "broker_sync": "resync_broker", "email_provider": "refresh_email_health",
         "queue": "clear_stale_jobs", "redis": "refresh_health", "database": "refresh_health",
         # market_data intentionally NOT auto-fixable: its only failure mode is a
         # missing POLYGON_API_KEY, which a re-check cannot set -> show instructions.
+        # futures_scanner intentionally NOT auto-fixable: futures signals are
+        # event-driven during RTH, so there's nothing to "re-run" -> show guidance.
     }
     errors = []
     for _sname, _sect in (("scanners", scanners), ("trading", trading),
@@ -1139,6 +1154,9 @@ async def systems_check(
                 elif _k == "open_position_monitor":
                     _affected = f"{open_positions} open position(s)"
                 _sc_msgs = {
+                    "theta_scanner": "No qualifying Theta (stock) pick today after the 9:25 ET premarket window. A no-pick day is valid — click Fix to re-run the scan now.",
+                    "futures_scanner": "No futures signals fired today after the 4:00 PM ET cash close. A quiet day is valid — if you expected signals, check Recent errors / the futures runner.",
+                    "options_scanner": "No qualifying options-swing pick today after the 9:25 ET premarket window. A no-pick day is valid — click Fix to re-run the scan now.",
                     "open_position_monitor": "Open positions haven't been re-priced recently (market is open) — click Fix to re-price now.",
                     "queue": (f"{int(queue_depth)} trade(s) awaiting confirmation"
                               + (f"; {int(_queue_abandoned)} abandoned (Fix retires those — a live backlog needs review)." if _queue_abandoned else ".")),
