@@ -71,10 +71,9 @@ def broker_status(account_count: int, market_open: bool,
     don't move). Green within `window_sec` of the last sync; yellow only if the
     refresh genuinely stalls during market hours.
 
-    NOTE (V3.1): currently UNUSED by the live systems-check — broker balances
-    refresh on-demand (no background loop), so freshness isn't a health signal
-    and broker_sync is reported as a connectivity check instead. Retained for
-    when a periodic broker-sync loop is added; tests still cover the logic."""
+    Freshness is meaningful because a background loop
+    (engines/live_trading/balance_sync.py) refreshes balances every ~15 min
+    during market hours (V3.2)."""
     if int(account_count or 0) <= 0 or not market_open:
         return "green"
     if last_sync is not None:

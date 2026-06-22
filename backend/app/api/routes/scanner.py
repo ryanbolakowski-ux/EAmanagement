@@ -59,6 +59,7 @@ async def _refresh_broker_balance(db, user_id):
     from sqlalchemy import select, text as _t
     from app.models.user import BrokerAccount
     from app.engines.live_trading.broker_factory import build_broker_from_account
+    broker = None
     try:
         acct = (await db.execute(select(BrokerAccount).where(BrokerAccount.user_id == user_id))).scalar_one_or_none()
         if not acct: return None, None, None
@@ -72,6 +73,15 @@ async def _refresh_broker_balance(db, user_id):
         return bal.get("equity"), bal.get("buying_power"), (bal.get("raw") or {}).get("open_pl")
     except Exception as e:
         return None, None, None
+    finally:
+        # Always release the broker's aiohttp session — without this every call
+        # (on-demand views, the admin Fix, and the ~15-min balance-sync loop)
+        # leaks a ClientSession ("Unclosed client session").
+        if broker is not None:
+            try:
+                await broker.disconnect()
+            except Exception:
+                pass
 
 
 

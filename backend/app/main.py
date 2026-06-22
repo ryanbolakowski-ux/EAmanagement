@@ -239,6 +239,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to start intraday data refresher: {e}")
 
+    # Broker-balance sync — keeps broker_accounts.cached_* fresh every ~15 min
+    # during market hours so the admin Systems Check broker_sync freshness check
+    # is meaningful (before this, balances refreshed only on-demand).
+    broker_balance_task = None
+    try:
+        from app.engines.live_trading.balance_sync import run_broker_balance_sync_loop
+        broker_balance_task = asyncio.create_task(run_broker_balance_sync_loop())
+    except Exception as e:
+        logger.warning(f"Failed to start broker balance sync loop: {e}")
+
     # ── KYC startup auto-sync (Stripe Identity webhook-loss safety net) ──
     # On every backend startup, pull the authoritative status from Stripe for
     # every user currently sitting at 'pending' with a Stripe session id.
@@ -264,6 +274,8 @@ async def lifespan(app: FastAPI):
             health_monitor_task.cancel()
         if intraday_refresh_task:
             intraday_refresh_task.cancel()
+        if broker_balance_task:
+            broker_balance_task.cancel()
         logger.info("Shutting down Theta Algos API...")
 
 

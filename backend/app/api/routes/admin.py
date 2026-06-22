@@ -973,15 +973,13 @@ async def systems_check(
             "today_count": int(kyc_today),
         },
         "broker_sync": {
-            # Connectivity/config check (SYSTEMS-CHECK-V3.1). Broker balances are
-            # refreshed ON-DEMAND only — GET /accounts/{id}/balance, the scanner
-            # view, or the resync_broker Fix. There is NO background sync loop, so
-            # a cache being "old" just means nobody has viewed balances recently
-            # (e.g. over a weekend), NOT a stall — flagging that yellow every
-            # market morning is a false alarm. Green when an account is connected;
-            # last_sync_at is informational; broken creds on a live-money session
-            # surface via tradier_api, and fetch failures via Recent errors.
-            "status": "green",
+            # SYSTEMS-CHECK-V3.2: a background loop (engines/live_trading/
+            # balance_sync.py) now refreshes balances every ~15 min during market
+            # hours, so freshness is a meaningful signal again. Green within 60 min
+            # of the last sync, or when the market is closed / no accounts; yellow
+            # only if the sync loop genuinely stalls >60 min during market hours
+            # (broken creds / broker outage also surface via tradier_api + errors).
+            "status": _sc.broker_status(broker_n, _mkt_open, broker_last, now_utc),
             "last_sync_at": broker_last.isoformat() if broker_last else None,
             "accounts": broker_n,
         },
