@@ -89,6 +89,7 @@ class BacktestRunResponse(BaseModel):
     created_at: str
     completed_at: Optional[str] = None
     progress: float = 0.0
+    error_message: Optional[str] = None
 
 
 class MetricsResponse(BaseModel):
@@ -201,6 +202,7 @@ async def run_backtest(
         status=run.status.value,
         created_at=run.created_at.isoformat(),
         progress=0.0,
+        error_message=run.error_message,
     )
 
 
@@ -231,6 +233,7 @@ async def list_backtests(
             status=r.status.value, created_at=r.created_at.isoformat(),
             completed_at=r.completed_at.isoformat() if r.completed_at else None,
             progress=progress,
+            error_message=r.error_message,
         ))
     return responses
 
