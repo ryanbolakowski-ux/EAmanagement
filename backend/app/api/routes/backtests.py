@@ -7,6 +7,7 @@ from datetime import datetime
 import asyncio
 from typing import Optional
 import math
+from loguru import logger
 
 from app.database import get_db
 from app.models.user import User
@@ -295,6 +296,23 @@ async def delete_backtest(
     await db.commit()
 
 
+async def _record_backtest_failure(run_id: str, msg: str):
+    """Persist a real failure reason on a FRESH session, so a poisoned
+    transaction on the main session can never swallow the error. Idempotent;
+    never overwrites a COMPLETED run."""
+    from app.database import async_session_factory
+    try:
+        async with async_session_factory() as _db:
+            r = (await _db.execute(select(BacktestRun).where(BacktestRun.id == run_id))).scalar_one_or_none()
+            if r is not None and r.status != BacktestStatus.COMPLETED:
+                r.status = BacktestStatus.FAILED
+                r.error_message = (msg or "Backtest failed (no detail captured)")[:1000]
+                r.completed_at = datetime.utcnow()
+                await _db.commit()
+    except Exception:
+        logger.error(f"[backtest] could not record failure for run={run_id}")
+
+
 async def _run_backtest_task(backtest_run_id: str):
     """
     Runs the backtest inline (background task).
@@ -318,8 +336,11 @@ async def _run_backtest_task(backtest_run_id: str):
 
             # Mark as running
             run.status = BacktestStatus.RUNNING
+            run.started_at = datetime.utcnow()
             run.progress = 5.0
             await db.commit()
+            logger.info(f"[backtest] run={run.id} START strategy={run.strategy_id} "
+                        f"instrument={run.instrument} tf={run.timeframe}")
 
             # Check if user is on a paid tier for Polygon data
             user_result = await db.execute(
@@ -335,6 +356,8 @@ async def _run_backtest_task(backtest_run_id: str):
             strategy_model = strat_result.scalar_one_or_none()
             if not strategy_model:
                 run.status = BacktestStatus.FAILED
+                run.error_message = "Strategy not found (deleted, archived, or wrong id)"
+                run.completed_at = datetime.utcnow()
                 await db.commit()
                 return
 
@@ -343,28 +366,50 @@ async def _run_backtest_task(backtest_run_id: str):
             if getattr(strategy_model, "options_mode", None):
                 try:
                     await _run_options_backtest(run, strategy_model, db)
-                except Exception:
+                except Exception as e:
                     import traceback; traceback.print_exc()
+                    logger.error(f"[backtest] run={run.id} options path failed: {type(e).__name__}: {e}")
                     run.status = BacktestStatus.FAILED
+                    run.error_message = f"Options backtest error: {type(e).__name__}: {e}"[:1000]
+                    run.completed_at = datetime.utcnow()
                     await db.commit()
                 return
 
             try:
-                # Fetch real market data
-                df = await fetch_futures_data(
-                    instrument=run.instrument,
-                    start_date=run.start_date,
-                    end_date=run.end_date,
-                    interval=strategy_model.execution_timeframe or "1m",
-                    use_polygon=use_polygon,
-                )
+                # Fetch real market data (safe retry: data fetch is the one
+                # genuinely transient step — network / provider hiccup).
+                df = None
+                _fetch_err = None
+                for _attempt in range(2):
+                    try:
+                        df = await fetch_futures_data(
+                            instrument=run.instrument,
+                            start_date=run.start_date,
+                            end_date=run.end_date,
+                            interval=strategy_model.execution_timeframe or "1m",
+                            use_polygon=use_polygon,
+                        )
+                        if df is not None and not df.empty:
+                            break
+                    except Exception as _fe:
+                        _fetch_err = _fe
+                        logger.warning(f"[backtest] run={run.id} data-fetch attempt {_attempt+1} failed: {_fe}")
+                    if _attempt == 0:
+                        await asyncio.sleep(2)
 
                 run.progress = 20.0
                 await db.commit()
 
                 if df is None or df.empty:
+                    _ex = strategy_model.execution_timeframe or "1m"
+                    _why = (f": {type(_fetch_err).__name__}: {_fetch_err}" if _fetch_err else "")
                     run.status = BacktestStatus.FAILED
+                    run.error_message = (f"No market data for {run.instrument} "
+                                         f"{run.start_date:%Y-%m-%d}..{run.end_date:%Y-%m-%d} "
+                                         f"(tf={_ex}){_why}")[:1000]
+                    run.completed_at = datetime.utcnow()
                     await db.commit()
+                    logger.warning(f"[backtest] run={run.id} NO DATA -> {run.error_message}")
                     return
                 # PROFILE-V1 + SNAPSHOT-V2: record actual data coverage + start engine timer.
                 import time as _tprof
@@ -496,16 +541,24 @@ async def _run_backtest_task(backtest_run_id: str):
                 run.progress = 100.0
                 run.completed_at = datetime.utcnow()
                 await db.commit()
+                logger.info(f"[backtest] run={run.id} COMPLETED")
 
             except Exception as e:
                 import traceback
-                traceback.print_exc()
-                run.status = BacktestStatus.FAILED
-                await db.commit()
+                _tb = traceback.format_exc()
+                logger.error(f"[backtest] run={backtest_run_id} FAILED in engine/sim/metrics: "
+                             f"{type(e).__name__}: {e}\n{_tb}")
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                await _record_backtest_failure(backtest_run_id, f"{type(e).__name__}: {e}")
 
     except Exception as e:
         import traceback
-        traceback.print_exc()
+        logger.error(f"[backtest] run={backtest_run_id} task crashed (outer): "
+                     f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        await _record_backtest_failure(backtest_run_id, f"{type(e).__name__}: {e}")
 
 
 
