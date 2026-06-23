@@ -306,14 +306,44 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
     best.setdefault("watch_only", False)
     best.setdefault("quality_reasons", [])
     best["entry"] = best["price"]
-    # Stop is now computed at order-placement time from the ICT Oracle 5-min
-    # opening candle (or pre-market session low for pre-mkt confirmed entries).
-    # The blanket -3% stop was triggering 7%+ losses on micro-caps. Leave a
-    # placeholder so email + email_signals_history can still render something.
-    best["stop"] = round(best["price"] * 0.97, 2)  # placeholder; runner overrides
-    best["stop_is_placeholder"] = True
-    best["target"] = round(best["price"] * 1.10, 2)
-    best["projected_move_pct"] = 10.0
+    # SCANNER-LEVELS-V1: structure-based stop/target replaces the old -3%/+10%
+    # placeholder (whose fixed geometry produced an artificial win rate). Levels
+    # come from real session/swing structure + a measured-move target; ATR is the
+    # fallback only when no clean structure sits in range. A sub-minimum-R:R
+    # result downgrades the pick to watch-only instead of forcing a bad level.
+    try:
+        from app.engines.options.premarket_scheduler import _polygon_1min_bars, _today_et_date_str
+        from app.engines.scanner.levels import compute_levels
+        _bars = await _polygon_1min_bars(best["ticker"], _today_et_date_str())
+        _lv = compute_levels("long", float(best["price"]), _bars, rr=2.5)
+        best["stop"] = _lv.stop
+        best["target"] = _lv.target
+        best["projected_move_pct"] = _lv.projected_move_pct
+        best["stop_reason"] = _lv.stop_reason
+        best["target_reason"] = _lv.target_reason
+        best["rr"] = _lv.rr
+        best["levels_basis"] = _lv.basis
+        best["stop_is_placeholder"] = (_lv.basis == "atr_fallback")
+        if not _lv.ok and not best.get("watch_only"):
+            best["watch_only"] = True
+            best.setdefault("quality_reasons", []).append(
+                f"R:R {_lv.rr:.1f} below minimum on available structure \u2014 watch-only")
+        logger.info(
+            f"[stock-scanner] levels {best['ticker']} stop={_lv.stop} ({_lv.stop_reason}) "
+            f"target={_lv.target} ({_lv.target_reason}) rr={_lv.rr} "
+            f"stop%={_lv.detail.get('stop_pct')} basis={_lv.basis} ok={_lv.ok}")
+    except Exception as _le:
+        logger.warning(f"[ThetaScanner] structure levels failed for {best.get('ticker')}: {_le}")
+        from app.engines.scanner.levels import compute_levels as _cl
+        _lv = _cl("long", float(best["price"]), None, rr=2.5)
+        best["stop"] = _lv.stop
+        best["target"] = _lv.target
+        best["projected_move_pct"] = _lv.projected_move_pct
+        best["stop_reason"] = _lv.stop_reason
+        best["target_reason"] = _lv.target_reason
+        best["rr"] = _lv.rr
+        best["levels_basis"] = "atr_fallback"
+        best["stop_is_placeholder"] = True
     best["alternatives"] = [{"ticker": c["ticker"], "score": c["score"],
                               "gap_pct": round(c["gap_pct"], 1)} for c in candidates[1:6]]
     logger.info(f"[ThetaScanner] PICK: {best['ticker']} @ ${best['price']:.2f} score={best['score']} gap={best['gap_pct']:.1f}% vol={best['today_vol']:,} catalyst={best['catalyst_reason']}")
@@ -359,8 +389,8 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     # Signals history. Even a watch_only pick gets a chart (informative); the
     # banner already says WATCH ONLY. Any failure -> no-chart email.
     # Level reasons shown next to the stop/target price (never blank).
-    stop_reason = "strategy stop"
-    target_reason = "strategy target"
+    stop_reason = pick.get("stop_reason") or "strategy stop"
+    target_reason = pick.get("target_reason") or "strategy target"
     _chart_png = None
     _chart_b64 = None
     _chart_img_html = ""
@@ -386,8 +416,8 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 stop=float(pick["stop"]), target=float(pick["target"]),
                 bars_df=_bars_df, instrument=pick["ticker"],
             )
-            stop_reason = _reasons.get("stop_reason") or stop_reason
-            target_reason = _reasons.get("target_reason") or target_reason
+            stop_reason = pick.get("stop_reason") or _reasons.get("stop_reason") or stop_reason
+            target_reason = pick.get("target_reason") or _reasons.get("target_reason") or target_reason
         except Exception as _lr_e:
             logger.warning(f"[ThetaScanner] reason inference errored {pick.get('ticker')}: {type(_lr_e).__name__}: {_lr_e}")
         _chart_png = generate_trade_chart(
@@ -416,8 +446,8 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <tr><td style="padding:8px;color:#475569;">Ticker</td><td style="text-align:right;font-weight:700;font-size:18px;">{pick['ticker']}</td></tr>
         <tr><td style="padding:8px;color:#475569;">Entry</td><td style="text-align:right;font-weight:700;">${pick['entry']:.2f}</td></tr>
-        <tr><td style="padding:8px;color:#475569;">Stop (-3%)</td><td style="text-align:right;font-weight:700;color:#dc2626;">${pick['stop']:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({stop_reason})</span></td></tr>
-        <tr><td style="padding:8px;color:#475569;">Target (+10%)</td><td style="text-align:right;font-weight:700;color:#16a34a;">${pick['target']:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({target_reason})</span></td></tr>
+        <tr><td style="padding:8px;color:#475569;">Stop ({(pick['stop']/pick['entry']-1)*100:+.1f}%)</td><td style="text-align:right;font-weight:700;color:#dc2626;">${pick['stop']:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({stop_reason})</span></td></tr>
+        <tr><td style="padding:8px;color:#475569;">Target ({(pick['target']/pick['entry']-1)*100:+.1f}%)</td><td style="text-align:right;font-weight:700;color:#16a34a;">${pick['target']:.2f} <span style="color:#94a3b8;font-weight:600;font-size:12px;">({target_reason})</span></td></tr>
         <tr><td style="padding:8px;color:#475569;">Gap</td><td style="text-align:right;">+{pick['gap_pct']:.1f}%</td></tr>
         <tr><td style="padding:8px;color:#475569;">Volume vs prior</td><td style="text-align:right;">{pick['rel_vol']}×</td></tr>
         <tr><td style="padding:8px;color:#475569;">Catalyst</td><td style="text-align:right;">{pick['catalyst_reason']}</td></tr>
