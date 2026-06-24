@@ -603,7 +603,7 @@ async def _resolve_user_broker(user_id: str) -> tuple[Optional[str], str]:
         r = (await db.execute(text("""
             SELECT id FROM broker_accounts
              WHERE user_id = :uid
-               AND lower(broker) = 'tradier'
+               AND lower(broker) IN ('tradier', 'alpaca')
                AND is_active = true
                AND trading_enabled = true
                AND COALESCE(is_demo, false) = false

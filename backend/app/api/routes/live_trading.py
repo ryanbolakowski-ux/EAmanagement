@@ -198,6 +198,10 @@ async def test_broker_connection(
         from app.engines.live_trading.tradier import TradierBroker
         broker = TradierBroker(data.credentials, is_demo=data.is_demo)
         reject_hint = "Double-check your Access Token (and Account Number if you provided one)."
+    elif broker_name == "alpaca":
+        from app.engines.live_trading.alpaca import AlpacaBroker
+        broker = AlpacaBroker(data.credentials, is_demo=data.is_demo)
+        reject_hint = "Double-check your Alpaca API Key + Secret (alpaca.markets \u2192 Generate API Keys)."
     else:
         raise HTTPException(status_code=400, detail=f"Broker `{broker_name}` is not supported yet.")
 
