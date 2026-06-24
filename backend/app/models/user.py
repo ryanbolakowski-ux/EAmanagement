@@ -93,6 +93,7 @@ class BrokerAccount(Base):
     # Last-fetched broker balance (refreshed when user opens sizing modal).
     cached_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
     cached_buying_power: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cached_cash: Mapped[float | None] = mapped_column(Float, nullable=True)  # raw col, now ORM-mapped
     cached_balance_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

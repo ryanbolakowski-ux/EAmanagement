@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { X, Wallet, TrendingUp, AlertCircle, RefreshCw, Lock, Unlock, Calculator } from 'lucide-react'
-import { liveTradingApi } from '../api/endpoints'
+import { X, Wallet, TrendingUp, AlertCircle, RefreshCw, Lock, Unlock, Calculator, ShieldAlert } from 'lucide-react'
+import { liveTradingApi, legalApi } from '../api/endpoints'
+import CodeVerifyModal from './CodeVerifyModal'
 
 interface Props {
   account: any   // BrokerAccount row
@@ -18,6 +19,8 @@ export default function SizingModal({ account, onClose }: Props) {
   const [riskPct, setRiskPct] = useState<string>('1.0')
   const [maxPos, setMaxPos] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
+  const [ackPending, setAckPending] = useState(false)
+  const [codePending, setCodePending] = useState(false)
 
   // Load saved sizing settings
   const { data: sizing } = useQuery({
@@ -58,7 +61,26 @@ export default function SizingModal({ account, onClose }: Props) {
       qc.invalidateQueries({ queryKey: ['sizing', account.id] })
       onClose()
     },
-    onError: (e: any) => setError(e?.response?.data?.detail || 'Could not save.'),
+    onError: (e: any) => {
+      const detail = e?.response?.data?.detail
+      // Raising a risk limit is gated server-side: first "I agree", then an
+      // emailed code. Walk the user through each step, then retry the save.
+      if (typeof detail === 'string' && detail.startsWith('acknowledgment_required')) {
+        setError(null); setAckPending(true); return
+      }
+      if (typeof detail === 'string' && detail.startsWith('verification_required')) {
+        setError(null); setCodePending(true); return
+      }
+      setError(typeof detail === 'string' ? detail : 'Could not save.')
+    },
+  })
+
+  // "I agree to these changes" → record the risk_change acknowledgment, then
+  // re-attempt the save (which then asks for the emailed code if still needed).
+  const ackMutation = useMutation({
+    mutationFn: () => legalApi.acknowledge('risk_change', 'Raised account risk/allocation settings'),
+    onSuccess: () => { setAckPending(false); saveMutation.mutate() },
+    onError: (e: any) => { setAckPending(false); setError(e?.response?.data?.detail || 'Could not record agreement.') },
   })
 
   const equity = balanceQ.data?.equity ?? sizing?.cached_equity ?? 0
@@ -73,6 +95,7 @@ export default function SizingModal({ account, onClose }: Props) {
   const previewMaxPos = maxPos ? parseFloat(maxPos) : null
 
   return (
+    <>
     <div className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4">
       <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
         <div className="sticky top-0 bg-white dark:bg-slate-900 px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
@@ -297,5 +320,35 @@ export default function SizingModal({ account, onClose }: Props) {
         </div>
       </div>
     </div>
+
+    {ackPending && (
+      <div className="fixed inset-0 z-[110] bg-black/70 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl p-6">
+          <div className="flex items-center gap-2 mb-3">
+            <ShieldAlert size={18} className="text-amber-600"/>
+            <h3 className="text-base font-extrabold text-slate-900 dark:text-slate-100">Confirm risk change</h3>
+          </div>
+          <p className="text-sm text-slate-600 dark:text-slate-300 mb-4">
+            You’re raising a risk limit on this account — this lets the bot deploy more capital or risk more per trade.
+            By continuing you agree to these changes. We’ll then email a 6-digit code to confirm it’s you, and this change is logged.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => setAckPending(false)} className="px-4 py-2 rounded-lg text-sm font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800">Cancel</button>
+            <button onClick={() => ackMutation.mutate()} disabled={ackMutation.isPending}
+              className="flex-1 px-4 py-2 rounded-lg text-sm font-bold bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white">
+              {ackMutation.isPending ? 'Working…' : 'I agree to these changes'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {codePending && (
+      <CodeVerifyModal purpose="risk_change" title="Verify to change risk settings"
+        subtitle="Enter the 6-digit code we emailed to authorize this risk change."
+        onVerified={() => { setCodePending(false); saveMutation.mutate() }}
+        onCancel={() => setCodePending(false)} />
+    )}
+    </>
   )
 }

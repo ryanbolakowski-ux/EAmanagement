@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Edit2, Check, X as XIcon, ShieldAlert } from 'lucide-react'
 import { liveTradingApi } from '../api/endpoints'
+import SizingModal from '../components/SizingModal'
 import { MetricsGrid, EquityCurve, TradeTable, type Metrics, type TradeRow } from '../components/TradeMetrics'
 import ToggleSwitch from '../components/ToggleSwitch'
 import RefreshButton from '../components/RefreshButton'
@@ -26,12 +27,19 @@ export default function LiveAccountDetail() {
   const qc = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+  const [showSizing, setShowSizing] = useState(false)
 
   const { data, isLoading } = useQuery<Detail>({
     queryKey: ['live-account-detail', id],
     queryFn: () => liveTradingApi.getAccountDetail(id!).then(r => r.data),
     enabled: !!id,
     refetchInterval: 30_000,
+  })
+
+  const { data: sizing } = useQuery<any>({
+    queryKey: ['sizing', id],
+    queryFn: () => liveTradingApi.getSizing(id!).then(r => r.data),
+    enabled: !!id,
   })
 
   useEffect(() => {
@@ -108,12 +116,53 @@ export default function LiveAccountDetail() {
 
       <div className="space-y-5">
         <MetricsGrid m={data.metrics}/>
+
+        {/* Risk & Allocation — per-account sizing rules (edit gated by I-agree + emailed code) */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <ShieldAlert size={16} className="text-violet-600 dark:text-violet-400"/>
+              <h2 className="text-sm font-bold text-slate-700 dark:text-slate-200">Risk &amp; Allocation</h2>
+            </div>
+            <button onClick={() => setShowSizing(true)}
+              className="text-xs font-bold inline-flex items-center gap-1 text-violet-600 dark:text-violet-400 hover:underline">
+              <Edit2 size={12}/> Edit
+            </button>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+            <div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">Account type</div>
+              <div className="font-extrabold text-slate-900 dark:text-slate-100 capitalize">{sizing?.account_type || '—'}</div>
+            </div>
+            <div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">Risk / trade</div>
+              <div className="font-extrabold text-slate-900 dark:text-slate-100">
+                {sizing?.risk_per_trade_usd != null ? `$${Number(sizing.risk_per_trade_usd).toLocaleString()}`
+                  : sizing?.risk_per_trade_pct != null ? `${sizing.risk_per_trade_pct}% of equity` : '—'}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">Max position</div>
+              <div className="font-extrabold text-slate-900 dark:text-slate-100">{sizing?.max_position_usd != null ? `$${Number(sizing.max_position_usd).toLocaleString()}` : 'No cap'}</div>
+            </div>
+            <div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">Equity (cached)</div>
+              <div className="font-extrabold text-slate-900 dark:text-slate-100">{sizing?.cached_equity != null ? `$${Number(sizing.cached_equity).toLocaleString(undefined,{maximumFractionDigits:0})}` : '—'}</div>
+            </div>
+          </div>
+        </div>
         <EquityCurve trades={data.trades}/>
         <div>
           <h2 className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-3">Trades ({data.trades.length})</h2>
           <TradeTable trades={data.trades}/>
         </div>
       </div>
+
+      {showSizing && (
+        <SizingModal
+          account={{ id: a.id, account_name: a.account_name, broker: a.broker, account_type: sizing?.account_type }}
+          onClose={() => { setShowSizing(false); qc.invalidateQueries({ queryKey: ['sizing', id] }) }} />
+      )}
     </div>
   )
 }

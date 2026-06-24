@@ -1979,7 +1979,7 @@ async def pre_entry_preview(
     notional, $risk, which constraint binds, SL/TP P&L, R:R) via the shared
     min-of unified_size(). Places NO order and changes no engine sizing."""
     from app.core.sizing import unified_size, rr_ratio
-    cash = bp = equity = None
+    cash = bp = equity = balance_at = None
     acct_type = "margin"
     if data.broker_account_id:
         acct = (await db.execute(select(BrokerAccount).where(
@@ -1989,6 +1989,7 @@ async def pre_entry_preview(
             cash = getattr(acct, "cached_cash", None)
             bp = getattr(acct, "cached_buying_power", None)
             equity = getattr(acct, "cached_equity", None)
+            balance_at = getattr(acct, "cached_balance_at", None)
             at = (getattr(acct, "account_type", None) or "").lower()
             acct_type = "cash" if at == "cash" else "margin"
     if data.point_value is not None:
@@ -2033,6 +2034,16 @@ async def pre_entry_preview(
             "stop_loss_pnl_usd": round(sl_pnl, 2),
             "take_profit_pnl_usd": round(tp_pnl, 2) if tp_pnl is not None else None,
             "risk_reward_ratio": rr,
+        },
+        "account": {
+            "account_type": acct_type,
+            "equity": round(equity, 2) if equity is not None else None,
+            "cash": round(cash, 2) if cash is not None else None,
+            "buying_power": round(bp, 2) if bp is not None else None,
+            "remaining_buying_power": (
+                round((cash if acct_type == "cash" else bp) - res.final_notional_usd, 2)
+                if (cash if acct_type == "cash" else bp) is not None else None),
+            "balance_at": balance_at.isoformat() if balance_at else None,
         },
         "can_place": res.ok and res.final_size > 0,
         "reason": res.reason or None,
