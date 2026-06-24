@@ -197,6 +197,18 @@ async def _place_intraday_broker_order(broker_account_id: str, ticker: str,
             )).scalar_one_or_none()
         if not acct:
             return None, "error", "broker account not found"
+        # GO-LIVE SAFETY (SCANNER-AUTOTRADE-GUARD-V1): every real scanner order
+        # must clear the same fail-closed backstop the futures path enforces in
+        # LiveTrader._execute_entry — tier_5 + current fully_automated_trading
+        # agreement + account.trading_enabled + a valid broker account. Before
+        # this, the stock path had NO such check (only trading_enabled).
+        from app.core.auto_trade_guard import auto_trade_allowed as _ata
+        _allowed, _why = await _ata(
+            acct.user_id, broker_account_id,
+            context={"path": "scanner_stock", "ticker": ticker, "qty": qty})
+        if not _allowed:
+            logger.warning(f"[scanner-autotrade] BLOCKED {ticker} acct={broker_account_id}: {_why}")
+            return None, "blocked", f"auto-trade blocked: {_why}"
         broker = _bld(acct)
         if not broker:
             return None, "error", f"unsupported broker: {acct.broker}"
@@ -594,7 +606,9 @@ async def _resolve_user_broker(user_id: str) -> tuple[Optional[str], str]:
                AND lower(broker) = 'tradier'
                AND is_active = true
                AND trading_enabled = true
-             ORDER BY (sandbox_mode IS NOT TRUE) DESC, created_at DESC
+               AND COALESCE(is_demo, false) = false
+               AND COALESCE(sandbox_mode, false) = false
+             ORDER BY created_at DESC
              LIMIT 1
         """), {"uid": str(user_id)})).fetchone()
     if r:
