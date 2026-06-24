@@ -607,6 +607,11 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     try:
         from app.engines.options.premarket_scheduler import _resolve_user_broker
         broker_account_id, trade_mode = await _resolve_user_broker(user.id)
+        # WATCH-ONLY never trades: an unconfirmed / watch-only pick is informational
+        # only — never queue a live broker entry for it (it can still email).
+        if _watch and broker_account_id:
+            logger.info(f"[ThetaScanner] {user.email}: watch-only pick — NOT queuing a broker entry")
+            broker_account_id = None
         # Honor per-account trading_enabled toggle (TradeSyncer-style)
         if broker_account_id:
             from app.models.user import BrokerAccount

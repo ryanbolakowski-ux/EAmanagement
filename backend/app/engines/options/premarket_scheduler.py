@@ -1154,6 +1154,7 @@ def _min_score_for_et(et) -> float:
     if t < 9*60:   return 12.0   # 8:30-9:00
     if t < 9*60+25: return 10.0   # 9:00-9:25: anything decent
     if t <= 9*60+50: return 0.0   # 9:25-9:50: last-chance, whatever's best
+    if t <= 12*60: return 10.0   # 9:50-12:00 ET: intraday — fire a CONFIRMED breakout
     return 99.0  # outside window
 
 async def _check_and_run_theta_scanner():
@@ -1186,7 +1187,7 @@ async def _check_and_run_theta_scanner():
         return
 
     et_min = et.hour * 60 + et.minute
-    in_window = (6*60 <= et_min <= 9*60+50)
+    in_window = (6*60 <= et_min <= 12*60)  # extended past the open (was 9:50): scan intraday, fire on a confirmed breakout
     today_dt = _date.today()
     today_key_visible = today_dt.isoformat()
     fired_today_bool = (_theta_fired_today == today_dt)
@@ -1202,7 +1203,7 @@ async def _check_and_run_theta_scanner():
     # on a date that never produced a fire. We use the same Redis flag the
     # main path uses so we don't false-alarm a worker that lost its
     # in-memory state mid-day.
-    if (not in_window) and et_min > 9*60+50 and et.weekday() < 5:
+    if (not in_window) and et_min > 12*60 and et.weekday() < 5:
         if today_key_visible not in _theta_no_pick_alerted_for_date:
             already_fired_via_redis = False
             try:
@@ -1315,6 +1316,13 @@ async def _check_and_run_theta_scanner():
     pick_score = float(pick.get("score", 0) or 0)
     if pick_score < threshold:
         logger.info(f"[ThetaScanner] {et.strftime('%H:%M ET')}: best={pick.get('ticker')} score={pick_score:.1f} < threshold {threshold} — waiting for better setup or lower bar")
+        return
+
+    # Post-open (after the 9:50 ET premarket window) only fire a CONFIRMED
+    # setup — a watch-only candidate must NOT consume the one-per-day slot;
+    # keep scanning for a real intraday breakout instead.
+    if et_min > 9*60+50 and bool(pick.get("watch_only")):
+        logger.info(f"[ThetaScanner] {et.strftime('%H:%M ET')} post-open: best {pick.get('ticker')} is watch-only — holding the slot for a confirmed breakout")
         return
 
     # Claim the fire-slot atomically — only ONE worker fires per day
