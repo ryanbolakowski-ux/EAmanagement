@@ -22,7 +22,7 @@ TEMPLATES: dict = {}
 
 # common gate (same for every template per the signed-off doc)
 _SC = dict(min_score_consider=15.0, min_score_confirm=20.0,
-           watch_only_default=True, approved=True, enabled=False, version=1)
+           watch_only_default=True, approved=True, version=1)
 
 
 def _reg(t: StrategyTemplate) -> StrategyTemplate:
@@ -32,7 +32,7 @@ def _reg(t: StrategyTemplate) -> StrategyTemplate:
 
 # ── 1. Momentum Breakout (Rel-Vol Base Break) ──────────────────────────────
 _reg(StrategyTemplate(
-    key="momentum_breakout", display_name="Momentum Breakout (Rel-Vol Base Break)",
+    key="momentum_breakout", enabled=True, display_name="Momentum Breakout (Rel-Vol Base Break)",
     family="momentum", direction="long", hold_horizon="intraday",
     thesis="High rel-vol break of a tight intraday base in a name already in motion.",
     daily_filters={"gap_min": 2.0, "gap_max": 25.0, "rel_vol_min": 2.5,
@@ -51,7 +51,7 @@ _reg(StrategyTemplate(
 
 # ── 2. Premarket Gap Continuation (Gap-and-Go) ─────────────────────────────
 _reg(StrategyTemplate(
-    key="premarket_gap_continuation", display_name="Premarket Gap Continuation (Gap-and-Go)",
+    key="premarket_gap_continuation", enabled=True, display_name="Premarket Gap Continuation (Gap-and-Go)",
     family="momentum", direction="long", hold_horizon="intraday",
     thesis="Gap up on catalyst, hold above VWAP, continue through the opening-range high.",
     daily_filters={"gap_min": 2.0, "gap_max": 25.0, "rel_vol_min": 2.0,
@@ -70,7 +70,7 @@ _reg(StrategyTemplate(
 
 # ── 3. High Relative-Volume Breakout ───────────────────────────────────────
 _reg(StrategyTemplate(
-    key="high_relvol_breakout", display_name="High Relative-Volume Breakout",
+    key="high_relvol_breakout", enabled=True, display_name="High Relative-Volume Breakout",
     family="breakout", direction="long", hold_horizon="intraday",
     thesis="Unusual volume expansion through clear resistance; participation confirms the move.",
     daily_filters={"gap_min": 2.0, "gap_max": 30.0, "rel_vol_min": 3.0,

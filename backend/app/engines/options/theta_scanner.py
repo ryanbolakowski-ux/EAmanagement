@@ -183,7 +183,138 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
 
 
 
+async def find_best_pick_via_funnel(db):
+    """LIVE daily pick from the PROMOTED multi-strategy templates (SCANNER-V1).
+
+    Broad, liquidity-aware candidate sourcing (NOT premarket-gap-only, which was
+    biased toward illiquid pumps) across every enabled template, then the SAME
+    quality gate the legacy path uses (_apply_quality_filters: premkt liquidity /
+    VWAP / continuation) + structure-based levels (compute_levels). Returns a
+    legacy-shaped pick dict (so emit_theta_pick is unchanged) or None.
+    """
+    from app.engines.options.momentum_scanner import _fetch_market_snapshot
+    from app.engines.scanner.definitions import enabled_templates
+    from app.engines.scanner.funnel import _coarse
+    from app.engines.scanner.scoring import score_candidate
+
+    tpls = [t for t in enabled_templates() if not t.options.eligible]
+    if not tpls:
+        return None
+    rows = await _fetch_market_snapshot() or []
+
+    # coarse + score across all promoted templates; keep best (score, template) per ticker
+    best_by_tkr = {}
+    for tpl in tpls:
+        for r in rows:
+            c = _coarse(tpl, r)
+            if not c:
+                continue
+            sb = score_candidate(c, atr_min_pct=tpl.atr_min_pct, atr_max_pct=tpl.atr_max_pct)
+            c["score"] = sb.total
+            c["matched_strategy"] = tpl.key
+            c["_rr"] = tpl.levels.rr_ratio
+            prev = best_by_tkr.get(c["ticker"])
+            if prev is None or c["score"] > prev["score"]:
+                best_by_tkr[c["ticker"]] = c
+    cands = sorted(best_by_tkr.values(), key=lambda x: x["score"], reverse=True)
+    if not cands:
+        _NOPICK_STATE["last"] = {"ticker": None, "score": 0,
+            "reason": "no liquid candidate matched a promoted template today"}
+        return None
+
+    for c in cands[:12]:
+        try:
+            _cw, _cr = await _get_8k_catalyst(db, c["ticker"])
+            c["catalyst_reason"] = _cr or "multi-strategy match"
+        except Exception:
+            c["catalyst_reason"] = "multi-strategy match"
+
+    # walk best-first through the SAME quality gate the legacy path uses
+    best = None
+    best_watch = None
+    for c in cands[:12]:
+        try:
+            verdict, reasons = await _apply_quality_filters(db, c)
+        except Exception as e:
+            logger.error(f"[stock-scanner] funnel quality-filter crashed {c['ticker']}: {e}")
+            continue
+        c["quality_reasons"] = reasons
+        if verdict == "accept":
+            c["watch_only"] = False
+            best = c
+            break
+        if verdict == "watch" and best_watch is None:
+            c["watch_only"] = True
+            best_watch = c
+    if best is None:
+        best = best_watch
+    if best is None:
+        _top = cands[0]
+        _qr = _top.get("quality_reasons") or ["no intraday confirmation"]
+        _NOPICK_STATE["last"] = {"ticker": _top["ticker"], "score": round(float(_top["score"]), 2),
+            "reason": (f"top liquid candidate {_top['ticker']} ({_top['score']:.0f}) failed quality: "
+                       + "; ".join(str(r) for r in _qr))}
+        logger.info("[stock-scanner] funnel: no candidate cleared the quality gate")
+        return None
+
+    best["entry"] = best["price"]
+    from app.engines.options.premarket_scheduler import _polygon_1min_bars, _today_et_date_str
+    from app.engines.scanner.levels import compute_levels
+    try:
+        _bars = await _polygon_1min_bars(best["ticker"], _today_et_date_str())
+    except Exception:
+        _bars = None
+    _lv = compute_levels("long", float(best["price"]), _bars, rr=float(best.get("_rr", 2.0)))
+    best["stop"] = _lv.stop
+    best["target"] = _lv.target
+    best["projected_move_pct"] = _lv.projected_move_pct
+    best["stop_reason"] = _lv.stop_reason
+    best["target_reason"] = _lv.target_reason
+    best["rr"] = _lv.rr
+    best["levels_basis"] = _lv.basis
+    best["stop_is_placeholder"] = (_lv.basis == "atr_fallback")
+    if not _lv.ok and not best.get("watch_only"):
+        best["watch_only"] = True
+        best.setdefault("quality_reasons", []).append(
+            f"R:R {_lv.rr:.1f} below minimum on available structure — watch-only")
+    best["asset_type"] = "options"   # legacy UI/health key for the Theta pick (it is a stock)
+    best.setdefault("catalyst_reason", "multi-strategy match")
+    best.setdefault("quality_reasons", [])
+    best.setdefault("watch_only", False)
+    best["alternatives"] = [{"ticker": c["ticker"], "score": round(c["score"], 1),
+                             "gap_pct": round(c.get("gap_pct", 0), 1)} for c in cands[1:6]]
+    _NOPICK_STATE["last"] = None
+    logger.info(
+        f"[stock-scanner] FUNNEL PICK {best['ticker']} via {best.get('matched_strategy')} "
+        f"score={best['score']:.0f} entry=${best['price']:.2f} stop={best['stop']} "
+        f"({best['stop_reason']}) target={best['target']} rr={best['rr']} "
+        f"basis={best['levels_basis']} watch_only={best['watch_only']}")
+    try:
+        import redis.asyncio as _r
+        import json as _j
+        from datetime import date as _d
+        _redis = _r.from_url(os.environ.get("REDIS_URL", "redis://edge_redis:6379"), decode_responses=True)
+        payload = {k: v for k, v in best.items() if k not in ("_rr",)}
+        payload["picked_at"] = datetime.now(timezone.utc).isoformat()
+        await _redis.setex(f"theta:lastpick:{_d.today().isoformat()}", 36 * 3600, _j.dumps(payload, default=str))
+        await _redis.setex("theta:lastpick:latest", 36 * 3600, _j.dumps(payload, default=str))
+    except Exception as e:
+        logger.warning(f"[stock-scanner] funnel lastpick redis write failed: {e}")
+    return best
+
+
 async def find_best_premarket_pick(db) -> Optional[dict]:
+    # SCANNER-V1: prefer the promoted multi-strategy funnel (broad, liquidity-
+    # aware, structure-vetted) over the legacy premarket-gapper scan. Falls back
+    # to legacy below if nothing is promoted or the funnel surfaces no pick.
+    try:
+        from app.engines.scanner.definitions import enabled_templates as _enabled
+        if _enabled():
+            _fp = await find_best_pick_via_funnel(db)
+            if _fp:
+                return _fp
+    except Exception as _fe:
+        logger.warning(f"[stock-scanner] funnel path failed, using legacy: {_fe}")
     from app.engines.options.momentum_scanner import _fetch_market_snapshot
     rows = await _fetch_market_snapshot()
     if not rows:
@@ -207,7 +338,7 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
                 "." in t_upper or "/" in t_upper):
                 continue
             gap_pct = (price - prev_close) / prev_close * 100.0
-            if not (5.0 <= gap_pct <= 25.0): continue
+            if not (3.0 <= gap_pct <= 30.0): continue  # broadened from 5-25 (was pump-biased)
             if price < 10 or price > 200: continue  # raised floor to skip micro-caps (was 2)
             if today_vol * price < 5_000_000: continue
             if prev_vol > 0 and today_vol / prev_vol < 2.5: continue
