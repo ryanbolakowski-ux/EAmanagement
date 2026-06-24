@@ -690,37 +690,12 @@ async def _scan_one_strategy(strategy, user, *, is_premarket: bool):
     mode = (getattr(strategy, "signal_mode", "") or "").lower()
     expires_in = max(5, int(getattr(strategy, "auto_execute_delay_min", 15) or 15))
 
-    if mode == "low_float_squeeze":
-        hits = await scan_low_float_squeeze(top_k=1)
-    elif mode == "fifty_two_week_breakout":
-        hits = await scan_52w_breakout(top_k=1)
-    elif mode == "premarket_gap_runner":
-        hits = await scan_premarket_gappers(top_k=1)
-    elif mode == "oracle_opening_candle":
-        hits = await scan_oracle_opening_candle(top_k=1)
-    elif mode == "momentum_scanner":
-        # User spec: long-only $2-$10 stocks up 10%+ on volume surge.
-        # include_negative=False filters out the short candidates that were
-        # polluting the inbox. min_vol_ratio=2.0 (was 1.5) keeps quiet
-        # runners out — real momentum names print 2x+ vs prior day.
-        hits = await scan_for_momentum(
-            # v3 spec: catch the move EARLY (+5% trigger) but skip blow-off
-            # tops (>15%) where reversal risk dominates. 4x volume cuts
-            # false positives. top_k=5 so we can show 4 runners-up in the email.
-            min_change_pct=5.0,
-            max_change_pct=15.0,
-            min_price=2.0, max_price=10.0,
-            min_day_volume=750_000,
-            min_vol_ratio=4.0,
-            top_k=5,
-            include_negative=False,
-        )
-    else:  # universe_scan (ICT — legacy)
-        universe_list = getattr(strategy, "watch_universe", None) or get_universe("expanded")
-        if not universe_list:
-            return
-        cfg = await _build_config(strategy, universe_list[0])
-        hits = await scan_universe(cfg, universe_list, top_k=1)
+    # SCANNER-V1: dispatch through the registry. Legacy modes delegate to the
+    # exact same scan_* calls (behavior unchanged); new template-driven modes are
+    # registered there as they\u2019re implemented + approved. Unknown modes fall
+    # back to the universe (ICT) scanner, matching the old else-branch.
+    from app.engines.scanner.registry import get_scanner
+    hits = await get_scanner(mode)(strategy, user, is_premarket=is_premarket)
 
     if not hits:
         return
