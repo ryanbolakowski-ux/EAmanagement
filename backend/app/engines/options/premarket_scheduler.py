@@ -911,6 +911,16 @@ async def start_premarket_scheduler():
             except Exception as _tse:
                 logger.warning(f"[ThetaScanner] check failed: {_tse}")
 
+            # ── Daily SHADOW multi-strategy scan (P2) — persist-only, no emit/
+            # trade. Starts forward-test stats for watch-only templates. Fully
+            # isolated: own once/day Redis latch + try/except, cannot touch the
+            # live pick path.
+            try:
+                from app.engines.scanner.shadow import _check_and_run_shadow_scan
+                await _check_and_run_shadow_scan()
+            except Exception as _she:
+                logger.warning(f"[shadow] check failed: {_she}")
+
             # ── Pending stock-entry timing gate (2026-06-05) ──
             # Iterates Redis-queued picks and decides per the ICT timing
             # gate whether to fire pre-mkt, MOO, or defer.

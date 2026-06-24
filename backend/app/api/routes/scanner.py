@@ -334,7 +334,7 @@ async def scanner_history(
 
     """Return the last N days of Theta Scanner picks. Filterable by asset_type."""
     days = max(1, min(int(days), 90))
-    where = "picked_at > NOW() - (INTERVAL '1 day' * :d)"
+    where = "picked_at > NOW() - (INTERVAL '1 day' * :d) AND COALESCE(shadow,false)=false"
     params = {"d": days}
     if asset_type in ("options", "futures", "stocks"):
         where += " AND asset_type = :at"
@@ -352,6 +352,21 @@ async def scanner_history(
         "days": days, "asset_type": asset_type, "count": len(rows),
         "picks": [dict(r._mapping) for r in rows],
     }
+
+
+@router.get("/shadow-stats")
+async def scanner_shadow_stats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-template forward-test stats from the daily SHADOW scan + promotion
+    readiness. Watch-only templates only — nothing here is live or tradeable."""
+    try:
+        await _resolve_email_signal_outcomes(db)
+    except Exception:
+        pass
+    from app.engines.scanner.promotion import template_stats
+    return await template_stats(db)
 
 
 
