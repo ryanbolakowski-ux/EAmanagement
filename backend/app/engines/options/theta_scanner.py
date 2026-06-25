@@ -183,6 +183,9 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
 
 
 
+_LAST_SCAN_DIAG = {"last": None}
+
+
 async def find_best_pick_via_funnel(db):
     """LIVE daily pick from the PROMOTED multi-strategy templates (SCANNER-V1).
 
@@ -232,6 +235,7 @@ async def find_best_pick_via_funnel(db):
     # walk best-first through the SAME quality gate the legacy path uses
     best = None
     best_watch = None
+    _evaluated = []
     for c in cands[:12]:
         try:
             verdict, reasons = await _apply_quality_filters(db, c)
@@ -239,6 +243,10 @@ async def find_best_pick_via_funnel(db):
             logger.error(f"[stock-scanner] funnel quality-filter crashed {c['ticker']}: {e}")
             continue
         c["quality_reasons"] = reasons
+        _evaluated.append({"ticker": c["ticker"], "score": round(float(c["score"]), 1),
+                           "gap_pct": c.get("gap_pct"), "rel_vol": c.get("rel_vol"),
+                           "price": c.get("price"), "via": c.get("matched_strategy"),
+                           "verdict": verdict, "reasons": reasons})
         if verdict == "accept":
             c["watch_only"] = False
             best = c
@@ -254,6 +262,9 @@ async def find_best_pick_via_funnel(db):
         _NOPICK_STATE["last"] = {"ticker": _top["ticker"], "score": round(float(_top["score"]), 2),
             "reason": (f"top liquid candidate {_top['ticker']} ({_top['score']:.0f}) failed quality: "
                        + "; ".join(str(r) for r in _qr))}
+        _LAST_SCAN_DIAG["last"] = {"universe": len(rows), "candidates": len(cands),
+            "evaluated": _evaluated, "pick": None,
+            "no_trade_reason": _NOPICK_STATE["last"]["reason"]}
         logger.info("[stock-scanner] funnel: no candidate cleared the quality gate")
         return None
 
@@ -284,6 +295,8 @@ async def find_best_pick_via_funnel(db):
     best["alternatives"] = [{"ticker": c["ticker"], "score": round(c["score"], 1),
                              "gap_pct": round(c.get("gap_pct", 0), 1)} for c in cands[1:6]]
     _NOPICK_STATE["last"] = None
+    _LAST_SCAN_DIAG["last"] = {"universe": len(rows), "candidates": len(cands),
+        "evaluated": _evaluated, "pick": best["ticker"], "no_trade_reason": None}
     logger.info(
         f"[stock-scanner] FUNNEL PICK {best['ticker']} via {best.get('matched_strategy')} "
         f"score={best['score']:.0f} entry=${best['price']:.2f} stop={best['stop']} "

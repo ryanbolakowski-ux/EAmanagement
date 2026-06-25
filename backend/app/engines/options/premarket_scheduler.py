@@ -1248,6 +1248,14 @@ async def _check_and_run_theta_scanner():
                         pass
                     if not _already_noticed:
                         await _send_no_pick_emails(today_key_visible, _reason)
+                        try:
+                            from app.api.routes.security import notify_admins_security
+                            await notify_admins_security(
+                                "Theta Scanner: NO PICK today",
+                                f"No stock pick for {today_key_visible}. Reason: {_reason} "
+                                f"(scanner ran; no candidate cleared the quality filters).")
+                        except Exception as _ae:
+                            logger.error(f"[ThetaScanner] no-pick admin alert failed: {_ae}")
                 except Exception as _ne:
                     logger.error(f"[ThetaScanner] no-pick user note failed: {_ne}")
 

@@ -19,6 +19,21 @@ from app.engines.scanner.levels import compute_levels
 from app.engines.scanner.templates import TemplateHit
 
 
+# Leveraged / inverse ETFs (2x/3x, -1x/-2x/-3x, vol products) — these gap because
+# their UNDERLYING moved, not on an equity catalyst; they decay and are not real
+# stock breakouts. Excluded from the stock scanner universe.
+_LEVERAGED_ETFS = frozenset({
+    "SOXL","SOXS","TQQQ","SQQQ","SPXL","SPXS","UPRO","SPXU","TNA","TZA","UDOW","SDOW",
+    "QLD","QID","SSO","SDS","DDM","DXD","LABU","LABD","NAIL","DRN","DRV","YINN","YANG",
+    "NUGT","DUST","JNUG","JDST","GUSH","DRIP","ERX","ERY","FAS","FAZ","BOIL","KOLD",
+    "UCO","SCO","AGQ","ZSL","UGL","GLL","UVXY","VXX","SVXY","UVIX","SVIX","VIXY",
+    "TMF","TMV","TSLL","TSLQ","TSLS","NVDL","NVDU","NVDS","NVD","CONL","COND","BITX",
+    "BITI","ETHU","MSTU","MSTZ","MSTX","FNGU","FNGD","BULZ","WEBL","WEBS","HIBL","HIBS",
+    "DPST","WANT","CWEB","KORU","INDL","MEXX","BRZU","EDC","EDZ","TYD","TYO","URTY","SRTY",
+    "TWM","UWM","SAA","SDD","MVV","MZZ","QID","RXL","CURE","UYG","SKF","SRS","DRN",
+})
+
+
 def _coarse(tpl, row):
     """Apply the template's daily_filters to a grouped-daily snapshot row.
     Returns a candidate dict or None. Pure math, no network."""
@@ -34,6 +49,8 @@ def _coarse(tpl, row):
     if price <= 0 or prev <= 0 or not tkr:
         return None
     if "." in tkr or "/" in tkr or tkr.endswith("W") or tkr.endswith("WS"):
+        return None
+    if tkr in _LEVERAGED_ETFS:
         return None
     gap = (price - prev) / prev * 100.0
     relvol = (vol / pvol) if pvol > 0 else 0.0

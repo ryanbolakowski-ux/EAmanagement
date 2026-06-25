@@ -1530,3 +1530,49 @@ async def admin_run_scanner_health_check(
         raise HTTPException(status_code=403, detail="Admin only")
     from app.engines.scanner_health import check_health
     return await check_health()
+
+
+@router.post("/theta-scanner/run-now")
+async def admin_run_theta_scanner_now(
+    emit: bool = False,
+    admin: User = Depends(require_admin_with_passcode),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually run Theta Scanner right now (admin button). Returns the pick OR a
+    No-Trade with the exact reason + the top-candidate breakdown (ticker, score,
+    verdict, reasons). `emit=true` also sends the email/signal to subscribers and
+    routes per tier (only for a CONFIRMED, non-watch-only pick)."""
+    from app.engines.options.theta_scanner import (
+        find_best_premarket_pick, _LAST_SCAN_DIAG, _NOPICK_STATE,
+    )
+    from app.engines.market_calendar import market_status as _ms
+    from datetime import datetime as _dt, timezone as _tz
+    pick = await find_best_premarket_pick(db)
+    diag = _LAST_SCAN_DIAG.get("last") or {}
+    out = {
+        "ran_at_utc": _dt.now(_tz.utc).isoformat(),
+        "ran_by": admin.email,
+        "market": _ms(),
+        "universe": diag.get("universe"),
+        "candidate_count": diag.get("candidates"),
+        "top_candidates": (diag.get("evaluated") or [])[:10],
+        "pick": None,
+        "no_trade_reason": None,
+        "emitted": False,
+    }
+    if pick:
+        out["pick"] = {k: pick.get(k) for k in (
+            "ticker", "matched_strategy", "entry", "stop", "target", "rr",
+            "projected_move_pct", "score", "gap_pct", "rel_vol", "watch_only",
+            "stop_reason", "target_reason", "catalyst_reason", "levels_basis",
+            "quality_reasons")}
+        out["routing"] = ("watch-only — informational, no entry"
+                          if pick.get("watch_only")
+                          else "email + paper/live (gated per user tier + auto_trade_allowed)")
+        if emit and not pick.get("watch_only"):
+            from app.engines.options.premarket_scheduler import run_theta_scanner_for_all_users
+            await run_theta_scanner_for_all_users()
+            out["emitted"] = True
+    else:
+        out["no_trade_reason"] = (_NOPICK_STATE.get("last") or {}).get("reason") or "no candidate cleared the quality filters"
+    return out
