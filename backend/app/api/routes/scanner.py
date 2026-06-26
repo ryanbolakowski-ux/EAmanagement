@@ -801,3 +801,17 @@ async def close_specific_trade(
         {"ep": ep, "tk": row.instrument, "uid": str(current_user.id)})
     await db.commit()
     return {"ok": True, "order_id": getattr(resp, "broker_order_id", None), "ticker": row.instrument, "exit_price": ep, "priced": ep is not None}
+
+
+@router.get("/analyze")
+async def scanner_analyze(
+    ticker: str,
+    direction: str = "long",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Analyze ANY ticker on demand: live price + structure-based entry/stop/target
+    (real R:R + measured-move) + the scanner quality-gate verdict (above/below VWAP,
+    liquidity, overextension). Read-only; no email, no order. Not a prediction."""
+    from app.engines.options.theta_scanner import analyze_ticker
+    return await analyze_ticker(db, ticker, direction)

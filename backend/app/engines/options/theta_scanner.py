@@ -737,3 +737,82 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     except Exception as e:
         logger.error(f"[ThetaScanner] history persist failed: {e}")
     return ok
+
+
+async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
+    """On-demand analysis of ANY ticker: live price, structure-based levels
+    (compute_levels) and the scanner quality-gate verdict (_apply_quality_filters).
+    Read-only — places nothing, emails nothing. NOT a prediction; it reports the
+    levels that matter + whether the system sees a tradeable setup right now."""
+    from datetime import datetime as _dt, timezone as _tz, date as _date, timedelta as _td
+    from app.engines.options.premarket_scheduler import (
+        _polygon_1min_bars, _today_et_date_str, _polygon_last_trade_price,
+    )
+    from app.engines.scanner.levels import compute_levels
+
+    tkr = (ticker or "").upper().strip()
+    if not tkr:
+        return {"error": "no ticker provided"}
+    now = _dt.now(_tz.utc).isoformat()
+
+    price = None
+    try:
+        price = await _polygon_last_trade_price(tkr)
+    except Exception:
+        price = None
+    try:
+        bars = await _polygon_1min_bars(tkr, _today_et_date_str()) or []
+    except Exception:
+        bars = []
+    if (not price or price <= 0) and bars:
+        price = float(bars[-1].get("c") or 0)
+    if not price or price <= 0:
+        return {"ticker": tkr, "error": "no live price available (symbol unknown or no data)",
+                "as_of": now}
+
+    prev_close = None
+    gap_pct = 0.0
+    rel_vol = 0.0
+    try:
+        from app.api.routes.scanner import _polygon_daily_range
+        end = _date.today()
+        dr = _polygon_daily_range(tkr, (end - _td(days=45)).isoformat(), end.isoformat()) or []
+        if len(dr) >= 2:
+            prev_close = float(dr[-2].get("c") or 0)
+            if prev_close > 0:
+                gap_pct = (price - prev_close) / prev_close * 100.0
+            vols = [float(b.get("v") or 0) for b in dr[-21:-1]]
+            avg = (sum(vols) / len(vols)) if vols else 0.0
+            tv = float(dr[-1].get("v") or 0)
+            if avg > 0:
+                rel_vol = round(tv / avg, 2)
+    except Exception:
+        pass
+
+    cand = {"ticker": tkr, "price": float(price), "gap_pct": round(gap_pct, 2),
+            "rel_vol": rel_vol, "catalyst_reason": "on-demand analysis"}
+    try:
+        verdict, reasons = await _apply_quality_filters(db, cand)
+    except Exception as e:
+        verdict, reasons = "error", [f"{type(e).__name__}: {e}"]
+
+    lv = compute_levels(direction, float(price), bars, rr=2.0)
+    return {
+        "ticker": tkr,
+        "price": round(float(price), 2),
+        "price_source": "Polygon/Massive grouped-daily + 1-min bars (Stocks Starter = 15-min delayed)",
+        "as_of": now,
+        "prev_close": round(prev_close, 2) if prev_close else None,
+        "gap_pct": round(gap_pct, 2),
+        "rel_vol": rel_vol,
+        "direction": direction,
+        "gate": {"verdict": verdict, "reasons": reasons},
+        "levels": {
+            "entry": lv.entry, "stop": lv.stop, "stop_reason": lv.stop_reason,
+            "target": lv.target, "target_reason": lv.target_reason,
+            "rr": lv.rr, "projected_move_pct": lv.projected_move_pct,
+            "basis": lv.basis, "structurally_valid": lv.ok,
+        },
+        "tradeable_setup_now": (verdict == "accept" and lv.ok),
+        "note": "Structure + gate analysis only — NOT a price prediction or guarantee.",
+    }
