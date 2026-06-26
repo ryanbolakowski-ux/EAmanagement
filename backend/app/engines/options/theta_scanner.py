@@ -143,26 +143,36 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
 
     soft_fail = False  # VWAP-below or continuation fail → watch-only
 
-    # 2. Pre-market liquidity: < $500k = HARD reject (illiquid micro-cap);
-    #    $500k-$1M = WATCH-ONLY (thin but tradeable, user decides); >=$1M = clean.
-    pm_dollar_vol = _premarket_dollar_volume(bars_1m)
-    if pm_dollar_vol < 1_000_000:
-        logger.info(f"[ThetaScanner] reject {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1M (illiquid)")
-        return "reject", reasons
-    if pm_dollar_vol < 1_500_000:
-        logger.info(f"[ThetaScanner] {ticker}: premarket $-vol ${pm_dollar_vol:,.0f} < $1.5M — thin, WATCH-ONLY")
+    # 2. Liquidity: SESSION-TO-DATE $-vol (premarket OR live session, whichever is
+    #    larger) — NOT premarket-only, which was rejecting genuinely liquid large-caps
+    #    (e.g. TECH/AYI) just because they are quiet PRE-market. The coarse filter
+    #    already requires >=$20M avg day $-vol, so this is a sanity floor.
+    # Liquidity is ALREADY gated by the coarse filter (>=$20M avg day $-vol) +
+    # leveraged-ETF exclusion, so the 1-min-bar $-vol is NO LONGER a hard reject — it
+    # was throwing out liquid large-caps (TECH/AYI/ASND) that are quiet PRE-market and
+    # whose RTH volume is not in the (15-min-delayed) bars yet. Only a truly dead tape
+    # (<$250k session-to-date) downgrades to watch-only.
+    pm_dv = _premarket_dollar_volume(bars_1m)
+    try:
+        sess_dv = sum(float(b.get("c") or 0) * float(b.get("v") or 0) for b in bars_1m)
+    except Exception:
+        sess_dv = 0.0
+    liq_dv = max(pm_dv, sess_dv)
+    if liq_dv < 250_000:
+        logger.info(f"[ThetaScanner] {ticker}: intraday $-vol ${liq_dv:,.0f} < $250k — thin, WATCH-ONLY")
         soft_fail = True
-    reasons.append(f"pm $-vol ${pm_dollar_vol/1e6:.1f}M")
+    reasons.append(f"$-vol ${liq_dv/1e6:.2f}M")
 
-    # 1 + 4. VWAP-relative checks
+    # 1 + 4. VWAP-relative checks. Below VWAP -> watch-only (long bias unconfirmed);
+    #    >7% above VWAP -> overextended reject (chasing). (Widened 5%->7% for momentum.)
     vwap = _session_vwap(bars_1m)
     if vwap and vwap > 0:
         dist_pct = (price - vwap) / vwap * 100.0
-        if dist_pct > 5.0:
-            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} is {dist_pct:.1f}% above VWAP ${vwap:.2f} (>5% overextended)")
+        if dist_pct > 7.0:
+            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} is {dist_pct:.1f}% above VWAP ${vwap:.2f} (>7% overextended)")
             return "reject", reasons
         if price < vwap:
-            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} below VWAP ${vwap:.2f} (long-below-VWAP) — watch-only")
+            logger.info(f"[ThetaScanner] {ticker}: price ${price:.2f} below VWAP ${vwap:.2f} (long-below-VWAP) — watch-only")
             soft_fail = True
             reasons.append(f"below VWAP ${vwap:.2f}")
         else:
@@ -171,13 +181,14 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
         logger.info(f"[ThetaScanner] {ticker}: VWAP unavailable — skipping VWAP filter (graceful)")
         reasons.append("VWAP n/a")
 
-    # 3. Continuation / anti-fade (SOFT)
+    # 3. Continuation is a SCORE NOTE, not a gate. Requiring 3 consecutive 1-min
+    #    higher highs at the scan instant rejected almost everything (intraday noise),
+    #    so a clean liquid above-VWAP setup was being demoted to watch-only. Note it
+    #    for context; do NOT downgrade on its absence.
     if _last3_higher_highs(bars_1m):
         reasons.append("HH x3")
     else:
-        logger.info(f"[ThetaScanner] reject {ticker}: last 3 1-min bars NOT making higher highs (fading) — watch-only")
-        soft_fail = True
-        reasons.append("fading (no HH x3)")
+        reasons.append("consolidating")
 
     return ("watch" if soft_fail else "accept"), reasons
 
