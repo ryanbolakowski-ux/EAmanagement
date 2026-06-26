@@ -772,7 +772,9 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
 
     prev_close = None
     gap_pct = 0.0
-    rel_vol = 0.0
+    rel_vol = 0.0          # today vol vs prior-day vol (the scanner's rel-vol metric)
+    rel_vol_20d = 0.0      # today vol vs 20-day avg (context)
+    today_vol = 0.0
     try:
         from app.api.routes.scanner import _polygon_daily_range
         end = _date.today()
@@ -781,11 +783,14 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
             prev_close = float(dr[-2].get("c") or 0)
             if prev_close > 0:
                 gap_pct = (price - prev_close) / prev_close * 100.0
+            today_vol = float(dr[-1].get("v") or 0)
+            prev_vol = float(dr[-2].get("v") or 0)
+            if prev_vol > 0:
+                rel_vol = round(today_vol / prev_vol, 2)
             vols = [float(b.get("v") or 0) for b in dr[-21:-1]]
             avg = (sum(vols) / len(vols)) if vols else 0.0
-            tv = float(dr[-1].get("v") or 0)
             if avg > 0:
-                rel_vol = round(tv / avg, 2)
+                rel_vol_20d = round(today_vol / avg, 2)
     except Exception:
         pass
 
@@ -796,7 +801,52 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
     except Exception as e:
         verdict, reasons = "error", [f"{type(e).__name__}: {e}"]
 
-    lv = compute_levels(direction, float(price), bars, rr=2.0)
+    lv_long = compute_levels("long", float(price), bars, rr=2.0)
+    lv_short = compute_levels("short", float(price), bars, rr=2.0)
+
+    # Coarse momentum match: does it clear gap / rel-vol / price / $-vol for any
+    # PROMOTED template? This separates "passes the risk gate" (accept) from
+    # "is an actual scanner pick candidate".
+    from app.engines.scanner.definitions import enabled_templates
+    today_dvol = float(price) * float(today_vol)
+
+    def _coarse_check(tpl):
+        df = tpl.daily_filters or {}
+        if not (df.get("price_min", 0) <= price <= df.get("price_max", 1e12)):
+            return False, f"price ${price:.2f} outside ${df.get('price_min')}-${df.get('price_max')}"
+        if not (df.get("gap_min", -1e12) <= gap_pct <= df.get("gap_max", 1e12)):
+            return False, f"gap {gap_pct:.1f}% outside {df.get('gap_min')}..{df.get('gap_max')}%"
+        if rel_vol < df.get("rel_vol_min", 0):
+            return False, f"rel-vol {rel_vol:.2f}x < {df.get('rel_vol_min')}x min"
+        if today_dvol < df.get("dollar_vol_min", 0):
+            return False, f"$-vol ${today_dvol/1e6:.0f}M < ${df.get('dollar_vol_min')/1e6:.0f}M min"
+        return True, None
+
+    tpl_results = []
+    for tpl in enabled_templates():
+        if tpl.options.eligible:
+            continue
+        ok_c, why = _coarse_check(tpl)
+        tpl_results.append({"template": tpl.key, "passes": ok_c, "fail_reason": why})
+    is_candidate = any(t["passes"] for t in tpl_results)
+    would_be_pick = is_candidate and verdict == "accept" and lv_long.ok
+
+    def _lv(lv):
+        return {"entry": lv.entry, "stop": lv.stop, "stop_reason": lv.stop_reason,
+                "target": lv.target, "target_reason": lv.target_reason, "rr": lv.rr,
+                "projected_move_pct": lv.projected_move_pct, "basis": lv.basis,
+                "structurally_valid": lv.ok}
+
+    if would_be_pick:
+        summary = f"{tkr}: WOULD be a scanner pick (long) — clears momentum + risk gate, R:R {lv_long.rr}."
+    elif is_candidate and verdict != "accept":
+        summary = f"{tkr}: momentum candidate but FAILS the risk gate ({'; '.join(str(r) for r in reasons)})."
+    elif verdict == "accept" and not is_candidate:
+        _fr = next((t["fail_reason"] for t in tpl_results if t["fail_reason"]), "no active momentum")
+        summary = f"{tkr}: passes the risk gate but NOT a scanner candidate ({_fr}) — no active setup."
+    else:
+        summary = f"{tkr}: no setup — neither a momentum candidate nor a gate pass right now."
+
     return {
         "ticker": tkr,
         "price": round(float(price), 2),
@@ -804,15 +854,18 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
         "as_of": now,
         "prev_close": round(prev_close, 2) if prev_close else None,
         "gap_pct": round(gap_pct, 2),
-        "rel_vol": rel_vol,
-        "direction": direction,
-        "gate": {"verdict": verdict, "reasons": reasons},
-        "levels": {
-            "entry": lv.entry, "stop": lv.stop, "stop_reason": lv.stop_reason,
-            "target": lv.target, "target_reason": lv.target_reason,
-            "rr": lv.rr, "projected_move_pct": lv.projected_move_pct,
-            "basis": lv.basis, "structurally_valid": lv.ok,
+        "rel_vol_vs_prev_day": rel_vol,
+        "rel_vol_vs_20d_avg": rel_vol_20d,
+        "today_dollar_vol_musd": round(today_dvol / 1e6, 1),
+        "gate_long": {"verdict": verdict, "reasons": reasons},
+        "scanner_match": {
+            "is_candidate": is_candidate,
+            "would_be_pick": would_be_pick,
+            "templates": tpl_results,
         },
-        "tradeable_setup_now": (verdict == "accept" and lv.ok),
-        "note": "Structure + gate analysis only — NOT a price prediction or guarantee.",
+        "levels_long": _lv(lv_long),
+        "levels_short": _lv(lv_short),
+        "summary": summary,
+        "note": ("Structure + gate analysis only — NOT a price prediction or guarantee. "
+                 "Gate is long-biased (VWAP); short levels are structural references only."),
     }
