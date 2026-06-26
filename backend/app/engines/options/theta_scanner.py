@@ -831,6 +831,61 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
     is_candidate = any(t["passes"] for t in tpl_results)
     would_be_pick = is_candidate and verdict == "accept" and lv_long.ok
 
+    # ── Decision label + reason + tags: tell the user what to DO at a glance ──
+    vwap = _session_vwap(bars) if bars else None
+    dist = ((float(price) - vwap) / vwap * 100.0) if (vwap and vwap > 0) else None
+    above_vwap = bool(vwap and float(price) >= vwap)
+    hh3 = bool(bars and _last3_higher_highs(bars))
+    try:
+        _pm = _premarket_dollar_volume(bars) if bars else 0.0
+    except Exception:
+        _pm = 0.0
+    sess_liq = max(float(_pm or 0.0), float(today_dvol))
+    overext = bool(dist is not None and dist > 7.0)
+    lowvol = (bool(rel_vol and rel_vol < 1.5) and bool(rel_vol_20d and rel_vol_20d < 1.5)) or sess_liq < 1_500_000
+    _d = dist if dist is not None else 0.0
+
+    tags = []
+    if would_be_pick and above_vwap:
+        tags.append("Momentum Confirmed")
+    if overext:
+        tags += ["Already Extended", "Needs Pullback"]
+    if lowvol:
+        tags.append("Low Volume")
+    if is_candidate and not above_vwap:
+        tags.append("Reclaim Needed")
+    if is_candidate and above_vwap and not hh3 and not would_be_pick:
+        tags.append("Breakout Pending")
+
+    if not bars:
+        decision, tone, dreason = "No Trade", "none", "No intraday data to confirm a setup right now."
+    elif would_be_pick:
+        decision, tone = "Buy", "buy"
+        dreason = (f"Momentum confirmed above VWAP (+{_d:.1f}%), rel-vol {rel_vol:.1f}x, "
+                   f"{lv_long.rr:.1f}R structure \u2014 clears all filters.")
+    elif overext:
+        decision, tone = "Avoid", "avoid"
+        dreason = f"Already +{_d:.1f}% above VWAP \u2014 overextended; chasing here is poor R:R. Wait for a pullback."
+    elif is_candidate and not above_vwap:
+        decision, tone = "Wait for Confirmation", "wait"
+        dreason = f"Real momentum but {abs(_d):.1f}% below VWAP \u2014 needs to reclaim VWAP before it is a buy."
+    elif is_candidate and above_vwap and not lv_long.ok:
+        decision, tone = "Do Not Buy", "avoid"
+        dreason = f"Setup is there but R:R {lv_long.rr:.1f} is below the minimum \u2014 not worth the risk."
+    elif is_candidate and above_vwap:
+        decision, tone = "Wait for Confirmation", "wait"
+        dreason = "Above VWAP but the breakout is not confirmed yet \u2014 waiting on higher-highs / volume."
+    elif sess_liq < 1_000_000:
+        decision, tone = "Avoid", "avoid"
+        dreason = "Too illiquid to trade safely \u2014 not enough dollar volume."
+    elif abs(gap_pct) >= 2.0 or (rel_vol and rel_vol >= 1.5):
+        decision, tone = "Watch", "watch"
+        dreason = f"Some activity (gap {gap_pct:.1f}%, rel-vol {rel_vol:.1f}x) but below the momentum threshold \u2014 not a setup yet."
+    else:
+        decision, tone = "No Trade", "none"
+        dreason = "No valid setup right now \u2014 no momentum, no confirmation."
+    decision_obj = {"label": decision, "tone": tone, "reason": dreason, "tags": tags}
+
     def _lv(lv):
         return {"entry": lv.entry, "stop": lv.stop, "stop_reason": lv.stop_reason,
                 "target": lv.target, "target_reason": lv.target_reason, "rr": lv.rr,
@@ -865,6 +920,7 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
         },
         "levels_long": _lv(lv_long),
         "levels_short": _lv(lv_short),
+        "decision": decision_obj,
         "summary": summary,
         "note": ("Structure + gate analysis only — NOT a price prediction or guarantee. "
                  "Gate is long-biased (VWAP); short levels are structural references only."),

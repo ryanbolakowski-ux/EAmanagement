@@ -11,6 +11,22 @@ const fmt = (n: any, d = 2) =>
     ? '—'
     : Number(n).toLocaleString(undefined, { maximumFractionDigits: d })
 
+// Decision tone -> colors. tone comes from the backend decision_obj.
+const DEC_BG: Record<string, string> = {
+  buy: 'border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 dark:border-emerald-800',
+  wait: 'border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800',
+  watch: 'border-sky-300 bg-sky-50 dark:bg-sky-900/20 dark:border-sky-800',
+  avoid: 'border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-800',
+  none: 'border-slate-300 bg-slate-50 dark:bg-slate-800/40 dark:border-slate-700',
+}
+const DEC_TX: Record<string, string> = {
+  buy: 'text-emerald-700 dark:text-emerald-300',
+  wait: 'text-amber-700 dark:text-amber-300',
+  watch: 'text-sky-700 dark:text-sky-300',
+  avoid: 'text-red-700 dark:text-red-300',
+  none: 'text-slate-600 dark:text-slate-300',
+}
+
 function Badge({ tone, children }: { tone: 'green' | 'amber' | 'red' | 'slate'; children: any }) {
   const m: Record<string, string> = {
     green: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
@@ -105,19 +121,28 @@ export default function TickerAnalyzer() {
 
       {res && (
         <div className="mt-4 space-y-3">
-          {/* header */}
-          <div className="flex items-center flex-wrap gap-2">
-            <span className="text-lg font-extrabold text-slate-900 dark:text-slate-100">{res.ticker}</span>
-            <span className="text-lg font-bold text-slate-900 dark:text-slate-100">${fmt(res.price)}</span>
-            <span className={`text-sm font-bold ${Number(res.gap_pct) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-              {Number(res.gap_pct) >= 0 ? '+' : ''}{fmt(res.gap_pct, 1)}%
-            </span>
-            <Badge tone={gateTone}>Gate: {gate?.verdict}</Badge>
-            <Badge tone={matchTone}>{matchText}</Badge>
+          {/* DECISION — the call, front and center */}
+          <div className={`rounded-xl border p-3 ${DEC_BG[res.decision?.tone] || DEC_BG.none}`}>
+            <div className="flex items-center flex-wrap gap-2">
+              <span className={`text-xl font-extrabold ${DEC_TX[res.decision?.tone] || DEC_TX.none}`}>{res.decision?.label || '—'}</span>
+              <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{res.ticker} ${fmt(res.price)}</span>
+              <span className={`text-sm font-bold ${Number(res.gap_pct) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                {Number(res.gap_pct) >= 0 ? '+' : ''}{fmt(res.gap_pct, 1)}%
+              </span>
+            </div>
+            <div className="text-xs mt-1 text-slate-700 dark:text-slate-200 font-medium">{res.decision?.reason}</div>
+            {res.decision?.tags?.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {res.decision.tags.map((t: string) => (
+                  <span key={t} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-white/70 dark:bg-slate-900/50 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">{t}</span>
+                ))}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              <Badge tone={gateTone}>Gate: {gate?.verdict}</Badge>
+              <Badge tone={matchTone}>{matchText}</Badge>
+            </div>
           </div>
-
-          {/* summary */}
-          <div className="text-xs text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 rounded-lg px-3 py-2 font-medium">{res.summary}</div>
 
           {/* stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
