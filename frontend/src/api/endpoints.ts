@@ -498,3 +498,12 @@ export const optionsPaperApi = {
     api.post("/api/v1/options-paper/sessions", data),
   stopSession: (sessionId: string) => api.post(`/api/v1/options-paper/sessions/${sessionId}/stop`),
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scanner — on-demand ticker analysis (structure levels + gate verdict)
+// ─────────────────────────────────────────────────────────────────────────────
+export const scannerApi = {
+  analyze: (ticker: string, direction: string = 'long') =>
+    api.get('/api/v1/scanner/analyze', { params: { ticker, direction } }),
+}

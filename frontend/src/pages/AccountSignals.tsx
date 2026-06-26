@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/authStore'
 import { strategiesApi, paperTradingApi } from '../api/endpoints'
 import api from '../api/client'
 import { fmtEntryTime } from '../components/TradeMetrics'
+import TickerAnalyzer from '../components/TickerAnalyzer'
 
 type Signal = {
   id: string
@@ -454,6 +455,9 @@ export default function AccountSignals() {
           <Plus size={14}/> New Email Signal
         </button>
       </div>
+
+      {/* On-demand ticker analyzer */}
+      <TickerAnalyzer />
 
       {/* Compliance banner */}
       <div className="rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 p-4 flex items-start gap-3 text-sm">
