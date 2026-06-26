@@ -1326,11 +1326,11 @@ async def _check_and_run_theta_scanner():
         logger.info(f"[ThetaScanner] {et.strftime('%H:%M ET')}: best={pick.get('ticker')} score={pick_score:.1f} < threshold {threshold} — waiting for better setup or lower bar")
         return
 
-    # Post-open (after the 9:50 ET premarket window) only fire a CONFIRMED
-    # setup — a watch-only candidate must NOT consume the one-per-day slot;
-    # keep scanning for a real intraday breakout instead.
-    if et_min > 9*60+50 and bool(pick.get("watch_only")):
-        logger.info(f"[ThetaScanner] {et.strftime('%H:%M ET')} post-open: best {pick.get('ticker')} is watch-only — holding the slot for a confirmed breakout")
+    # Only fire a CONFIRMED (non-watch-only) setup, at ANY time in the window.
+    # A watch-only candidate must NOT consume the one-per-day slot or go out as
+    # a "trade" — the No-Trade email at window close communicates watch-only days.
+    if bool(pick.get("watch_only")):
+        logger.info(f"[ThetaScanner] {et.strftime('%H:%M ET')}: best {pick.get('ticker')} is watch-only — not firing (No-Trade; holding slot for a confirmed setup)")
         return
 
     # Claim the fire-slot atomically — only ONE worker fires per day
