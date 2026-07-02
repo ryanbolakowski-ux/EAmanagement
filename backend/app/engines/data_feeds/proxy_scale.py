@@ -26,7 +26,11 @@ _PROXY_PAIR = {
 # Fallbacks (refreshed 2026-05) used only if the live ratio can't be fetched.
 _FALLBACK_SCALE = {"ES": 10.0, "NQ": 41.0, "RTY": 9.0, "YM": 95.0}
 
-_cache: dict = {}          # inst -> (ts, scale)
+# TTLCache (was a bare dict): tiny key space (4 instruments) but swapped for
+# consistency — expired entries are pruned on set instead of persisting.
+# The manual _TTL freshness checks below are unchanged.
+from app.core.ttl_cache import TTLCache
+_cache: TTLCache = TTLCache(maxsize=32, ttl_seconds=3600.0)   # inst -> (ts, scale)
 _lock = threading.Lock()
 _TTL = 3600.0              # 1 hour
 

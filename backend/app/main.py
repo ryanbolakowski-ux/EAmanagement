@@ -46,6 +46,17 @@ from app.api.routes import auth, strategies, backtests, trades, dashboard, optim
 from app.scripts.daily_data_fetch import run_daily_loop
 from app.scripts.daily_digest import run_daily_digest_loop
 
+# Task supervisor: crash-restart wrapper for the lifespan background loops
+# (flag-gated via TASK_SUPERVISOR_ENABLED, default on). Guarded import: if it
+# fails for any reason the backend MUST still boot — fall back to the exact
+# old bare-create_task behavior.
+try:
+    from app.core.task_supervisor import supervise as _supervise
+except Exception as _sup_exc:
+    _lg.warning(f"[task-supervisor] import failed ({_sup_exc}); using bare create_task")
+    def _supervise(factory, name, **_kw):
+        return asyncio.create_task(factory())
+
 
 _KYC_STARTUP_SYNC_RAN = False
 
@@ -201,22 +212,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to resume signal watchers: {e}")
 
+    # Long-running lifespan loops are wrapped in the task supervisor: a crash
+    # is logged + alerted + restarted with backoff instead of silently killing
+    # the loop until the next deploy. Each _supervise(fn, name) is functionally
+    # the old asyncio.create_task(fn()) plus supervision (and is EXACTLY that
+    # when TASK_SUPERVISOR_ENABLED=0).
     from app.scripts.comp_expiry import run_comp_expiry_loop
-    comp_expiry_task = asyncio.create_task(run_comp_expiry_loop())
-    daily_fetch_task = asyncio.create_task(run_daily_loop())
+    comp_expiry_task = _supervise(run_comp_expiry_loop, "comp_expiry_loop")
+    daily_fetch_task = _supervise(run_daily_loop, "daily_data_fetch_loop")
     try:
         from app.engines.account_signals.runner import run_signal_resolution_loop as _rsrl
-        signal_resolution_task = asyncio.create_task(_rsrl())
+        signal_resolution_task = _supervise(_rsrl, "signal_resolution_loop")
         logger.info('[signals] scheduled resolution loop started (every 10m)')
     except Exception as _e:
         logger.warning(f'[signals] failed to start resolution loop: {_e}')
-    digest_task = asyncio.create_task(run_daily_digest_loop())
+    digest_task = _supervise(run_daily_digest_loop, "daily_digest_loop")
 
     # Pre-market universe scanner — daily 08:30 ET signal scan + 08:45 auto-execute
     premarket_task = None
     try:
         from app.engines.options.premarket_scheduler import start_premarket_scheduler
-        premarket_task = asyncio.create_task(start_premarket_scheduler())
+        premarket_task = _supervise(start_premarket_scheduler, "premarket_scheduler")
     except Exception as e:
         logger.warning(f"Failed to start premarket scheduler: {e}")
 
@@ -225,7 +241,7 @@ async def lifespan(app: FastAPI):
     health_monitor_task = None
     try:
         from app.engines.scanner_health import run_health_monitor_loop
-        health_monitor_task = asyncio.create_task(run_health_monitor_loop())
+        health_monitor_task = _supervise(run_health_monitor_loop, "scanner_health_monitor")
     except Exception as e:
         logger.warning(f"Failed to start scanner health monitor: {e}")
 
@@ -235,7 +251,7 @@ async def lifespan(app: FastAPI):
     intraday_refresh_task = None
     try:
         from app.scripts.intraday_data_refresh import run_intraday_refresh_loop
-        intraday_refresh_task = asyncio.create_task(run_intraday_refresh_loop())
+        intraday_refresh_task = _supervise(run_intraday_refresh_loop, "intraday_data_refresh")
     except Exception as e:
         logger.warning(f"Failed to start intraday data refresher: {e}")
 
@@ -245,7 +261,7 @@ async def lifespan(app: FastAPI):
     broker_balance_task = None
     try:
         from app.engines.live_trading.balance_sync import run_broker_balance_sync_loop
-        broker_balance_task = asyncio.create_task(run_broker_balance_sync_loop())
+        broker_balance_task = _supervise(run_broker_balance_sync_loop, "broker_balance_sync")
     except Exception as e:
         logger.warning(f"Failed to start broker balance sync loop: {e}")
 

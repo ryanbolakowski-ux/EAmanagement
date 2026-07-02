@@ -143,3 +143,22 @@ class DataHandler:
                 (self._resampled[tf].index >= start) & (self._resampled[tf].index <= end)
             ]
         self._filter_range = (start, end)
+
+    def unfiltered_copy(self) -> "DataHandler":
+        """Cheap copy for running a DIFFERENT date window off the same data.
+
+        filter_date_range() trims destructively (and only no-ops for an
+        IDENTICAL range), so one handler must never serve two different
+        windows: the second filter would intersect the already-trimmed
+        frames — e.g. walk-forward's OOS pass right after the train pass
+        would be left with at most the single split-boundary bar.
+
+        The copy shares the underlying DataFrames (they are never mutated
+        in place — filtering REBINDS references), so this is O(1): filtering
+        the copy swaps out ITS references only, leaving this handler intact.
+        """
+        clone = DataHandler(instrument=self.instrument, base_timeframe=self.base_timeframe)
+        clone._base_data = self._base_data
+        clone._resampled = dict(self._resampled)
+        clone._filter_range = getattr(self, "_filter_range", None)
+        return clone

@@ -602,7 +602,10 @@ class _KycManualReq(BaseModel):
 @router.post("/kyc/manual")
 async def admin_kyc_manual(
     data: _KycManualReq,
-    current_user: User = Depends(require_admin),
+    # Passcode-gated (not just require_admin): a manual KYC override is a
+    # compliance-critical WRITE — a compromised admin JWT alone must not be
+    # able to mark an identity verified without the safe-word session.
+    current_user: User = Depends(require_admin_with_passcode),
     db: AsyncSession = Depends(get_db),
 ):
     """Admin manual KYC override. Logged into kyc_events with the admin's email."""

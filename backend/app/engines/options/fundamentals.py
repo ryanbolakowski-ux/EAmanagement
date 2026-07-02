@@ -34,7 +34,12 @@ class Fundamentals:
 
 
 # {ticker: (fetched_at, Fundamentals)}
-_cache: dict[str, tuple[datetime, Fundamentals]] = {}
+# TTLCache (was a bare dict): the scanner sweeps a wide ticker universe, so
+# entries for tickers that drop out of the universe were never pruned (TTL
+# only checked on read). maxsize=2048 bounds it; the manual _TTL freshness
+# check below is unchanged (same get/set semantics).
+from app.core.ttl_cache import TTLCache
+_cache: TTLCache = TTLCache(maxsize=2048, ttl_seconds=3600)
 _TTL = timedelta(hours=1)
 
 

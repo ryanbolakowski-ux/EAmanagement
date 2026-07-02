@@ -29,8 +29,14 @@ router = APIRouter()
 
 # ── Chain cache for the preview endpoint ─────────────────────────────────
 # Map (underlying, side, dte_min, dte_max) → (fetched_at, contracts)
+# TTLCache (was a bare dict): the key here is USER-CONTROLLED — any
+# underlying × side × dte band an authenticated caller sends mints a new
+# entry, so a bare dict grows without bound. maxsize=256 caps it and
+# expired entries are pruned on set. The manual _PREVIEW_CHAIN_TTL
+# freshness check below is unchanged (same get/set semantics).
 from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-_preview_chain_cache: dict = {}
+from app.core.ttl_cache import TTLCache
+_preview_chain_cache: TTLCache = TTLCache(maxsize=256, ttl_seconds=3600)
 _PREVIEW_CHAIN_TTL = _td(hours=1)
 
 

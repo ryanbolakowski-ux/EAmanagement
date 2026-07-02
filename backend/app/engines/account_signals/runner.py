@@ -390,8 +390,15 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
 # ── yfinance throttle: 60s result cache + single in-process lock ─────────
 import threading as _threading_yf
 import time as _time_yf
+from app.core.ttl_cache import TTLCache as _TTLCache
 _YF_LOCK = _threading_yf.Lock()
-_YF_CACHE: dict[tuple[str, str, str], tuple[float, list]] = {}
+# TTLCache (was a bare dict): keys accumulate per (symbol, period, timeframe)
+# and were never pruned (TTL only checked on read). maxsize=512 bounds it;
+# the manual _YF_TTL freshness checks below are unchanged. NOTE: the error
+# path deliberately back-dates its timestamp by _YF_TTL/2 — that call-site
+# semantics is preserved (the site check governs freshness; TTLCache only
+# governs eviction).
+_YF_CACHE: _TTLCache = _TTLCache(maxsize=512, ttl_seconds=60.0)
 _YF_TTL = 60.0  # seconds; matches the watcher's poll cadence
 
 
@@ -438,7 +445,10 @@ def _yfinance_cached(fb_sym: str, period: str, timeframe: str, count: int):
 # read-only downstream (the watcher appends them to its own buffer and builds a
 # DataFrame; it never mutates the bar dicts), so handing out a shallow copy of
 # the cached list is safe. Effect: ~N fetches/min -> ~2/min per (inst, tf).
-_BAR_CACHE: dict = {}
+# TTLCache (was a bare dict): bounded at 512 (instrument, timeframe, count)
+# combos; expired entries are pruned on set instead of persisting forever.
+# The manual _BAR_CACHE_TTL freshness checks below are unchanged.
+_BAR_CACHE: _TTLCache = _TTLCache(maxsize=512, ttl_seconds=30.0)
 _BAR_CACHE_LOCK = _threading_yf.Lock()
 _BAR_CACHE_TTL = 30.0  # seconds; well under the 60s watcher poll cadence
 
@@ -649,7 +659,10 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     # SIGNAL-PRICE-ALIGN-V1 stale-entry guard: never email/route a signal whose
     # entry has drifted too far from the CURRENT real market price (source of
     # truth = candle_cache). Catches proxy-drift / stale setups before send.
-    _real_now = _latest_real_close(instrument)
+    # to_thread: _latest_real_close is a sync psycopg2 connect+query (up to 5s
+    # connect timeout) — run it off the event loop so a slow DB can't stall
+    # every other watcher/runner coroutine. Return value unchanged.
+    _real_now = await asyncio.to_thread(_latest_real_close, instrument)
     _max_entry_drift = float(_os.environ.get("SIGNAL_MAX_ENTRY_DRIFT_PCT", "0.5")) / 100.0
     _sym_map = YAHOO_SYMBOLS.get(instrument.upper(), (instrument or "") + "=F")
     if _real_now and _real_now > 0:
@@ -739,7 +752,13 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
                              {"q": queued_at, "id": sid})
             await db.commit()
         try:
-            result = send_signal_email(
+            # to_thread: send_signal_email is fully sync (sync redis gate,
+            # _fetch_bars_sync bar pulls, matplotlib chart render, httpx POST
+            # to Resend with retries) — several seconds of blocking that used
+            # to freeze the whole event loop per email. Same args, same return
+            # dict, same exceptions; it just runs on a worker thread now.
+            result = await asyncio.to_thread(
+                send_signal_email,
                 to=email, username=username, account_label=account_label,
                 strategy_name=strategy_name, instrument=instrument, direction=direction,
                 entry=entry, stop=stop, target=tp, bias=bias,

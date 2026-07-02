@@ -34,7 +34,11 @@ from app.engines.strategy_engine.base_strategy import StrategyConfig, SignalType
 _active: dict[tuple[str, str], asyncio.Task] = {}
 
 # Per-(broker_account_id, underlying, expiration) chain cache.
-_chain_cache: dict[tuple[str, str, str], tuple[datetime, list[OptionContract]]] = {}
+# TTLCache (was a bare dict): entries for stopped sessions / rotated dte
+# bands were never pruned (TTL only checked on read). maxsize=128 bounds it;
+# the manual _CHAIN_TTL freshness check below is unchanged.
+from app.core.ttl_cache import TTLCache
+_chain_cache: TTLCache = TTLCache(maxsize=128, ttl_seconds=6 * 3600)
 _CHAIN_TTL = timedelta(hours=6)
 
 

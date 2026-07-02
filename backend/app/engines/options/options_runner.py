@@ -43,7 +43,15 @@ _active: dict[tuple[str, str], asyncio.Task] = {}
 # Per-runner chain cache so we don't pound the Polygon contracts endpoint.
 # Refresh once every 6h — chains barely change intraday for the DTE window
 # we care about. Key: (underlying, side).
-_chain_cache: dict[tuple[str, str], tuple[datetime, list[OptionContract]]] = {}
+# TTLCache (was a bare dict): expired entries persisted forever because the
+# TTL was only checked on read. maxsize=128 bounds it; the manual _CHAIN_TTL
+# freshness check below is unchanged and still governs normal reads.
+# ttl_seconds is deliberately 48h, NOT _CHAIN_TTL: the fetch-failure path in
+# _get_chain serves a STALE (>6h) entry over nothing when Polygon is down,
+# and physical eviction at exactly 6h would erase that fallback the moment
+# it becomes useful (V1 dict behavior kept the stale entry readable).
+from app.core.ttl_cache import TTLCache
+_chain_cache: TTLCache = TTLCache(maxsize=128, ttl_seconds=48 * 3600)
 _CHAIN_TTL = timedelta(hours=6)
 
 # Cache the polygon-anchored "today" — refresh once an hour

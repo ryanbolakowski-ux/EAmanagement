@@ -25,6 +25,11 @@ class OptimizationRequest(BaseModel):
     end_date: datetime
     parameter_grid: dict
     optimization_metric: str = "profit_factor"
+    # Walk-forward holdout. 0.0 (default) = classic in-sample optimization,
+    # exact V1 behavior. >0 = hold out the LAST oos_fraction of the window:
+    # each combo trains on the head and is RANKED by optimization_metric
+    # computed on the held-out tail (in-sample ranking is what overfits).
+    oos_fraction: float = 0.0
 
 
 class OptimizationRunResponse(BaseModel):
@@ -238,13 +243,30 @@ async def start_optimization(
             detail=f"parameter_grid expands to {total} combinations (must be 1-2000).",
         )
 
+    # ── Walk-forward holdout validation ──
+    # Bounded so both segments stay meaningful: 0 disables (exact V1 path);
+    # >= 0.9 would leave almost nothing to train on.
+    oos_fraction = float(data.oos_fraction or 0.0)
+    if oos_fraction < 0.0 or oos_fraction >= 0.9:
+        raise HTTPException(
+            status_code=400,
+            detail="oos_fraction must be in [0.0, 0.9). 0 disables walk-forward.",
+        )
+    # Persist inside parameter_grid under a RESERVED key (no schema change;
+    # KNOWN_PARAMS above already rejects it as a user grid dimension). Only
+    # added when > 0 so an oos_fraction=0 run's stored grid — and therefore
+    # its cross-user optimization_cache key — is byte-identical to V1.
+    stored_grid = dict(data.parameter_grid)
+    if oos_fraction > 0.0:
+        stored_grid["_oos_fraction"] = oos_fraction
+
     run = OptimizationRun(
         strategy_id=strategy.id,
         user_id=current_user.id,
         instrument=data.instrument,
         start_date=data.start_date,
         end_date=data.end_date,
-        parameter_grid=data.parameter_grid,
+        parameter_grid=stored_grid,
         optimization_metric=data.optimization_metric,
         total_combinations=total,
         status=OptimizationStatus.QUEUED,
@@ -422,12 +444,24 @@ async def _run_optimization_task(run_id: str):
                 await db.commit()
                 return
 
-            # Build parameter combinations
-            param_keys = list(run.parameter_grid.keys())
-            param_values = list(run.parameter_grid.values())
+            # Build parameter combinations.
+            # "_oos_fraction" is a RESERVED control key (walk-forward holdout),
+            # not a grid dimension — pop it out before expanding combos. Absent
+            # (all pre-walk-forward runs) it defaults to 0.0 = exact V1 path.
+            _task_grid = dict(run.parameter_grid or {})
+            oos_fraction = float(_task_grid.pop("_oos_fraction", 0.0) or 0.0)
+            param_keys = list(_task_grid.keys())
+            param_values = list(_task_grid.values())
             combos = list(iterproduct(*param_values))
             run.total_combinations = len(combos)
             await db.commit()
+            if oos_fraction > 0.0:
+                from app.engines.optimization_engine.opt_worker import split_walkforward
+                logger.info(
+                    f"[OPT WALK-FORWARD] run={run.id} oos_fraction={oos_fraction} "
+                    f"train [{run.start_date} -> {split_walkforward(run.start_date, run.end_date, oos_fraction)}) "
+                    f"/ oos tail; combos rank by oos_{run.optimization_metric or 'profit_factor'}"
+                )
 
             all_results = [None] * len(combos)  # preserve index order
 
@@ -570,9 +604,12 @@ async def _run_optimization_task(run_id: str):
             _new_done = 0
             try:
                 _futs = [
+                    # oos_fraction rides along positionally (run_in_executor has
+                    # no kwargs); 0.0 = single full-window run, exact V1 parity.
                     _loop.run_in_executor(_pool, _ow.run_combo, _ridx,
                                           dict(zip(param_keys, combos[_ridx])),
-                                          _strat, run.start_date, run.end_date)
+                                          _strat, run.start_date, run.end_date,
+                                          oos_fraction)
                     for _ridx in _to_run
                 ]
                 for _fut in asyncio.as_completed(_futs):
