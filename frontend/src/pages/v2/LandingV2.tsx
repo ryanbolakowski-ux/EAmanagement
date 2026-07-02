@@ -419,11 +419,12 @@ export default function LandingV2() {
             (top scrolls left, bottom scrolls right), keeping the two slow
             accent glows. CSS-only; v2.css §19 freezes the crawl under
             prefers-reduced-motion. Ryan 2026-07-02: replaced the drifting
-            grid with the NYSE-style tape. */}
-        <TickerTape className="v2-lp-hero__tape--top" direction="left" speed={46} />
+            grid with the NYSE-style tape; now LIVE quotes via /api/v1/public/
+            tape with a slower, larger crawl (speed = loop seconds). */}
+        <TickerTape className="v2-lp-hero__tape--top" direction="left" speed={96} />
         <div className="v2-lp-hero__glow v2-lp-hero__glow--a" aria-hidden="true" />
         <div className="v2-lp-hero__glow v2-lp-hero__glow--b" aria-hidden="true" />
-        <TickerTape className="v2-lp-hero__tape--bottom" direction="right" speed={62} />
+        <TickerTape className="v2-lp-hero__tape--bottom" direction="right" speed={132} />
 
         <div className="v2-lp-hero__inner">
           <div className="v2-lp-chips">

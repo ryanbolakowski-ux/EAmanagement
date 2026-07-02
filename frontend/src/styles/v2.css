@@ -948,23 +948,31 @@ html:not(.dark) .v2-root .v2-lp-nav { background: rgba(242, 245, 249, 0.88); }
 /* ── 19. TickerTape — Wall-Street building LED crawl (LandingV2 hero) ────
    Two bands frame the hero: top scrolls left, bottom (--rev) scrolls right,
    evoking the NYSE ticker wrapping a building. LED look = near-black band,
-   glowing tabular monospace, semantic up/down. Loop trick: the row is
-   rendered twice in one flex track; translateX(-50%) == exactly one row. */
+   tabular monospace with a restrained glow (professional, not neon), thin
+   pipe separators. Loop trick: the row is rendered twice in one flex track;
+   translateX(-50%) == exactly one row. The edge-fade mask sits on the inner
+   __viewport (not the band) so the LIVE pip stays opaque at the left edge. */
 .v2-root .v2-ticker {
   position: relative;
   overflow: hidden;
-  background: #05070c;
-  border-top: 1px solid rgba(120, 140, 180, 0.10);
-  border-bottom: 1px solid rgba(120, 140, 180, 0.10);
-  padding: 9px 0;
-  /* LED glass: faint vertical sheen + edge fade so the crawl "emerges" */
-  -webkit-mask-image: linear-gradient(to right, transparent 0, black 4%, black 96%, transparent 100%);
-  mask-image: linear-gradient(to right, transparent 0, black 4%, black 96%, transparent 100%);
+  /* lavender-mist band (Ryan 2026-07-02): purple-tinted off-white; brand-matched.
+     Alternatives: pure white #ffffff, deeper purple #1e1533 (restore LED text). */
+  background: linear-gradient(to bottom, #f6f4fb 0, #efeaf8 100%);
+  border-top: 1px solid rgba(109, 79, 190, 0.18);
+  border-bottom: 1px solid rgba(109, 79, 190, 0.18);
+  padding: 15px 0;
 }
 .v2-root .v2-ticker::after {
   content: '';
-  position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(to bottom, rgba(255,255,255,0.045) 0, transparent 38%, transparent 62%, rgba(0,0,0,0.35) 100%);
+  position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.55) 0, transparent 34%, transparent 66%, rgba(88, 62, 150, 0.08) 100%);
+}
+.v2-root .v2-ticker__viewport {
+  overflow: hidden;
+  /* Crawl "emerges" from the edges; mask here (not on .v2-ticker) so the
+     LIVE pip is never faded by it. */
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 4%, black 96%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, black 4%, black 96%, transparent 100%);
 }
 .v2-root .v2-ticker__track {
   display: inline-flex;
@@ -977,26 +985,57 @@ html:not(.dark) .v2-root .v2-lp-nav { background: rgba(242, 245, 249, 0.88); }
 .v2-root .v2-ticker--rev .v2-ticker__track { animation-direction: reverse; }
 .v2-root .v2-ticker__row { display: inline-flex; align-items: baseline; }
 .v2-root .v2-ticker__item {
-  display: inline-flex; align-items: baseline; gap: 8px;
-  padding: 0 14px;
+  display: inline-flex; align-items: baseline; gap: 9px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
-  font-size: 12.5px;
+  font-size: 15.5px;
   letter-spacing: 0.04em;
 }
-.v2-root .v2-ticker__sym  { color: #d7deeb; font-weight: 700; }
-.v2-root .v2-ticker__price { color: #f3c86a; text-shadow: 0 0 7px rgba(243, 200, 106, 0.45); } /* amber LED, the classic tape color */
-.v2-root .v2-ticker__chg--up { color: var(--v2-up);  text-shadow: 0 0 7px rgba(52, 211, 153, 0.5); }
-.v2-root .v2-ticker__chg--dn { color: var(--v2-dn);  text-shadow: 0 0 7px rgba(248, 113, 113, 0.5); }
-.v2-root .v2-ticker__dot { color: rgba(160, 175, 205, 0.28); padding-left: 14px; }
+.v2-root .v2-ticker__sym  { color: #241d3d; font-weight: 800; font-size: 1.03em; }
+.v2-root .v2-ticker__price { color: #5b3fae; font-weight: 600; } /* brand indigo on the lavender band; no glow on light bg */
+.v2-root .v2-ticker__chg--up { color: #0e7a4e; }
+.v2-root .v2-ticker__chg--dn { color: #bb2f3d; }
+/* Thin pipe separator between entries — wider, calmer spacing than the old dots. */
+.v2-root .v2-ticker__sep {
+  width: 1px; height: 16px;
+  align-self: center;
+  margin: 0 22px;
+  background: rgba(109, 79, 190, 0.22);
+}
 @keyframes v2-ticker-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+/* LIVE pip — pinned at the band's left edge, above the crawl, only rendered
+   when real quotes actually arrived (TickerTape.tsx never fakes it). The
+   background fades band-color -> transparent so the crawl slides under it. */
+.v2-root .v2-ticker__live {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 3;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 0 34px 0 16px;
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.22em;
+  color: #0e7a4e;
+  background: linear-gradient(to right, #f4f1fa 0, #f4f1fa 58%, transparent 100%);
+}
+.v2-root .v2-ticker__live-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--v2-up);
+  box-shadow: 0 0 6px rgba(14, 203, 129, 0.7);
+  animation: v2-ticker-live-pulse 2s var(--v2-ease) infinite;
+}
+@keyframes v2-ticker-live-pulse {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.82); }
+}
 
 /* Hero placement: bands hug the hero's top and bottom edges. */
 .v2-root .v2-lp-hero__tape--top    { position: absolute; top: 0;    left: 0; right: 0; z-index: 1; }
 .v2-root .v2-lp-hero__tape--bottom { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1; }
 .v2-root .v2-lp-hero__inner { z-index: 2; }
 
-/* Reduced motion: freeze the crawl to a static row (still readable). */
+/* Reduced motion: freeze the crawl to a static row and stop the pip pulse
+   (the dot stays visible, just steady). */
 @media (prefers-reduced-motion: reduce) {
   .v2-root .v2-ticker__track { animation: none; }
+  .v2-root .v2-ticker__live-dot { animation: none; }
 }

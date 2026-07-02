@@ -388,6 +388,11 @@ app.include_router(account_signals.router, prefix="/api/v1/account-signals", tag
 app.include_router(account_signals.router, prefix="/api/v1/email-signals", tags=["account-signals"])
 app.include_router(scanner.router, prefix="/api/v1/scanner", tags=["scanner"])
 
+# Public landing-page tape: NO auth (the marketing page is unauthenticated).
+# Fixed server-side symbol list + 60s TTL cache; can never 500 by design.
+from app.api.routes import public_tape
+app.include_router(public_tape.router, prefix="/api/v1/public", tags=["public"])
+
 
 @app.get("/health", tags=["Health"])
 async def health_check():
