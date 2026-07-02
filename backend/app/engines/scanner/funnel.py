@@ -29,6 +29,10 @@ _LEVERAGED_ETFS = frozenset({
     "UCO","SCO","AGQ","ZSL","UGL","GLL","UVXY","VXX","SVXY","UVIX","SVIX","VIXY",
     "TMF","TMV","TSLL","TSLQ","TSLS","NVDL","NVDU","NVDS","NVD","CONL","COND","BITX",
     "BITI","ETHU","MSTU","MSTZ","MSTX","FNGU","FNGD","BULZ","WEBL","WEBS","HIBL","HIBS",
+    # 2026-07-02: single-name 2x ETFs that slipped the list — V1 picked METU (2x META)
+    # as its daily stock pick on 7/2; FBL was #4 the same day. These gap on the
+    # underlying, not an equity catalyst — same rationale as NVDL/TSLL above.
+    "METU","METD","FBL","FBS","AAPU","AAPD","AMZU","AMZD","MSFU","MSFD","GGLL","GGLS","NFLU","NFLD",
     "DPST","WANT","CWEB","KORU","INDL","MEXX","BRZU","EDC","EDZ","TYD","TYO","URTY","SRTY",
     "TWM","UWM","SAA","SDD","MVV","MZZ","QID","RXL","CURE","UYG","SKF","SRS","DRN",
 })
