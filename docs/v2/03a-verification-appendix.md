@@ -1,0 +1,13 @@
+# Verification Appendix — adversarial verdicts on top audit claims (2026-07-01)
+
+Seven independent verifiers attacked the highest-stakes audit claims against actual source. Findings enter the V2 record only as corrected below.
+
+| Claim | Verdict | Corrected finding |
+|---|---|---|
+| XSS via dangerouslySetInnerHTML | PARTIAL | Pattern real (Profile.tsx:443, AcknowledgmentModal.tsx:97; no sanitizer anywhere), but content is hard-coded developer-authored legal HTML (legal.py:36–113) with no DB/CMS/admin write path → NOT exploitable today. Defense-in-depth item, not an active vuln. |
+| Admin tier change lacks passcode | PARTIAL (headline wrong) | PUT /users/{id}/tier IS passcode-gated, as are delete/grant-comp/revoke-comp. REAL gap: **POST /kyc/manual (admin.py:602–605)** — a compromised admin JWT can override any user's KYC status without the safe-word. Minor: systems-check/test-email routes rely on inline is_admin only (low blast radius). |
+| Secrets/.env tracked in git | REFUTED | Only backend/.env.example (placeholders) is tracked; all real .env files are gitignored + untracked. The genuine issue remains the KNOWN git-HISTORY leak (TwelveData key) → history purge + rotation, a different fix. |
+| Live-trading/email have zero tests | PARTIAL (both audits wrong) | 15 test files exercise live_trading, 8 exercise email. True gaps: Alpaca + Tradovate broker adapters have ZERO direct tests; LiveTrader's actual order-placement path untested (only sizing/guards covered). |
+| AI Builder backend doesn't exist | CONFIRMED | No backend generation path at all. The 535-LOC frontend page runs client-side regex/keyword matching, compiles ≤2 rule_tree knobs (VWAP filter, TP mode) + BE toggle, hardcodes the rest (RR 2.5), and stores the user's prose as inert `description`. The in-code comment claiming "same logic on the server" is false. → V2 opportunity is a REAL compiler with honest unsupported-concept reporting. |
+| 6 unbounded in-process caches | CONFIRMED (severity split) | All 6 lack eviction (TTL checked on read only). Realistically growable: **_preview_chain_cache** (options.py:33 — authenticated-user-controlled keys, 250 contracts each = medium sev) and fundamentals _cache (~10k tickers, few MB = low). Other 4: config-bounded cardinality, stale-entry leak only. Corrected path: proxy_scale is engines/data_feeds/. |
+| Optimizer has no OOS validation | CONFIRMED (+path fix) | Pure itertools.product grid (cap 2000), trains AND ranks on the same window. Correction: the LIVE path is opt_worker.py via ProcessPoolExecutor (optimizer.py is off-path; its Celery docstring is wrong) — both are identically split-free. Walk-forward fix must land in opt_worker.py. |
