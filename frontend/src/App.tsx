@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { useAuthStore } from './stores/authStore'
 import Layout from './components/Layout/Layout'
 import Landing from './pages/Landing'
@@ -44,6 +44,37 @@ import Options from './pages/Options'
 import DevicePicker from './components/DevicePicker'
 import VersionBanner from './components/VersionBanner'
 import SuggestionForm from './components/SuggestionForm'
+import { Skeleton, ToastProvider } from './components/v2'
+
+// V2 redesign pages are lazy so their chunk (and only theirs) loads on the
+// /v2 routes — V1 users never download it. See pages/v2/ for the screens.
+const LandingV2 = lazy(() => import('./pages/v2/LandingV2'))
+const DashboardV2 = lazy(() => import('./pages/v2/DashboardV2'))
+
+function V2PageFallback() {
+  // Suspense fallback while a lazy V2 chunk downloads: a v2-root shell with
+  // skeleton blocks, so the route paints in the V2 design language instantly.
+  return (
+    <div className="v2-root v2-page">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-4">
+        <Skeleton width={220} height={28} />
+        <Skeleton variant="card" />
+        <Skeleton variant="table" />
+      </div>
+    </div>
+  )
+}
+
+function V2Route({ children }: { children: React.ReactNode }) {
+  // Shared wrapper for V2 routes only: lazy-chunk Suspense + the V2 toast
+  // system. Mounted per-route (not app-wide) so the V1 render tree keeps
+  // byte-for-byte identical semantics.
+  return (
+    <Suspense fallback={<V2PageFallback />}>
+      <ToastProvider>{children}</ToastProvider>
+    </Suspense>
+  )
+}
 
 function AuthenticatedOnly({ children }: { children: React.ReactNode }) {
   // Only render children if user has a JWT in localStorage. Pre-auth pages
@@ -144,6 +175,9 @@ export default function App() {
       <Route path="/not-available"  element={<NotAvailable />} />
       <Route path="/shared/:token" element={<SharedStrategy />} />
 
+      {/* V2 redesign — public landing (lazy chunk, V2Route wrapper above) */}
+      <Route path="/v2" element={<V2Route><LandingV2 /></V2Route>} />
+
       {/* Protected app routes */}
       <Route
         path="/app"
@@ -180,6 +214,9 @@ export default function App() {
         <Route path="kyc"               element={<Kyc />} />
         <Route path="profile"           element={<Profile />} />
         <Route path="settings/2fa"      element={<TwoFactorSetup />} />
+        {/* V2 redesign — dashboard. Child of /app so it inherits the exact
+            same ProtectedRoute + Layout guard as every other app screen. */}
+        <Route path="v2"                element={<V2Route><DashboardV2 /></V2Route>} />
       </Route>
 
       {/* Fallback */}

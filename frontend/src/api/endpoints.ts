@@ -138,6 +138,24 @@ export const paperTradingApi = {
     api.get(`/api/v1/paper-trading/trades/${tradeId}/chart`),
 }
 
+// Row shape of GET /api/v1/live-trading/sessions (see backend
+// live_trading.list_live_sessions — active + recently stopped, max 50).
+export type LiveSessionRow = {
+  id: string
+  strategy_id: string
+  strategy_name: string
+  broker_account_id: string | null
+  broker_account_name: string
+  broker: string
+  instrument: string
+  is_active: boolean
+  started_at: string | null
+  ended_at: string | null
+  total_trades: number
+  net_pnl: number
+  daily_loss_limit: number | null
+}
+
 export const liveTradingApi = {
   listAccounts: () => api.get<BrokerAccountLite[]>('/api/v1/live-trading/accounts'),
   addAccount: (data: { account_name: string; broker: string; is_demo: boolean; credentials: object }) =>
@@ -157,6 +175,10 @@ export const liveTradingApi = {
     api.get(`/api/v1/live-trading/accounts/${accountId}/detail`),
   startSession: (data: { strategy_id: string; broker_account_id: string; instrument: string }) =>
     api.post('/api/v1/live-trading/sessions', data),
+  // Typed wrapper for the existing GET /sessions route. LiveTrading.tsx was
+  // already calling this via an `as any` cast — the method just didn't exist
+  // here, so that call resolved to undefined at runtime. Now it's real.
+  listSessions: () => api.get<LiveSessionRow[]>('/api/v1/live-trading/sessions'),
   killSwitch: (sessionId: string) => api.post(`/api/v1/live-trading/sessions/${sessionId}/kill-switch`),
   pauseSession: (sessionId: string) => api.post(`/api/v1/live-trading/sessions/${sessionId}/pause`),
   resumeSession: (sessionId: string) => api.post(`/api/v1/live-trading/sessions/${sessionId}/resume`),
@@ -503,7 +525,41 @@ export const optionsPaperApi = {
 // ─────────────────────────────────────────────────────────────────────────────
 // Scanner — on-demand ticker analysis (structure levels + gate verdict)
 // ─────────────────────────────────────────────────────────────────────────────
+
+// One row of GET /api/v1/scanner/history — an email_signals_history pick.
+// outcome is null until the resolver walks daily candles past the pick
+// (win = target hit, loss = stop hit, expired = 5 trading days elapsed).
+export type ScannerPick = {
+  id: number | string
+  picked_at: string
+  ticker: string
+  asset_type: 'options' | 'futures' | 'stocks' | string
+  direction: string
+  entry: number | null
+  stop: number | null
+  target: number | null
+  gap_pct: number | null
+  rel_vol: number | null
+  today_vol: number | null
+  score: number | null
+  catalyst_reason: string | null
+  outcome: 'win' | 'loss' | 'expired' | null
+  outcome_pct: number | null
+  resolved_at: string | null
+}
+
+export type ScannerHistory = {
+  days: number
+  asset_type: string
+  count: number
+  picks: ScannerPick[]
+}
+
 export const scannerApi = {
   analyze: (ticker: string, direction: string = 'long') =>
     api.get('/api/v1/scanner/analyze', { params: { ticker, direction } }),
+  // Theta Scanner pick history (newest first, non-shadow only). Backend
+  // clamps days to 1..90. Drives the V2 dashboard "Today's Pick" card.
+  history: (days: number = 30, assetType: 'options' | 'futures' | 'stocks' | 'all' = 'all') =>
+    api.get<ScannerHistory>('/api/v1/scanner/history', { params: { days, asset_type: assetType } }),
 }
