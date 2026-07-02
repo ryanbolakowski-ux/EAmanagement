@@ -921,6 +921,17 @@ async def start_premarket_scheduler():
             except Exception as _she:
                 logger.warning(f"[shadow] check failed: {_she}")
 
+            # ── Scanner V2 daily SHADOW scan — persist-only re-rank of the
+            # same funnel candidates under the V2 scoring + fire gates
+            # (docs/v2/01-scanner-forensics.md). Own Redis latch
+            # (theta:shadow_v2:{date}) + try/except: fully isolated from both
+            # the live pick path and the V1 shadow above.
+            try:
+                from app.engines.scanner.v2.shadow import _check_and_run_v2_shadow_scan
+                await _check_and_run_v2_shadow_scan()
+            except Exception as _sv2e:
+                logger.warning(f"[shadow-v2] check failed: {_sv2e}")
+
             # ── Pending stock-entry timing gate (2026-06-05) ──
             # Iterates Redis-queued picks and decides per the ICT timing
             # gate whether to fire pre-mkt, MOO, or defer.
