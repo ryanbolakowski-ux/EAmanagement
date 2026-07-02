@@ -604,3 +604,73 @@ async def import_shared_strategy(
         asset_class=classify_asset_class(copy.instruments),
         created_at=copy.created_at.isoformat(),
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AI-BUILDER-V2 — the real prose -> knobs compiler endpoint.
+#
+# Replaces (server-side) the client-only regex "compiler" in
+# pages/AIStrategyBuilder.tsx. The heavy lifting lives in
+# app/engines/ai_builder/{schema,prompts,generator,validator}.py; this route
+# only gates (auth + feature flag), delegates, and returns a DRAFT payload
+# for human review. It must NEVER create the strategy row itself.
+# ═════════════════════════════════════════════════════════════════════════════
+
+class GenerateStrategyRequest(BaseModel):
+    prose: str
+    # Optional user-chosen name; overrides the model-generated one. Runs
+    # through NAME-MODERATION-V1 either way.
+    name: Optional[str] = None
+
+
+def _ai_builder_v2_enabled() -> bool:
+    """ENABLE_AI_BUILDER_V2 flag, read at REQUEST time (not import time) so
+    ops can flip it via env + restart without code changes, and tests don't
+    need module re-imports. Default OFF."""
+    import os as _os
+    return _os.environ.get("ENABLE_AI_BUILDER_V2", "false").strip().lower() in ("1", "true", "yes")
+
+
+@router.post("/generate-v2")
+async def generate_strategy_v2(
+    data: GenerateStrategyRequest,
+    current_user: User = Depends(require_paid_user),
+):
+    """Compile a plain-English strategy description into engine knobs.
+
+    Returns {draft, generated, rule_tree, strategy_payload}:
+      * generated        — the full GeneratedStrategy incl. explanation,
+                           confidence, unsupported_concepts and warnings
+                           (the honesty fields the UI must show verbatim);
+      * rule_tree        — compiled tree the engine actually consumes;
+      * strategy_payload — StrategyCreate-shaped body (status='draft') the
+                           client POSTs through the NORMAL create flow after
+                           the user reviews/edits.
+
+    Flag off (the default) -> 404, indistinguishable from a missing route.
+    No 2FA gate: this is read-only generation — persisting still goes
+    through POST / which requires require_paid_user_with_2fa.
+    """
+    if not _ai_builder_v2_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    # Lazy imports: the generator path touches the anthropic SDK — keep that
+    # cost (and any SDK import failure) off this module's import path.
+    from app.engines.ai_builder.generator import GenerationError, generate_strategy
+    from app.engines.ai_builder.validator import build_strategy_payload, compile_to_rule_tree
+
+    try:
+        gen = await generate_strategy(data.prose)
+    except GenerationError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 422), detail=str(e))
+
+    if data.name and data.name.strip():
+        gen.name = data.name.strip()[:200]
+    _reject_offensive_name(gen.name)  # NAME-MODERATION-V1 applies here too
+
+    return {
+        "draft": True,  # explicit: nothing was persisted by this call
+        "generated": gen.model_dump(),
+        "rule_tree": compile_to_rule_tree(gen),
+        "strategy_payload": build_strategy_payload(gen, data.prose),
+    }
