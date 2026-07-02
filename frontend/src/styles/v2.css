@@ -944,3 +944,59 @@ html:not(.dark) .v2-root .v2-lp-nav { background: rgba(242, 245, 249, 0.88); }
   .v2-root .v2-lp-nav__inner  { padding: 0 var(--v2-sp-2); }
   .v2-root .v2-lp-footer__row { flex-direction: column; align-items: flex-start; }
 }
+
+/* ── 19. TickerTape — Wall-Street building LED crawl (LandingV2 hero) ────
+   Two bands frame the hero: top scrolls left, bottom (--rev) scrolls right,
+   evoking the NYSE ticker wrapping a building. LED look = near-black band,
+   glowing tabular monospace, semantic up/down. Loop trick: the row is
+   rendered twice in one flex track; translateX(-50%) == exactly one row. */
+.v2-root .v2-ticker {
+  position: relative;
+  overflow: hidden;
+  background: #05070c;
+  border-top: 1px solid rgba(120, 140, 180, 0.10);
+  border-bottom: 1px solid rgba(120, 140, 180, 0.10);
+  padding: 9px 0;
+  /* LED glass: faint vertical sheen + edge fade so the crawl "emerges" */
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 4%, black 96%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, black 4%, black 96%, transparent 100%);
+}
+.v2-root .v2-ticker::after {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.045) 0, transparent 38%, transparent 62%, rgba(0,0,0,0.35) 100%);
+}
+.v2-root .v2-ticker__track {
+  display: inline-flex;
+  white-space: nowrap;
+  will-change: transform;
+  animation-name: v2-ticker-scroll;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.v2-root .v2-ticker--rev .v2-ticker__track { animation-direction: reverse; }
+.v2-root .v2-ticker__row { display: inline-flex; align-items: baseline; }
+.v2-root .v2-ticker__item {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  padding: 0 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+}
+.v2-root .v2-ticker__sym  { color: #d7deeb; font-weight: 700; }
+.v2-root .v2-ticker__price { color: #f3c86a; text-shadow: 0 0 7px rgba(243, 200, 106, 0.45); } /* amber LED, the classic tape color */
+.v2-root .v2-ticker__chg--up { color: var(--v2-up);  text-shadow: 0 0 7px rgba(52, 211, 153, 0.5); }
+.v2-root .v2-ticker__chg--dn { color: var(--v2-dn);  text-shadow: 0 0 7px rgba(248, 113, 113, 0.5); }
+.v2-root .v2-ticker__dot { color: rgba(160, 175, 205, 0.28); padding-left: 14px; }
+@keyframes v2-ticker-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+/* Hero placement: bands hug the hero's top and bottom edges. */
+.v2-root .v2-lp-hero__tape--top    { position: absolute; top: 0;    left: 0; right: 0; z-index: 1; }
+.v2-root .v2-lp-hero__tape--bottom { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1; }
+.v2-root .v2-lp-hero__inner { z-index: 2; }
+
+/* Reduced motion: freeze the crawl to a static row (still readable). */
+@media (prefers-reduced-motion: reduce) {
+  .v2-root .v2-ticker__track { animation: none; }
+}

@@ -31,3 +31,6 @@ export { default as SectionHeader } from './SectionHeader'
 export type { SectionHeaderProps } from './SectionHeader'
 
 export { sanitizeHtml } from './sanitizeHtml'
+
+export { default as TickerTape } from './TickerTape'
+export type { TickerTapeProps, TickerQuote } from './TickerTape'

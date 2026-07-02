@@ -6,7 +6,7 @@ import {
   TrendingUp, Zap,
 } from 'lucide-react'
 import ThetaLogo from '../../components/ThetaLogo'
-import { StatCard, LiveNumber } from '../../components/v2'
+import { StatCard, LiveNumber, TickerTape } from '../../components/v2'
 
 // ═════════════════════════════════════════════════════════════════════════
 // Published platform facts — every figure below already appears on the V1
@@ -415,12 +415,15 @@ export default function LandingV2() {
 
       {/* ── 1. HERO ─────────────────────────────────────────────────────── */}
       <header className="v2-lp-hero">
-        {/* Restrained animated backdrop: drifting hairline grid + two slow
-            accent glows. CSS-only; section 18 of v2.css freezes it under
-            prefers-reduced-motion. */}
-        <div className="v2-lp-hero__grid" aria-hidden="true" />
+        {/* Wall-Street building crawl: two LED ticker bands frame the hero
+            (top scrolls left, bottom scrolls right), keeping the two slow
+            accent glows. CSS-only; v2.css §19 freezes the crawl under
+            prefers-reduced-motion. Ryan 2026-07-02: replaced the drifting
+            grid with the NYSE-style tape. */}
+        <TickerTape className="v2-lp-hero__tape--top" direction="left" speed={46} />
         <div className="v2-lp-hero__glow v2-lp-hero__glow--a" aria-hidden="true" />
         <div className="v2-lp-hero__glow v2-lp-hero__glow--b" aria-hidden="true" />
+        <TickerTape className="v2-lp-hero__tape--bottom" direction="right" speed={62} />
 
         <div className="v2-lp-hero__inner">
           <div className="v2-lp-chips">
