@@ -435,11 +435,19 @@ async def run_from_db(args: argparse.Namespace) -> list[dict]:
 
     split = compute_oos_split(args.start_dt, args.end_dt, args.oos_fraction)
 
+    logger.info("[harness] connecting to db …")
     async with async_session_factory() as session:
+        # status column is VARCHAR in prod while the model declares a PG enum —
+        # the ORM comparison casts to ::strategystatus and fails (asyncpg f405).
+        # Match the codebase convention: compare as text (see routes/*.py).
+        from sqlalchemy import cast, String
+        # DB stores UPPERCASE (raw-SQL convention across the codebase: status = ACTIVE)
+        # while StrategyStatus.ACTIVE.value is lowercase active — compare the literal.
         result = await session.execute(
-            select(Strategy).where(Strategy.status == StrategyStatus.ACTIVE)
+            select(Strategy).where(cast(Strategy.status, String) == "ACTIVE")
         )
         strategies = result.scalars().all()
+        logger.info(f"[harness] loaded {len(strategies)} ACTIVE strategies from db")
 
     # One job per NAME (the book has per-user duplicates of the same
     # definition — the V1 audit reported one row per name too).
