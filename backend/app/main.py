@@ -265,6 +265,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to start broker balance sync loop: {e}")
 
+    # ── Real-time minute-bar ws feed (REALTIME-FEED-V1) ──
+    # REALTIME_FEED=polygon streams AM.* minute aggregates into the in-process
+    # LatestBarStore that the public tape, the futures signal proxy and the
+    # Theta-scanner confirmation prefer over their delayed REST paths.
+    # DEFAULT OFF: the current Polygon key has no ws entitlement yet — the
+    # feed handles "not authorized" by retrying every ~15 min with a clear
+    # log (no crash-loop), and every consumer degrades to today's behavior.
+    # Go-live is one env flip + restart: docs/v2/11-realtime-feed-runbook.md.
+    realtime_feed_task = None
+    try:
+        from app.engines.data_feeds.realtime_feed import create_feed_from_env
+        _rt_feed = create_feed_from_env()  # None unless REALTIME_FEED is set
+        if _rt_feed is not None:
+            realtime_feed_task = _supervise(_rt_feed.start, "realtime_feed")
+            logger.info("[realtime-feed] supervised ws feed task started")
+    except Exception as e:
+        logger.warning(f"Failed to start realtime feed: {e}")
+
     # ── KYC startup auto-sync (Stripe Identity webhook-loss safety net) ──
     # On every backend startup, pull the authoritative status from Stripe for
     # every user currently sitting at 'pending' with a Stripe session id.
@@ -292,6 +310,8 @@ async def lifespan(app: FastAPI):
             intraday_refresh_task.cancel()
         if broker_balance_task:
             broker_balance_task.cancel()
+        if realtime_feed_task:
+            realtime_feed_task.cancel()
         logger.info("Shutting down Theta Algos API...")
 
 
@@ -387,6 +407,12 @@ app.include_router(account_signals.router, prefix="/api/v1/account-signals", tag
 # under /api/v1/email-signals so either path resolves (no hidden 404s).
 app.include_router(account_signals.router, prefix="/api/v1/email-signals", tags=["account-signals"])
 app.include_router(scanner.router, prefix="/api/v1/scanner", tags=["scanner"])
+
+# V2 dashboard live updates over Server-Sent Events (ENABLE_SSE_DASHBOARD,
+# default on; flag off => the route 404s and the frontend falls back to
+# polling). See app/api/routes/stream.py for the SSE-vs-WebSocket rationale.
+from app.api.routes import stream as stream_routes
+app.include_router(stream_routes.router, prefix="/api/v1/stream", tags=["stream"])
 
 # Public landing-page tape: NO auth (the marketing page is unauthenticated).
 # Fixed server-side symbol list + 60s TTL cache; can never 500 by design.
