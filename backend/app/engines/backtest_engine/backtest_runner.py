@@ -121,6 +121,18 @@ class BacktestRunner:
         self.strategy = strategy
         self.data_handler = data_handler
         self.config = config
+        # FAST-BT-V1: arm the strategy's vectorized fast path (exact-parity
+        # numpy twins of the per-bar scanners + gate adapter; see
+        # tests/test_fast_backtest_parity.py). V2_FAST_BACKTEST=0 restores
+        # the original code paths exactly. Only the backtest/optimization
+        # engines construct a BacktestRunner — live/paper trading never do,
+        # so the live path always stays on the old (default) code.
+        import os as _os
+        if _os.environ.get("V2_FAST_BACKTEST", "1") != "0":
+            try:
+                self.strategy._fast_backtest = True
+            except Exception:
+                pass
         self._open_trade: Optional[SimulatedTrade] = None
         self._completed_trades: list[SimulatedTrade] = []
         self._current_date: Optional[datetime] = None
@@ -162,6 +174,14 @@ class BacktestRunner:
         # defer the .iloc[i] row materialization until we actually need it
         # (only when there's an open trade for SL/TP exit checks).
         _index = primary_bars.index
+        # FAST-BT-V1: exit checks only read the bar's high/low. Hoist the two
+        # column arrays once and hand _check_exits a plain dict with the SAME
+        # np.float64 values instead of materializing an .iloc row Series per
+        # open-trade bar. Old path (flag off) unchanged.
+        _fast = bool(getattr(self.strategy, "_fast_backtest", False))
+        if _fast:
+            _hi_arr = primary_bars["high"].to_numpy()
+            _lo_arr = primary_bars["low"].to_numpy()
         for i, timestamp in enumerate(_index):
             # Report progress every 50 bars
             if self._progress_callback and i % 50 == 0:
@@ -176,7 +196,7 @@ class BacktestRunner:
 
             # ── Manage open trade exits (check SL/TP on each bar) ─────────────
             if self._open_trade:
-                current_bar = primary_bars.iloc[i]
+                current_bar = {"high": _hi_arr[i], "low": _lo_arr[i]} if _fast else primary_bars.iloc[i]
                 self._check_exits(current_bar, timestamp, tick_size, tick_value)
 
             # ── Daily loss-limit lockout (Apex Eval $1k/day style) ────────────
@@ -321,7 +341,9 @@ class BacktestRunner:
         n_m = self._pick_contract_size(entry, stop, ts_m, tv_m, strategy_cap * 10)
         return n_m, micro, ts_m, tv_m
 
-    def _check_exits(self, bar: pd.Series, timestamp: pd.Timestamp, tick_size: float, tick_value: float):
+    def _check_exits(self, bar, timestamp: pd.Timestamp, tick_size: float, tick_value: float):
+        # `bar`: pd.Series row, or (fast path) a {"high","low"} dict with the
+        # same np.float64 values — only those two keys are read below.
         t = self._open_trade
         # Override with the open trade's actual instrument tick math —
         # critical when the trade was sized on a micro (MNQ/MES/etc) while

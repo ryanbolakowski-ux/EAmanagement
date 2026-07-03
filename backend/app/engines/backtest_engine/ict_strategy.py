@@ -35,6 +35,15 @@ class ICTStrategy(BaseStrategy):
         self._bar_counter = 0
         self._cooldown_bars = 1  # minimum bars between signals (restored)
         self._ict_extra: dict = {}  # persistent per-setup ledger (V2 daily cap)
+        # FAST-BT-V1: opt-in vectorized fast path. ONLY BacktestRunner sets
+        # this (env V2_FAST_BACKTEST != "0"); live/paper never construct a
+        # runner, so they always keep the original per-bar pandas code.
+        self._fast_backtest = False
+        self._bias_memo: dict = {}  # (tf, len, last_ts) -> bias (fast path only)
+        # (fast path only) per-timeframe candle-dict memo for the gate adapter.
+        # Keyed by tf NAME so an etf->ptf fallback can never mix frames; safe
+        # because each tf's resampled frame is immutable within a run.
+        self._gate_candle_memo: dict = {}
         # Authoritative futures flag: set ONCE here, independent of the
         # per-bar gate (which can throw). The session-block fallback relies
         # on this never silently flipping to False on a gate error.
@@ -64,15 +73,26 @@ class ICTStrategy(BaseStrategy):
             return None
         self._last_gate = None       # clear prior snapshot so _gate_meta stays honest this bar
         try:
-            from app.engines.strategy_engine.market_activity_gate import evaluate_activity_gate
+            # FAST-BT-V1: backtests use the float-identical fast twin of the
+            # gate entry point; live/paper (_fast_backtest False) keep the
+            # canonical module. Parity: tests/test_fast_backtest_parity.py.
             etf = self.config.execution_timeframe
             ptf = self.config.primary_timeframe
+            tf_used = etf
             df = bars.get(etf)
             if df is None or len(df) == 0:
                 df = bars.get(ptf)
+                tf_used = ptf
             if df is None or len(df) == 0:
                 return None
-            res = evaluate_activity_gate(self.instrument, df)
+            if self._fast_backtest:
+                from app.engines.backtest_engine.fast_gate import fast_evaluate_activity_gate
+                res = fast_evaluate_activity_gate(
+                    self.instrument, df,
+                    candle_memo=self._gate_candle_memo.setdefault(tf_used, {}))
+            else:
+                from app.engines.strategy_engine.market_activity_gate import evaluate_activity_gate
+                res = evaluate_activity_gate(self.instrument, df)
             self._last_gate = res    # refresh every bar (None on abstain -> honest metadata)
             if res is not None:
                 _prev = self._last_gate_go
@@ -101,6 +121,49 @@ class ICTStrategy(BaseStrategy):
             "go": bool(g.go), "score": round(float(g.score), 3),
             "bias": g.bias, "in_window": bool(g.in_window), "reason": g.reason,
         }
+
+    # ── FAST-BT-V1 dispatch helpers ──────────────────────────────────────
+    # Route the heavy scanners to their exact-parity numpy twins when the
+    # backtest fast path is armed. With _fast_backtest False (live/paper,
+    # or V2_FAST_BACKTEST=0) these call the ORIGINAL indicator functions.
+
+    def _detect_fvgs(self, *args, **kwargs):
+        if self._fast_backtest:
+            from app.engines.backtest_engine.fast_indicators import detect_fvgs_fast
+            return detect_fvgs_fast(*args, **kwargs)
+        return detect_fvgs(*args, **kwargs)
+
+    def _detect_ifvgs(self, *args, **kwargs):
+        if self._fast_backtest:
+            from app.engines.backtest_engine.fast_indicators import detect_ifvgs_fast
+            return detect_ifvgs_fast(*args, **kwargs)
+        return detect_ifvgs(*args, **kwargs)
+
+    def _detect_liquidity_sweeps(self, *args, **kwargs):
+        if self._fast_backtest:
+            from app.engines.backtest_engine.fast_indicators import detect_liquidity_sweeps_fast
+            return detect_liquidity_sweeps_fast(*args, **kwargs)
+        return detect_liquidity_sweeps(*args, **kwargs)
+
+    def _ema_bias_cached(self, tf, df):
+        """Memoized _ema_crossover_bias (fast path only). Within one backtest
+        the resampled frames are immutable, so a slice identified by
+        (tf, len, last timestamp) always has identical content — the EMA bias
+        for it can never change. Higher-TF slices repeat for many consecutive
+        primary bars (a 4H frame advances once per 16 15m bars), and
+        _determine_bias asks for the same TF up to twice per bar."""
+        if not self._fast_backtest:
+            return self._ema_crossover_bias(df)
+        try:
+            key = (tf, len(df), df.index[-1])
+        except Exception:
+            return self._ema_crossover_bias(df)
+        memo = self._bias_memo
+        if key in memo:
+            return memo[key]
+        val = self._ema_crossover_bias(df)
+        memo[key] = val
+        return val
 
     def on_bar(self, bars):
         # === FUTURES MARKET-ACTIVITY GATE (Theta path) — source of truth ===
@@ -170,7 +233,12 @@ class ICTStrategy(BaseStrategy):
             logger.debug(f"[ICT/{self.instrument}] reject: outside session window")
             return None
 
-        current_price = float(primary.iloc[-1]["close"])
+        # FAST-BT-V1: scalar column access instead of materializing the whole
+        # row as a Series — same np.float64, same float().
+        if self._fast_backtest:
+            current_price = float(primary["close"].iloc[-1])
+        else:
+            current_price = float(primary.iloc[-1]["close"])
 
         # === STEP 1: Determine bias ===
         bias = self._determine_bias(bars, ptf, htfs)
@@ -218,18 +286,18 @@ class ICTStrategy(BaseStrategy):
         # HTF FVGs (strongest signal)
         htf_data = self._get_htf_data(bars, htfs)
         if htf_data is not None and len(htf_data) >= 10:
-            htf_fvgs = detect_fvgs(htf_data.tail(50), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
+            htf_fvgs = self._detect_fvgs(htf_data.tail(50), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
             all_fvgs.extend(htf_fvgs)
 
         # Primary TF FVGs
-        mtf_fvgs = detect_fvgs(primary.tail(40), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
+        mtf_fvgs = self._detect_fvgs(primary.tail(40), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
         all_fvgs.extend(mtf_fvgs)
 
         # Execution TF FVGs and IFVGs (finest resolution)
         exec_data = bars.get(etf, primary)
         if len(exec_data) >= 10:
-            ltf_fvgs = detect_fvgs(exec_data.tail(30), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
-            ltf_ifvgs = detect_ifvgs(exec_data.tail(40), instrument=self.instrument, min_size_ticks=0.5)
+            ltf_fvgs = self._detect_fvgs(exec_data.tail(30), instrument=self.instrument, min_size_ticks=(self.config.fvg_min_size_ticks or 4))
+            ltf_ifvgs = self._detect_ifvgs(exec_data.tail(40), instrument=self.instrument, min_size_ticks=0.5)
             all_fvgs.extend(ltf_fvgs)
             all_fvgs.extend(ltf_ifvgs)
 
@@ -409,21 +477,21 @@ class ICTStrategy(BaseStrategy):
         htf_bias = None
         for tf in tf_priority:
             if tf in bars and not bars[tf].empty and len(bars[tf]) >= 15:
-                htf_bias = self._ema_crossover_bias(bars[tf])
+                htf_bias = self._ema_bias_cached(tf, bars[tf])
                 if htf_bias is not None:
                     break
 
         if htf_bias is None:
             for tf in htfs:
                 if tf in bars and not bars[tf].empty and len(bars[tf]) >= 15:
-                    htf_bias = self._ema_crossover_bias(bars[tf])
+                    htf_bias = self._ema_bias_cached(tf, bars[tf])
                     if htf_bias is not None:
                         break
 
         # Primary TF bias for confirmation
         primary_bias = None
         if ptf in bars and len(bars[ptf]) >= 15:
-            primary_bias = self._ema_crossover_bias(bars[ptf])
+            primary_bias = self._ema_bias_cached(ptf, bars[ptf])
 
         # HTF bias drives direction. Primary disagreement is treated as
         # "we\'re in a pullback into the higher-TF bias direction" — exactly
@@ -435,9 +503,9 @@ class ICTStrategy(BaseStrategy):
         # TIGHTENING: require 1H + 4H agreement when both are available.
         bias_1h = None; bias_4h = None
         if "1H" in bars and len(bars["1H"]) >= 21:
-            bias_1h = self._ema_crossover_bias(bars["1H"])
+            bias_1h = self._ema_bias_cached("1H", bars["1H"])
         if "4H" in bars and len(bars["4H"]) >= 21:
-            bias_4h = self._ema_crossover_bias(bars["4H"])
+            bias_4h = self._ema_bias_cached("4H", bars["4H"])
         if bias_1h is not None and bias_4h is not None:
             if bias_1h != bias_4h:
                 logger.debug(f"[ICT/{self.instrument}] reject: HTF disagreement 1H={bias_1h} 4H={bias_4h}")
@@ -476,9 +544,18 @@ class ICTStrategy(BaseStrategy):
             hour_utc = ts.hour if hasattr(ts, "hour") else ts.to_pydatetime().hour
             in_quiet = (7 <= hour_utc < 12) or (hour_utc >= 22 or hour_utc < 4)
             if not in_quiet: return False
-            last5 = df.tail(5)
-            bullish_disp = sum(1 for _, r in last5.iterrows()
-                if r["close"] > r["open"] and (r["close"] - r["open"]) >= (r["high"] - r["low"]) * 0.55)
+            if self._fast_backtest:
+                # FAST-BT-V1: same comparisons on the same np.float64 values,
+                # via arrays instead of one iterrows() Series per row.
+                t5 = df.iloc[-min(5, len(df)):]
+                _o = t5["open"].to_numpy(); _c = t5["close"].to_numpy()
+                _h = t5["high"].to_numpy(); _l = t5["low"].to_numpy()
+                bullish_disp = sum(1 for i in range(len(t5))
+                    if _c[i] > _o[i] and (_c[i] - _o[i]) >= (_h[i] - _l[i]) * 0.55)
+            else:
+                last5 = df.tail(5)
+                bullish_disp = sum(1 for _, r in last5.iterrows()
+                    if r["close"] > r["open"] and (r["close"] - r["open"]) >= (r["high"] - r["low"]) * 0.55)
             if bullish_disp == 0:
                 logger.debug(f"[ICT/{self.instrument}] reject: quiet-session long, no recent bullish displacement")
                 return True
@@ -489,8 +566,18 @@ class ICTStrategy(BaseStrategy):
         try:
             if len(df) < 60: return True
             import pandas as _pd
-            hi, lo, cl = df["high"], df["low"], df["close"]
-            tr = (hi - lo).combine(abs(hi - cl.shift()), max).combine(abs(lo - cl.shift()), max)
+            if self._fast_backtest:
+                # FAST-BT-V1: TR via np.fmax == Python max elementwise here
+                # (NaN only ever appears in the SECOND operand, first shifted
+                # row, where both pick the first operand); the rolling means
+                # then run over float-identical inputs.
+                import numpy as _np
+                _h = df["high"].to_numpy(); _l = df["low"].to_numpy(); _c = df["close"].to_numpy()
+                _pc = _np.empty_like(_c); _pc[0] = _np.nan; _pc[1:] = _c[:-1]
+                tr = _pd.Series(_np.fmax(_h - _l, _np.fmax(_np.abs(_h - _pc), _np.abs(_l - _pc))))
+            else:
+                hi, lo, cl = df["high"], df["low"], df["close"]
+                tr = (hi - lo).combine(abs(hi - cl.shift()), max).combine(abs(lo - cl.shift()), max)
             atr14 = tr.rolling(14).mean().iloc[-1]; atr50 = tr.rolling(50).mean().iloc[-1]
             if atr50 == 0 or atr50 != atr50: return True
             ratio = atr14 / atr50
@@ -525,6 +612,25 @@ class ICTStrategy(BaseStrategy):
         recent = df.iloc[-20:]
         avg_range = float((recent["high"] - recent["low"]).mean())
         if avg_range <= 0:
+            return False
+
+        if self._fast_backtest:
+            # FAST-BT-V1: identical loop over numpy arrays (negative indices
+            # address the same rows .iloc[i] did; same np.float64 math).
+            _o = df["open"].to_numpy(); _c = df["close"].to_numpy()
+            _h = df["high"].to_numpy(); _l = df["low"].to_numpy()
+            for i in range(-lookback, 0):
+                body = abs(_c[i] - _o[i])
+                total = _h[i] - _l[i]
+                if total == 0:
+                    continue
+                body_ratio = body / total
+                range_ratio = total / avg_range
+                if body_ratio >= 0.45 and range_ratio >= 1.0:
+                    if bias == "bullish" and _c[i] > _o[i]:
+                        return True
+                    if bias == "bearish" and _c[i] < _o[i]:
+                        return True
             return False
 
         for i in range(-lookback, 0):
@@ -571,7 +677,7 @@ class ICTStrategy(BaseStrategy):
             return True  # not enough data — don't block
         try:
             # Wider 30-bar window catches sweeps that primed earlier setups too
-            sweeps = detect_liquidity_sweeps(df.tail(30), lookback=3, instrument=self.instrument)
+            sweeps = self._detect_liquidity_sweeps(df.tail(30), lookback=3, instrument=self.instrument)
         except Exception:
             return True
         if not sweeps:
@@ -701,6 +807,21 @@ class ICTStrategy(BaseStrategy):
 
         recent = df.tail(lookback + 1)
 
+        # FAST-BT-V1: hoist the loop-invariant reads. recent min/max and the
+        # prior close are identical for every candidate — the old path
+        # recomputed them per FVG through a fresh pandas reduction / row
+        # materialization. Values are float-identical (same reductions on the
+        # same data). If the prior-close read raises, the old path `continue`d
+        # every candidate and fell through to (None, None) — mirrored here.
+        _recent_low_min = _recent_high_max = _prior_close = None
+        if self._fast_backtest:
+            _recent_low_min = float(recent["low"].min())
+            _recent_high_max = float(recent["high"].max())
+            try:
+                _prior_close = float(df["close"].iloc[-2])
+            except Exception:
+                return None, None
+
         # Sort FVGs by recency — newest first (largest bar_index)
         ordered = sorted(fvgs, key=lambda f: getattr(f, "bar_index", 0), reverse=True)
 
@@ -719,16 +840,19 @@ class ICTStrategy(BaseStrategy):
                     continue
                 if last_close <= last_open:
                     continue  # not a bullish close
-                sweep_low = float(recent["low"].min())
+                sweep_low = _recent_low_min if _recent_low_min is not None else float(recent["low"].min())
                 if sweep_low > fvg.low:
                     continue  # no violation — nothing was inverted
                 # Make sure the inversion is FRESH — the bar before this one
                 # must still have been below the FVG.high (otherwise we
                 # already inverted bars ago)
-                try:
-                    prior_close = float(df.iloc[-2]["close"])
-                except Exception:
-                    continue
+                if _prior_close is not None:
+                    prior_close = _prior_close
+                else:
+                    try:
+                        prior_close = float(df.iloc[-2]["close"])
+                    except Exception:
+                        continue
                 if prior_close >= fvg.high:
                     continue
                 return fvg, sweep_low
@@ -738,13 +862,16 @@ class ICTStrategy(BaseStrategy):
                     continue
                 if last_close >= last_open:
                     continue  # not a bearish close
-                sweep_high = float(recent["high"].max())
+                sweep_high = _recent_high_max if _recent_high_max is not None else float(recent["high"].max())
                 if sweep_high < fvg.high:
                     continue
-                try:
-                    prior_close = float(df.iloc[-2]["close"])
-                except Exception:
-                    continue
+                if _prior_close is not None:
+                    prior_close = _prior_close
+                else:
+                    try:
+                        prior_close = float(df.iloc[-2]["close"])
+                    except Exception:
+                        continue
                 if prior_close <= fvg.low:
                     continue
                 return fvg, sweep_high
@@ -927,7 +1054,7 @@ class ICTStrategy(BaseStrategy):
         htf_fvg_target = None
         if htf_df is not None and len(htf_df) >= 10:
             try:
-                htf_fvgs = detect_fvgs(htf_df.tail(60), instrument=self.instrument, min_size_ticks=2)
+                htf_fvgs = self._detect_fvgs(htf_df.tail(60), instrument=self.instrument, min_size_ticks=2)
             except Exception:
                 htf_fvgs = []
             for fvg in htf_fvgs:

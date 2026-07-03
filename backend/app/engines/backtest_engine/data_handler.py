@@ -104,6 +104,17 @@ class DataHandler:
 
     def get_bars_up_to(self, timestamp: pd.Timestamp, timeframes: list[str], lookback: int = 200) -> dict[str, pd.DataFrame]:
         """Return a slice of bars up to (and including) `timestamp` for each TF."""
+        # FAST-BT-V1 (env V2_FAST_BACKTEST != "0"): reuse the previous slice
+        # object when a TF's (start, idx) hasn't advanced — higher TFs repeat
+        # the identical window for many consecutive primary bars (a 4H frame
+        # advances once per 16 15m bars). The frames are never mutated by
+        # consumers, and an identical (start, idx) slice of the same immutable
+        # resampled frame has identical content, so this cannot change results.
+        import os
+        fast = os.environ.get("V2_FAST_BACKTEST", "1") != "0"
+        memo = getattr(self, "_slice_memo", None)
+        if fast and memo is None:
+            memo = self._slice_memo = {}
         result = {}
         for tf in timeframes:
             if tf not in self._resampled:
@@ -112,7 +123,16 @@ class DataHandler:
             # Binary search instead of full boolean scan — O(log n) vs O(n)
             idx = df.index.searchsorted(timestamp, side="right")
             start = max(0, idx - lookback)
-            result[tf] = df.iloc[start:idx]
+            if fast:
+                hit = memo.get(tf)
+                if hit is not None and hit[0] == start and hit[1] == idx and hit[2] is df:
+                    result[tf] = hit[3]
+                    continue
+                sliced = df.iloc[start:idx]
+                memo[tf] = (start, idx, df, sliced)
+                result[tf] = sliced
+            else:
+                result[tf] = df.iloc[start:idx]
         return result
 
     def get_timeframe_bars(self, timeframe: str) -> pd.DataFrame:
