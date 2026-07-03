@@ -1,7 +1,11 @@
 # Strategy V2 — execution-assumption comparison (V1 vs V2)
+
 _Generated 2026-07-03 03:39 UTC · window 2026-04-01 → 2026-06-13 · V1 slippage 1 tick(s)/side vs V2 slippage 2 tick(s)/side · OOS fraction 0.3 (OOS starts 2026-05-22 02:24) · data: live candle cache / Polygon futures._
+
 Both legs run identical strategy logic on identical bars — the delta columns isolate the cost of the V2 execution assumptions. Deltas are V2 − V1; blank delta = one side non-finite (e.g. PF=inf on a no-loss segment).
+
 | Strategy | Inst | Segment | Trades V1 | Trades V2 | ΔTr | WR% V1 | WR% V2 | ΔWR | PF V1 | PF V2 | ΔPF | DD% V1 | DD% V2 | ΔDD | Net$ V1 | Net$ V2 | ΔNet$ | avgR V1 | avgR V2 | ΔavgR |
+|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | FVG Inversion Tap | ES | full | 134 | 134 | 0 | 88.1 | 39.6 | -48.5 | 5.50 | 3.69 | -1.82 | 1.4 | 2.2 | 0.9 | 105198.50 | 85228.50 | -19970.00 | 0.75 | 5.63 | 4.89 |
 | FVG Inversion Tap | ES | in_sample | 91 | 91 | 0 | 89.0 | 40.7 | -48.4 | 6.28 | 4.08 | -2.20 | 1.6 | 2.2 | 0.6 | 77141.50 | 62391.00 | -14750.50 | 0.77 | 5.95 | 5.18 |
 | FVG Inversion Tap | ES | out_of_sample | 43 | 43 | 0 | 86.0 | 37.2 | -48.8 | 4.21 | 2.99 | -1.22 | 2.2 | 2.7 | 0.4 | 28057.00 | 22837.50 | -5219.50 | 0.68 | 5.05 | 4.37 |
