@@ -54,3 +54,8 @@ Product truth to name against: one high-conviction stock pick, delivered before 
 Why: (1) real meaning that matches the product exactly — a bellwether IS the thing that signals where the rest will go; (2) the bell pun lands on the opening bell without being cute; (3) institutional register (Bloomberg would name something this) yet not a TradingView clone; (4) ownable as a sub-brand with room for tiers (Bellwether Pro, Bellwether Futures).
 Runners-up: First Light (best emotional fit for a pre-9:45 morning pick; softer authority), Peregrine (best if the brand leans speed/precision), Meridian (safest premium-neutral).
 Check trademark/domain before committing (bellwether is used by some funds; as a feature sub-brand inside Theta Algos the risk is low, but verify).
+
+---
+
+## DECISION (2026-07-03): Ryan named it **Saro**.
+Lockup: "Saro — by Theta Algos". Bellwether et al. archived as candidates. Rollout notes: (1) any email subject rebrand MUST keep passing the EMAIL_KILL_SWITCH whitelist — either keep "Theta Scanner" in subjects alongside Saro or add "Saro" to the whitelist in services/email.py at deploy time; (2) frontend V2 labels updated on this branch; (3) V1 surfaces untouched until approval.

@@ -74,7 +74,7 @@ const PRICING_TIERS = [
   },
   {
     id: 'tier_3',
-    name: 'Options Scanner',
+    name: 'Saro — Daily Stock Scanner',
     tierLabel: 'Tier 3',
     price: '$99',
     originalPrice: undefined as string | undefined,

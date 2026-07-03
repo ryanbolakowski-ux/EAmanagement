@@ -20,12 +20,18 @@
  * each refetchInterval so remounts inside the window serve cache instead
  * of stampeding the API, while the interval still guarantees freshness.
  *
+ * Live updates: when the SSE stream (hooks/useEventStream.ts →
+ * GET /api/v1/stream/dashboard) is connected, its positions/pnl/signals
+ * events are written into the react-query cache and the three matching
+ * refetchIntervals pause; on disconnect polling resumes automatically.
+ *
  * Styling: v2.css tokens/classes for ALL visual treatment; Tailwind is
  * used for layout-only utilities (grid/flex/gap/padding) to match how the
  * rest of the codebase composes pages. Namespaced under .v2-root so V1
  * screens are untouched.
  */
-import { useQuery } from '@tanstack/react-query'
+import { useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity, Briefcase, Compass, Crosshair, LayoutGrid,
 } from 'lucide-react'
@@ -38,6 +44,13 @@ import {
   EmptyState, ErrorBoundary, LiveNumber, SectionHeader, Skeleton, Sparkline, StatCard,
 } from '../../components/v2'
 import { fmtEntryTime, fmtHold } from '../../components/TradeMetrics'
+import { useEventStream } from '../../hooks/useEventStream'
+
+/** Named SSE events the dashboard stream emits — see backend
+ *  app/api/routes/stream.py. Each payload is byte-compatible with the REST
+ *  endpoint the matching query polls, so it can be written straight into
+ *  the react-query cache. */
+const STREAM_EVENTS = ['positions', 'pnl', 'signals'] as const
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Local payload types — these endpoints return untyped axios responses in
@@ -293,7 +306,7 @@ function MarketContextCard({ biases, isLoading, isError }: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Today's Pick — latest Theta Scanner pick (last 24h) with outcome status
+// 3. Saro — Today's Pick — latest Theta Scanner pick (last 24h) with outcome status
 // ─────────────────────────────────────────────────────────────────────────────
 
 const OUTCOME_BADGE: Record<string, { label: string; cls: string }> = {
@@ -665,9 +678,38 @@ function ActivityFeed({ trades, isLoading, isError }: {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function DashboardV2() {
+  const queryClient = useQueryClient()
+
+  // ── Live stream (SSE) ──────────────────────────────────────────────────
+  // While the stream is connected its named events are written straight
+  // into the react-query cache (setQueryData below) and the three matching
+  // refetchIntervals are PAUSED — the queries remain the single source of
+  // truth for every panel; SSE is just a faster writer. The moment the
+  // stream drops, `streamLive` flips false and polling resumes on its own.
+  const { connected: streamLive, payloads: streamPayloads } =
+    useEventStream('/api/v1/stream/dashboard', STREAM_EVENTS)
+
+  useEffect(() => {
+    if (streamPayloads.positions !== undefined) {
+      queryClient.setQueryData(['v2-open-positions'], streamPayloads.positions as OpenPosition[])
+    }
+  }, [streamPayloads.positions, queryClient])
+  useEffect(() => {
+    if (streamPayloads.pnl !== undefined) {
+      queryClient.setQueryData(['v2-portfolio-summary'], streamPayloads.pnl as PortfolioSummary)
+    }
+  }, [streamPayloads.pnl, queryClient])
+  useEffect(() => {
+    // Same shape as scannerApi.history(1, 'all') → { picks: [...] , ... }
+    if (streamPayloads.signals !== undefined) {
+      queryClient.setQueryData(['v2-scanner-pick'], streamPayloads.signals)
+    }
+  }, [streamPayloads.signals, queryClient])
+
   // Poll rhythm: fast (10s) for open positions, medium (30s) for sessions /
   // trades, slow (60s) for money aggregates, glacial (5m) for bias + scanner.
   // Every staleTime sits below its refetchInterval (coherent cache window).
+  // The three stream-fed queries poll ONLY while the stream is down.
   const summaryQ = useQuery({
     queryKey: ['v2-dashboard-summary'],
     queryFn: () => dashboardApi.summary().then(r => r.data),
@@ -677,7 +719,7 @@ export default function DashboardV2() {
   const portfolioQ = useQuery({
     queryKey: ['v2-portfolio-summary'],
     queryFn: () => liveTradingApi.portfolioSummary().then(r => r.data as PortfolioSummary),
-    refetchInterval: 60_000,
+    refetchInterval: streamLive ? false : 60_000, // stream 'pnl' events feed this while live
     staleTime: 30_000,
     retry: false, // 403s for non-KYC users — same treatment as V1 Dashboard
   })
@@ -690,7 +732,7 @@ export default function DashboardV2() {
   const pickQ = useQuery({
     queryKey: ['v2-scanner-pick'],
     queryFn: () => scannerApi.history(1, 'all').then(r => r.data),
-    refetchInterval: 5 * 60_000,
+    refetchInterval: streamLive ? false : 5 * 60_000, // stream 'signals' events feed this while live
     staleTime: 2 * 60_000,
     retry: false,
   })
@@ -716,7 +758,7 @@ export default function DashboardV2() {
   const openPositionsQ = useQuery({
     queryKey: ['v2-open-positions'],
     queryFn: () => tradesApi.openPositions().then(r => r.data as OpenPosition[]),
-    refetchInterval: 10_000,
+    refetchInterval: streamLive ? false : 10_000, // stream 'positions' events feed this while live
     staleTime: 5_000,
   })
   const tradesQ = useQuery({
@@ -739,6 +781,17 @@ export default function DashboardV2() {
             <h1 className="v2-type-title">Dashboard</h1>
             <p className="v2-type-caption">Portfolio, market context and strategy health at a glance</p>
           </div>
+          {/* Honest like the ticker pip: only rendered while the SSE stream
+              is actually connected (polling is paused underneath it). */}
+          {streamLive && (
+            <span
+              className="v2-type-micro inline-flex items-center gap-1.5 whitespace-nowrap pb-0.5"
+              title="Live updates streaming — background polling paused"
+            >
+              <span className="v2-ticker__live-dot" />
+              LIVE
+            </span>
+          )}
         </div>
 
         {/* 1. Stat strip */}
