@@ -62,6 +62,21 @@ _last_good: dict | None = None
 _last_good_at: float = 0.0  # time.monotonic() of the last successful fetch
 _STALE_MAX_S = 15 * 60.0
 
+# REALTIME-FEED-V1: previous close per DISPLAY symbol, refreshed by every
+# successful _fetch_quotes(). The realtime overlay needs it to recompute
+# change_pct against a live last price (the cached quote only carries the
+# formatted price string). With the flag off this map is written, never read.
+_prev_close: dict[str, float] = {}
+
+# Display symbols the realtime store can serve DIRECTLY (stocks/ETFs on the
+# Polygon stocks ws cluster — yfinance ticker == display symbol). Futures
+# rows (ES/NQ/YM/RTY) and commodities (CL/GC) are deliberately NOT overlaid:
+# the store could only offer a scaled ETF proxy for them, and
+# SIGNAL-PRICE-ALIGN-V1 taught us never to display a proxy-scaled price as a
+# real futures price without a real anchor to validate it against. Their
+# yfinance quote (delayed but REAL) stays.
+_RT_STOCK_SYMBOLS = tuple(disp for yf_sym, disp in _TAPE_SYMBOLS if yf_sym == disp)
+
 
 def _fmt_price(price: float) -> str:
     """Comma-grouped, 2dp — '30,528.75'. Matches the frontend's
@@ -101,6 +116,7 @@ def _fetch_quotes() -> list[dict]:
                 or prev_close <= 0 or last_close <= 0
             ):
                 continue
+            _prev_close[display] = prev_close  # anchor for the realtime overlay
             quotes.append({
                 "symbol": display,
                 "price": _fmt_price(last_close),
@@ -112,6 +128,65 @@ def _fetch_quotes() -> list[dict]:
     return quotes
 
 
+def _overlay_realtime_sync(payload: dict) -> dict:
+    """REALTIME-FEED-V1 (blocking half, runs in asyncio.to_thread): return a
+    NEW payload with stock/ETF quotes replaced by seconds-fresh prices from
+    the in-process realtime store. The cached payload is NEVER mutated (it is
+    shared via _cache/_last_good). Quotes the store can't serve fresh
+    (futures rows, unsubscribed symbols, stale store) pass through untouched.
+    """
+    from app.engines.data_feeds.realtime_feed import get_fresh_price, request_symbols
+
+    # Ask the feed to carry the tape's stock symbols. Idempotent set-add —
+    # the first request after boot subscribes them, every later call no-ops.
+    request_symbols(_RT_STOCK_SYMBOLS)
+
+    quotes: list[dict] = []
+    overlaid = 0
+    for q in payload.get("quotes", []):
+        try:
+            sym = q.get("symbol")
+            prev = _prev_close.get(sym)
+            px = get_fresh_price(sym) if sym in _RT_STOCK_SYMBOLS else None
+            if px and px > 0 and prev and prev > 0:
+                quotes.append({
+                    "symbol": sym,
+                    "price": _fmt_price(px),
+                    "change_pct": round((px - prev) / prev * 100.0, 2),
+                })
+                overlaid += 1
+            else:
+                quotes.append(q)
+        except Exception:  # one bad overlay never kills the tape
+            quotes.append(q)
+    if not overlaid:
+        return payload
+    # At least one quote is genuinely live now — badge accordingly.
+    return {
+        **payload,
+        "quotes": quotes,
+        "live": True,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _with_realtime_overlay(payload: dict) -> dict:
+    """Flag gate for the realtime overlay. REALTIME_FEED off (the default)
+    returns the payload UNCHANGED — same object, zero extra work — so the
+    route is byte-identical to pre-feed behavior. Never raises."""
+    try:
+        from app.engines.data_feeds.realtime_feed import realtime_enabled
+        if not realtime_enabled():
+            return payload
+        # to_thread: get_fresh_price is lock-cheap, but request_symbols +
+        # formatting run per-quote and this is a public route — keep the
+        # event loop untouched like the yfinance fetch path does.
+        return await asyncio.to_thread(_overlay_realtime_sync, payload)
+    except Exception as exc:
+        logger.warning(f"[public-tape] realtime overlay failed: {exc}")
+        return payload
+
+
 @router.get("/tape")
 async def public_tape():
     """Real quote strip for the public landing hero. Never raises, never 500s
@@ -121,7 +196,7 @@ async def public_tape():
     try:
         cached = _cache.get(_CACHE_KEY)
         if cached is not None:
-            return cached
+            return await _with_realtime_overlay(cached)
 
         # Single-flight: only ONE request per cold-cache window runs the
         # multi-second yfinance download; concurrent callers queue on the
@@ -129,7 +204,7 @@ async def public_tape():
         async with _fetch_lock:
             cached = _cache.get(_CACHE_KEY)  # re-check: filled while we waited?
             if cached is not None:
-                return cached
+                return await _with_realtime_overlay(cached)
 
             try:
                 quotes = await asyncio.to_thread(_fetch_quotes)
@@ -146,16 +221,18 @@ async def public_tape():
                 _cache[_CACHE_KEY] = payload
                 _last_good = payload
                 _last_good_at = time.monotonic()
-                return payload
+                return await _with_realtime_overlay(payload)
 
             # Failure (or every symbol NaN'd out): serve stale-if-any, else a
             # clean dead-tape response. Always HTTP 200 — decorative endpoint.
+            # (The realtime overlay still applies: with the ws feed live, a
+            # Yahoo outage no longer forces stale stock prices on the tape.)
             if _last_good is not None:
                 if time.monotonic() - _last_good_at <= _STALE_MAX_S:
-                    return _last_good
+                    return await _with_realtime_overlay(_last_good)
                 # Too old to honestly badge as live: same real quotes, but
                 # live=False so the frontend drops the LIVE pip.
-                return {**_last_good, "live": False}
+                return await _with_realtime_overlay({**_last_good, "live": False})
             return {
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "live": False,

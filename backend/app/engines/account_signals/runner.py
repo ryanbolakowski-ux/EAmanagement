@@ -245,6 +245,95 @@ def _fetch_futures_via_alpaca(instrument: str, timeframe: str, count: int = 50):
 
 
 
+def _fetch_futures_via_store(instrument: str, timeframe: str, count: int = 50):
+    """Return scaled futures bars sourced from the in-process REALTIME ws
+    feed store (REALTIME-FEED-V1) — the zero-REST, seconds-fresh upgrade over
+    both proxy paths once the vendor key is ws-entitled.
+
+    Same shape/contract as the Alpaca/Polygon helpers: proxy ETF bars scaled
+    to the futures price level with the dynamic get_proxy_scale(), resampled
+    to the requested timeframe. Returns [] (caller falls through to
+    Alpaca/Polygon/yfinance) whenever:
+      * REALTIME_FEED is off (the default — get_fresh_bars() short-circuits,
+        so flag-off behavior is byte-identical to today),
+      * the store has nothing / is stale for the proxy ETF (>120s old), or
+      * the store can't serve the FULL `count` bars yet (feed warm-up, or a
+        long timeframe exceeding the 500-minute store window) — a short
+        series would starve the strategy, so we stay conservative.
+    The caller's SIGNAL-PRICE-ALIGN-V1 drift guard (_proxy_ok) still
+    validates whatever we return against the real candle_cache close."""
+    import pandas as _pd
+    from datetime import datetime as _dt, timezone as _tz
+    from app.engines.data_feeds.proxy_scale import get_proxy_scale
+    from app.engines.data_feeds.realtime_feed import get_fresh_bars, request_symbols
+
+    inst = instrument.upper()
+    etf = _FUTURES_PROXY_ETF.get(inst)
+    if not etf:
+        return []  # not a proxied futures instrument
+
+    # [] unless the flag is on AND the newest stored bar is <=120s old.
+    bars = get_fresh_bars(etf)
+    if not bars:
+        # Not streaming this proxy yet (only QQQ/SPY are subscribed at boot —
+        # IWM/DIA land here on the first RTY/YM poll). Idempotent set-add so
+        # the NEXT poll can serve from the store; no-op when the flag is off.
+        request_symbols([etf])
+        return []
+
+    # Scale is keyed on the full-size root (micros borrow the parent's ratio).
+    scale_root = _MICRO_PARENT.get(inst, inst)
+    try:
+        scale = float(get_proxy_scale(scale_root))
+    except Exception as e:
+        logger.warning(f"[Signals] futures {inst}: proxy scale lookup failed ({e}); skipping realtime-store path")
+        return []
+    if not scale or scale <= 0:
+        return []
+
+    tf_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}.get(timeframe, 1)
+    try:
+        df = _pd.DataFrame(bars)
+        if df.empty or "t" not in df.columns:
+            return []
+        df["timestamp"] = _pd.to_datetime(df["t"], unit="ms", utc=True)
+        df = df.rename(columns={"o": "open", "h": "high", "l": "low",
+                                "c": "close", "v": "volume"})
+        df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]]
+    except Exception as e:
+        logger.warning(f"[Signals] futures {inst} via realtime store {etf}: bad bar shape ({e}); falling back")
+        return []
+    # Scale ETF price -> futures price level (volume left as the ETF's).
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].astype(float) * scale
+    df["volume"] = df["volume"].astype(float)
+
+    # Resample to the requested timeframe the same way the proxy paths do.
+    if timeframe != "1m":
+        df = df.resample(f"{tf_minutes}min").agg(
+            {"open": "first", "high": "max", "low": "min",
+             "close": "last", "volume": "sum"}
+        ).dropna()
+    df = df.tail(count)
+    # Not enough live history yet — return [] rather than a short series so
+    # the Alpaca/Polygon paths (which can serve the full window) take over.
+    if df.empty or len(df) < count:
+        return []
+
+    latest_ts = df.index[-1].to_pydatetime()
+    age_sec = (_dt.now(_tz.utc) - latest_ts).total_seconds()
+    logger.info(
+        f"[Signals] futures {inst} source=realtime-store proxy={etf} scale={scale:.2f} "
+        f"latest_bar={latest_ts.isoformat()} age={age_sec:.0f}s"
+    )
+    return [{
+        "timestamp": ts.to_pydatetime(),
+        "open": float(r2["open"]), "high": float(r2["high"]),
+        "low": float(r2["low"]), "close": float(r2["close"]),
+        "volume": int(r2["volume"]),
+    } for ts, r2 in df.iterrows()]
+
+
 def _latest_real_close(sym: str):
     """SIGNAL-PRICE-ALIGN-V1: latest REAL futures close from candle_cache (the
     source of truth that the chart + resolver use). Used to validate proxy
@@ -278,9 +367,11 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     import psycopg2, os, pandas as _pd
     sym = instrument.upper()
     # ── Futures real-time fast-path (scaled ETF proxy) ──
-    # Source priority: (1) Alpaca IEX real-time (free tier, penny-accurate for
-    # SPY/QQQ/IWM/DIA — the cheapest fix for ~15-min-late futures emails),
-    # (2) Polygon proxy (existing fallback), (3) yfinance (final fallback below).
+    # Source priority: (0) in-process realtime ws store (REALTIME-FEED-V1,
+    # flag-gated, seconds-fresh, zero REST calls), (1) Alpaca IEX real-time
+    # (free tier, penny-accurate for SPY/QQQ/IWM/DIA — the cheapest fix for
+    # ~15-min-late futures emails), (2) Polygon proxy (existing fallback),
+    # (3) yfinance (final fallback below).
     if sym in _FUTURES_PROXY_ETF:
         # SIGNAL-PRICE-ALIGN-V1: validate any proxy's price LEVEL against the
         # real futures close (candle_cache = source of truth) and DISCARD the
@@ -301,6 +392,16 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
                     f"— using real candle_cache for correct price levels")
                 return False
             return True
+        # (0) Realtime ws store — flag-gated (REALTIME_FEED, default off, so
+        # this is a no-op returning [] today). Its own 120s staleness gate
+        # lives in get_fresh_bars(); the drift guard above still applies.
+        try:
+            store_bars = _fetch_futures_via_store(instrument, timeframe, count)
+        except Exception as e:
+            logger.warning(f"[Signals] futures {sym}: realtime-store path crashed ({type(e).__name__}: {e}); falling back")
+            store_bars = None
+        if _proxy_ok(store_bars):
+            return store_bars
         # (1) Alpaca IEX — preferred when keys are configured. Real-time, so no
         # freshness-discard guard is applied to its bars (handled in the helper).
         try:

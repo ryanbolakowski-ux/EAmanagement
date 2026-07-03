@@ -132,6 +132,34 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
         logger.info(f"[ThetaScanner] {ticker}: 1-min bar fetch errored ({type(e).__name__}: {e}) — skipping bar filters")
         bars_1m = None
 
+    # REALTIME-FEED-V1: merge seconds-fresh ws minute bars from the in-process
+    # store over the (15-min-delayed) REST aggs. At 09:35 the delayed REST
+    # often has NOTHING for the open yet — the store makes the 09:30-09:35
+    # candles readable the moment they close, so confirmation happens at 09:35
+    # instead of ~09:50 (and a live store alone rescues the "no Polygon
+    # intraday bars" watch-only downgrade below). Flag-gated: with
+    # REALTIME_FEED off (the default) get_fresh_bars() returns [] and bars_1m
+    # stays byte-identical to today's REST-only value.
+    try:
+        from app.engines.data_feeds.realtime_feed import get_fresh_bars, request_symbols
+        live_bars = get_fresh_bars(ticker)
+        if live_bars:
+            # Store bars share the REST-aggs dict shape ('t','o','h','l','c',
+            # 'v','vw'), so the merge is a dedupe-by-minute: live wins on the
+            # same start-ms (its bar is at least as complete as the REST one).
+            _by_t = {int(b.get("t") or 0): b for b in (bars_1m or [])}
+            for _b in live_bars:
+                _by_t[int(_b.get("t") or 0)] = _b
+            _by_t.pop(0, None)  # drop anything with an unusable timestamp
+            bars_1m = [_by_t[k] for k in sorted(_by_t)]
+            logger.info(f"[ThetaScanner] {ticker}: merged {len(live_bars)} realtime store bars into intraday set")
+        else:
+            # Not streaming this ticker yet — subscribe now so the NEXT scan
+            # tick reads it live. No-op when the flag is off.
+            request_symbols([ticker])
+    except Exception as _rt_exc:
+        logger.info(f"[ThetaScanner] {ticker}: realtime store merge skipped ({type(_rt_exc).__name__}: {_rt_exc})")
+
     if not bars_1m:
         # No intraday data pre-market for this ticker — degrade gracefully.
         # THETA-UNCONFIRMED-WATCH-V1: no intraday data -> we CANNOT confirm
