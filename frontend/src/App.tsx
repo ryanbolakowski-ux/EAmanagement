@@ -1,55 +1,73 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { lazy, Suspense, useEffect } from 'react'
+import { Loader2 } from 'lucide-react'
 import { useAuthStore } from './stores/authStore'
 import Layout from './components/Layout/Layout'
-import Landing from './pages/Landing'
+// NotAvailable stays eager: it is the 451 redirect target and must render
+// even when chunk fetches fail (e.g. geo-blocked CDN), so it can never be lazy.
 import NotAvailable from './pages/NotAvailable'
-import Kyc from './pages/Kyc'
-import Profile from './pages/Profile'
-import Pricing from './pages/Pricing'
-import SignalReview from './pages/SignalReview'
-import Dashboard from './pages/Dashboard'
-import StrategyBuilder from './pages/StrategyBuilder'
-import BiasDetail from './pages/BiasDetail'
-import Backtests from './pages/Backtests'
-import Optimization from './pages/Optimization'
-import PaperTrading from './pages/PaperTrading'
-import PaperSessionDetail from './pages/PaperSessionDetail'
-import LiveTrading from './pages/LiveTrading'
-import LiveTradingV2 from './pages/LiveTradingV2'
-import Privacy from './pages/legal/Privacy'
-import Terms from './pages/legal/Terms'
-import Disclosures from './pages/legal/Disclosures'
-import Cookies from './pages/legal/Cookies'
-import Help from './pages/Help'
-import OnboardingWizard from './pages/OnboardingWizard'
-import LiveAccountDetail from './pages/LiveAccountDetail'
-import Login from './pages/Auth/Login'
-import Register from './pages/Auth/Register'
-import ForgotPassword from './pages/Auth/ForgotPassword'
-import ResetPassword from './pages/Auth/ResetPassword'
-import Admin from './pages/Admin'
-import HowToTrade from './pages/HowToTrade'
-import PropFirms from './pages/PropFirms'
-import SharedStrategy from './pages/SharedStrategy'
-import AIStrategyBuilder from './pages/AIStrategyBuilder'
-import AccountSignals from './pages/AccountSignals'
-import TwoFactorSetup from './pages/TwoFactorSetup'
 import TwoFactorRequiredModal from './components/TwoFactorRequiredModal'
-import OptionsSessions from './pages/OptionsSessions'
-import OptionsSessionDetail from './pages/OptionsSessionDetail'
-import PendingTrades from './pages/PendingTrades'
-import PendingTradeConfirm from './pages/PendingTradeConfirm'
-import Options from './pages/Options'
 import DevicePicker from './components/DevicePicker'
 import VersionBanner from './components/VersionBanner'
 import SuggestionForm from './components/SuggestionForm'
 import { Skeleton, ToastProvider } from './components/v2'
 
+// V1 pages are code-split: each route downloads only its own chunk instead of
+// every visitor paying for the whole app in one bundle. Every page file uses
+// a default export, so plain lazy(() => import(...)) works throughout.
+const Landing = lazy(() => import('./pages/Landing'))
+const Kyc = lazy(() => import('./pages/Kyc'))
+const Profile = lazy(() => import('./pages/Profile'))
+const Pricing = lazy(() => import('./pages/Pricing'))
+const SignalReview = lazy(() => import('./pages/SignalReview'))
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const StrategyBuilder = lazy(() => import('./pages/StrategyBuilder'))
+const BiasDetail = lazy(() => import('./pages/BiasDetail'))
+const Backtests = lazy(() => import('./pages/Backtests'))
+const Optimization = lazy(() => import('./pages/Optimization'))
+const PaperTrading = lazy(() => import('./pages/PaperTrading'))
+const PaperSessionDetail = lazy(() => import('./pages/PaperSessionDetail'))
+const LiveTrading = lazy(() => import('./pages/LiveTrading'))
+const LiveTradingV2 = lazy(() => import('./pages/LiveTradingV2'))
+const Privacy = lazy(() => import('./pages/legal/Privacy'))
+const Terms = lazy(() => import('./pages/legal/Terms'))
+const Disclosures = lazy(() => import('./pages/legal/Disclosures'))
+const Cookies = lazy(() => import('./pages/legal/Cookies'))
+const Help = lazy(() => import('./pages/Help'))
+const OnboardingWizard = lazy(() => import('./pages/OnboardingWizard'))
+const LiveAccountDetail = lazy(() => import('./pages/LiveAccountDetail'))
+const Login = lazy(() => import('./pages/Auth/Login'))
+const Register = lazy(() => import('./pages/Auth/Register'))
+const ForgotPassword = lazy(() => import('./pages/Auth/ForgotPassword'))
+const ResetPassword = lazy(() => import('./pages/Auth/ResetPassword'))
+const Admin = lazy(() => import('./pages/Admin'))
+const HowToTrade = lazy(() => import('./pages/HowToTrade'))
+const PropFirms = lazy(() => import('./pages/PropFirms'))
+const SharedStrategy = lazy(() => import('./pages/SharedStrategy'))
+const AIStrategyBuilder = lazy(() => import('./pages/AIStrategyBuilder'))
+const AccountSignals = lazy(() => import('./pages/AccountSignals'))
+const TwoFactorSetup = lazy(() => import('./pages/TwoFactorSetup'))
+const OptionsSessions = lazy(() => import('./pages/OptionsSessions'))
+const OptionsSessionDetail = lazy(() => import('./pages/OptionsSessionDetail'))
+const PendingTrades = lazy(() => import('./pages/PendingTrades'))
+const PendingTradeConfirm = lazy(() => import('./pages/PendingTradeConfirm'))
+const Options = lazy(() => import('./pages/Options'))
+
 // V2 redesign pages are lazy so their chunk (and only theirs) loads on the
 // /v2 routes — V1 users never download it. See pages/v2/ for the screens.
 const LandingV2 = lazy(() => import('./pages/v2/LandingV2'))
 const DashboardV2 = lazy(() => import('./pages/v2/DashboardV2'))
+
+function PageLoadFallback() {
+  // Shared Suspense fallback while a lazy V1 page chunk downloads: the same
+  // centered-Loader2 pattern the pages themselves use (see Kyc.tsx), so the
+  // brief flash stays in the V1 look — deliberately not a v2 component.
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <Loader2 className="animate-spin text-slate-400" />
+    </div>
+  )
+}
 
 function V2PageFallback() {
   // Suspense fallback while a lazy V2 chunk downloads: a v2-root shell with
@@ -157,6 +175,10 @@ export default function App() {
     <AuthenticatedOnly>
       <SuggestionForm />
     </AuthenticatedOnly>
+    {/* One shared Suspense boundary for every lazy V1 page chunk. V2 routes
+        keep their own nested boundary (V2Route above), so they still fall
+        back to the V2 skeleton shell rather than this spinner. */}
+    <Suspense fallback={<PageLoadFallback />}>
     <Routes>
       {/* Public routes */}
       <Route path="/"         element={<Landing />} />
@@ -222,6 +244,7 @@ export default function App() {
       {/* Fallback */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </Suspense>
     </>
   )
 }
