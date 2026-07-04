@@ -154,6 +154,13 @@ async def _preload_from_cache(instrument, timeframes, trader):
 async def _run_paper_loop(session_id: str, strategy_id: str, user_id: str, instrument: str):
     """Main loop: fetch bars, feed to strategy, save trades."""
     try:
+        # NULL-STRATEGY GUARD (2026-07-04): legacy sessions exist with a NULL
+        # strategy link, arriving here as the string None and crashing the
+        # asyncpg UUID codec at the daily refresh (first seen midnight 7/4).
+        # Skip cleanly instead of tracebacking every midnight.
+        if not strategy_id or strategy_id in ("None", "null"):
+            logger.warning(f"[PaperRunner] Session {session_id} has no strategy link — loop not started")
+            return
         async with async_session_factory() as db:
             result = await db.execute(select(Strategy).where(Strategy.id == strategy_id))
             strategy_model = result.scalar_one_or_none()
