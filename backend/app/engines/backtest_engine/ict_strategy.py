@@ -71,6 +71,18 @@ class ICTStrategy(BaseStrategy):
         (the tf the strategy triggers on), falling back to the primary tf."""
         if not self._is_futures_inst:
             return None
+        # V2-FRONTIER-GATE-TOGGLE (2026-07-03): per-strategy opt-out. The
+        # win-rate frontier measured several configs with the gate ABSTAINING
+        # (None -> session-window fallback, the documented fail-open path).
+        # rule_tree.disable_activity_gate=true reproduces exactly that
+        # semantic so seeded "<name> V2" drafts match what was measured.
+        # Default (absent/false) = gate runs, byte-identical to before.
+        try:
+            _rt = getattr(self.config, "rule_tree", None) or {}
+            if isinstance(_rt, dict) and _rt.get("disable_activity_gate"):
+                return None
+        except Exception:
+            pass
         self._last_gate = None       # clear prior snapshot so _gate_meta stays honest this bar
         try:
             # FAST-BT-V1: backtests use the float-identical fast twin of the

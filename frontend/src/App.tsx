@@ -110,7 +110,8 @@ function AdminAwareIndex() {
   // Admins always land on /app/admin instead of the trader Dashboard.
   const user = useAuthStore((s) => s.user)
   if ((user as any)?.is_admin) return <Navigate to="/app/admin" replace />
-  return <Dashboard />
+  // V2 dashboard is the default trader experience; V1 stays at /app/classic.
+  return <V2Route><DashboardV2 /></V2Route>
 }
 
 const _TITLES: Record<string, string> = {
@@ -181,7 +182,9 @@ export default function App() {
     <Suspense fallback={<PageLoadFallback />}>
     <Routes>
       {/* Public routes */}
-      <Route path="/"         element={<Landing />} />
+      <Route path="/"         element={<V2Route><LandingV2 /></V2Route>} />
+      {/* V1 landing kept during the V2 transition (Ryan 2026-07-03: "make everything v2") */}
+      <Route path="/classic"  element={<Landing />} />
       <Route path="/pricing"  element={<Pricing />} />
       <Route path="/login"           element={<Login />} />
       <Route path="/register"        element={<Register />} />
@@ -210,6 +213,7 @@ export default function App() {
         }
       >
         <Route index                element={<AdminAwareIndex />} />
+        <Route path="classic"       element={<Dashboard />} />
         <Route path="bias"          element={<BiasDetail />} />
         <Route path="strategies"    element={<StrategyBuilder />} />
         <Route path="how-to-trade"  element={<HowToTrade />} />

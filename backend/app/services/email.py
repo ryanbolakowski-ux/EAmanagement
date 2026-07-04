@@ -174,7 +174,7 @@ def _send_tracked_impl(to: str, subject: str, html: str, inline_png: bytes | Non
                                    "verification", "Comp ", "tier change", "Daily digest",
                                    "Daily summary", "[Admin]", "URGENT"]
         is_transactional = any(k in s for k in transactional_keywords)
-        is_theta = "Theta Scanner" in s
+        is_theta = ("Theta Scanner" in s) or ("Saro" in s)  # Saro = 2026-07 scanner rebrand (Ryan)
         if not is_transactional and not is_theta:
             # WARN (not info) so this is visible in default log scrapes —
             # admins repeatedly missed the legacy-pattern drops with info-level.
