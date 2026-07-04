@@ -832,6 +832,25 @@ async def _run_auto_execute_pass():
 
 # ── Main scheduler ──────────────────────────────────────────────────────────
 
+async def _fast_theta_loop():
+    """CADENCE-FIX-2026-06-30: dedicated tight-cadence loop for the time-critical
+    morning Theta pick, decoupled from the heavy per-user _run_scan_cycle + shadow
+    scan that stretch the main scheduler loop to ~90 min. The pick fn self-debounces
+    (5 min) + once/day Redis latch, so a 60s poll is safe and cheap (returns fast
+    when outside the 6:00-9:50 ET window)."""
+    import asyncio as _aio
+    logger.info("[ThetaScanner-fast] dedicated pick loop started")
+    while True:
+        try:
+            await _check_and_run_theta_scanner()
+        except _aio.CancelledError:
+            logger.info("[ThetaScanner-fast] loop cancelled")
+            return
+        except Exception as _e:
+            logger.warning(f"[ThetaScanner-fast] check failed: {_e}")
+        await _aio.sleep(60)
+
+
 async def start_premarket_scheduler():
     """Long-running task — covers premarket (08:30) + intraday (every 5 min
     from 04:00 to 20:00 ET) + news blackouts."""
@@ -853,6 +872,11 @@ async def start_premarket_scheduler():
     last_news_refresh = datetime.now(timezone.utc)
     last_edgar_refresh = datetime.now(timezone.utc)
     premarket_fired_today: set = set()
+
+    # CADENCE-FIX-2026-06-30: run the morning pick on its own fast task so it is
+    # NOT gated behind the ~90-min shadow scan + per-user _run_scan_cycle below.
+    # (The in-loop _check_and_run_theta_scanner call is kept as an idempotent backstop.)
+    asyncio.create_task(_fast_theta_loop())
 
     while True:
         try:
@@ -1149,24 +1173,17 @@ async def _send_no_pick_emails(date_str: str, reason: str) -> None:
 _theta_exception_alerted_for_date: set = set()
 
 def _min_score_for_et(et) -> float:
-    """Time-tiered score threshold. Earlier = stricter. As we approach 9:25
-    the bar drops so SOMETHING goes out before the open even if it's marginal.
-
-    HLIT today scored 19.25 — would fire at 7:00 ET tier (>=18).
-    The goal: get high-conviction setups out EARLY (before they move).
-    """
+    """QUALITY-FIX-2026-07-01 (B): NO pre-market firing. Wait for the 9:30-9:35 ET
+    opening candle to form, then fire only a CONFIRMED (non-watch-only) setup on real
+    opening-range data. Pre-market microcap 'breakouts' on thin/delayed data (e.g. CAST
+    fired 06:00 ET, -11%) are exactly what this removes. The confirmation gate
+    (VWAP / liquidity / RTH bars in _apply_quality_filters) is the quality bar; this
+    time-gate simply refuses to fire before the open."""
     h, m = et.hour, et.minute
     t = h * 60 + m  # ET minutes since midnight
-    if t < 6*60:    return 99.0   # before 6am: don't fire yet (pre-market thin)
-    if t < 7*60:   return 20.0   # 6:00-7:00 ET: only exceptional (>=20)
-    if t < 7*60+30: return 18.0   # 7:00-7:30: high conviction
-    if t < 8*60:   return 16.0   # 7:30-8:00
-    if t < 8*60+30: return 14.0   # 8:00-8:30
-    if t < 9*60:   return 12.0   # 8:30-9:00
-    if t < 9*60+25: return 10.0   # 9:00-9:25: anything decent
-    if t <= 9*60+50: return 0.0   # 9:25-9:50: last-chance, whatever's best
-    if t <= 12*60: return 10.0   # 9:50-12:00 ET: intraday — fire a CONFIRMED breakout
-    return 99.0  # outside window
+    if t < 9*60+35:  return 99.0   # before 9:35 ET — DO NOT fire (no pre-market; wait for the opening candle)
+    if t <= 12*60:   return 10.0   # 9:35-12:00 ET — fire a CONFIRMED opening-range / breakout setup
+    return 99.0                    # after 12:00 ET — window closed
 
 async def _check_and_run_theta_scanner():
     """Tiered premarket scanner — fires on the FIRST qualifying setup found
