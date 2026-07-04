@@ -263,7 +263,7 @@ async def send_daily_heartbeat():
     )
 
     ok_emoji = "✅" if health["ok"] else "⚠️"
-    subj = f"🎯 Theta Scanner — heartbeat {ok_emoji} ({today_str})"
+    subj = f"🎯 Saro — heartbeat {ok_emoji} ({today_str})"
     rows_html = ""
     for cname, c in health["components"].items():
         icon = "✅" if c.get("ok") else "❌"
@@ -277,7 +277,7 @@ async def send_daily_heartbeat():
 
     html = f"""
 <div style="font-family:-apple-system,sans-serif;max-width:560px;margin:0 auto;padding:20px">
-  <h1 style="color:#7c3aed;margin:0 0 10px">🎯 Theta Scanner — pipeline online</h1>
+  <h1 style="color:#7c3aed;margin:0 0 10px">🎯 Saro — pipeline online</h1>
   <p style="color:#475569;margin:0 0 16px;font-size:14px">
     Heartbeat for {today_str}. This email confirms the scanner is watching your
     active strategies. <b>If a setup matches your criteria today, you will receive

@@ -99,7 +99,9 @@
 }
 
 /* ── 2. Tokens — light mapping (html without .dark) ──────────────────── */
-html:not(.dark) .v2-root {
+/* v2-force-light: page-scoped override — the PUBLIC HOMEPAGE always renders
+   light regardless of the visitor's theme (Ryan 2026-07-03). */
+html:not(.dark) .v2-root, .v2-root.v2-force-light {
   --v2-bg-sunken:  #e8ecf3;
   --v2-bg:         #f2f5f9;
   --v2-surface-1:  #ffffff;
@@ -1039,3 +1041,63 @@ html:not(.dark) .v2-root .v2-lp-nav { background: rgba(242, 245, 249, 0.88); }
   .v2-root .v2-ticker__track { animation: none; }
   .v2-root .v2-ticker__live-dot { animation: none; }
 }
+
+/* ── 20. Saro advertisement (LandingV2 §2b) ──────────────────────── */
+.v2-root .v2-saro {
+  position: relative;
+  border: 1px solid rgba(109, 79, 190, 0.28);
+  border-radius: 10px;
+  padding: var(--v2-sp-6) var(--v2-sp-5);
+  background:
+    radial-gradient(ellipse 60% 90% at 85% 0%, rgba(91, 63, 174, 0.16) 0%, transparent 60%),
+    linear-gradient(to bottom, var(--v2-bg-raised, #131722), var(--v2-bg-sunken, #0f131d));
+  overflow: hidden;
+}
+.v2-root .v2-saro__head { display: flex; flex-direction: column; gap: 2px; }
+.v2-root .v2-saro__eyebrow {
+  font: 600 11px/1 var(--v2-font-mono, ui-monospace, monospace);
+  letter-spacing: 0.24em; text-transform: uppercase; color: #a78bda;
+}
+.v2-root .v2-saro__name {
+  margin: 4px 0 0;
+  font-size: clamp(40px, 6vw, 64px);
+  font-weight: 800; letter-spacing: 0.06em; line-height: 1;
+  background: linear-gradient(100deg, #e8edf7 30%, #a78bda 85%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.v2-root .v2-saro__tag { margin: 10px 0 0; font-size: 17px; font-weight: 600; color: var(--v2-text-1, #e8edf7); text-wrap: balance; }
+.v2-root .v2-saro__desc { margin: 14px 0 0; max-width: 68ch; font-size: 14.5px; line-height: 1.65; color: var(--v2-text-2, #97a1b6); }
+.v2-root .v2-saro__desc strong { color: var(--v2-text-1, #e8edf7); font-weight: 600; }
+.v2-root .v2-saro__stats {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--v2-sp-2); margin-top: var(--v2-sp-4);
+}
+.v2-root .v2-saro__stat {
+  border: 1px solid var(--v2-border); border-radius: 8px;
+  padding: 14px 16px; background: rgba(10, 13, 20, 0.5);
+}
+.v2-root .v2-saro__num {
+  display: block; font: 700 30px/1.1 var(--v2-font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums; color: #cdb9f2;
+}
+.v2-root .v2-saro__lbl { display: block; margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--v2-text-2, #97a1b6); }
+.v2-root .v2-saro__cta { display: flex; gap: 10px; margin-top: var(--v2-sp-4); flex-wrap: wrap; }
+.v2-root .v2-saro__fineprint { margin: var(--v2-sp-3) 0 0; font-size: 11px; line-height: 1.6; color: var(--v2-text-3, #5c6579); max-width: 80ch; }
+@media (max-width: 720px) {
+  .v2-root .v2-saro { padding: var(--v2-sp-4) var(--v2-sp-3); }
+  .v2-root .v2-saro__stats { grid-template-columns: 1fr; }
+}
+
+/* ── 21. Saro ad + hero tuning under forced-light (homepage) ─────────── */
+.v2-root.v2-force-light .v2-saro {
+  border-color: rgba(109, 79, 190, 0.30);
+  background:
+    radial-gradient(ellipse 60% 90% at 85% 0%, rgba(139, 106, 222, 0.12) 0%, transparent 60%),
+    linear-gradient(to bottom, #ffffff, #f3f1fa);
+}
+.v2-root.v2-force-light .v2-saro__name {
+  background: linear-gradient(100deg, #241d3d 30%, #5b3fae 85%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.v2-root.v2-force-light .v2-saro__stat { background: rgba(255, 255, 255, 0.75); }
+.v2-root.v2-force-light .v2-saro__num { color: #4c3399; }

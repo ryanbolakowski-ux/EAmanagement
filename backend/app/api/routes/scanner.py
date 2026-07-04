@@ -254,7 +254,7 @@ async def scanner_criteria(
         {
             "name": "Price band",
             "rule": "$2 ≤ price ≤ $200",
-            "rationale": "Cheap-stock filter (avoids penny pumps); upper bound keeps options affordable on a $1k Theta Scanner allocation."
+            "rationale": "Cheap-stock filter (avoids penny pumps); upper bound keeps options affordable on a $1k Saro allocation."
         },
         {
             "name": "Dollar volume",

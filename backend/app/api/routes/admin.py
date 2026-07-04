@@ -1103,7 +1103,7 @@ async def systems_check(
     CRITICAL_KEYS = {"database", "redis", "email_provider"}
     _now_iso = now_utc.isoformat()
     _human = {
-        "theta_scanner": "Theta Scanner (stock pick)", "futures_scanner": "Futures scanner",
+        "theta_scanner": "Saro (stock pick)", "futures_scanner": "Futures scanner",
         "options_scanner": "Options scanner", "live_trading": "Live trading", "paper_trading": "Paper trading",
         "open_position_monitor": "Open-position monitor", "position_closing_job": "Position-closing job",
         "kyc_webhooks": "KYC webhooks", "broker_sync": "Broker sync", "market_data": "Market data",
@@ -1405,8 +1405,8 @@ async def systems_check_fix(
             from app.engines.options.theta_scanner import find_best_premarket_pick
             pick = await find_best_premarket_pick(db)
             ok = True
-            msg = (f"Re-ran Theta Scanner: pick={pick['ticker']}" if pick
-                   else "Re-ran Theta Scanner: no qualifying setup right now (valid — not an error).")
+            msg = (f"Re-ran Saro: pick={pick['ticker']}" if pick
+                   else "Re-ran Saro: no qualifying setup right now (valid — not an error).")
         elif action == "resync_broker":
             from app.api.routes.scanner import _refresh_broker_balance
             rows = (await db.execute(text("SELECT DISTINCT user_id FROM broker_accounts WHERE is_active=true"))).fetchall()
@@ -1457,7 +1457,7 @@ async def admin_send_test_heartbeat(
     from app.services.email import _send_tracked
     health = await _sh.check_health()
     ok_emoji = "OK" if health.get("ok") else "DEGRADED"
-    subject = f"🎯 Theta Scanner — heartbeat TEST · {ok_emoji}"
+    subject = f"🎯 Saro — heartbeat TEST · {ok_emoji}"
     rows_html = ""
     for cname, c in health.get("components", {}).items():
         icon = "OK" if c.get("ok") else "FAIL"
@@ -1516,7 +1516,7 @@ async def admin_send_test_trade_email(
             to=admin_email, username="admin-test", ticker=tk,
             direction=side, entry=e, stop=sl, target=tp,
             contracts=qty, reason=why,
-            strategy_name="Theta Scanner heartbeat-test",
+            strategy_name="Saro heartbeat-test",
             mode="paper",
         ))
     except Exception as exc:

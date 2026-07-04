@@ -593,7 +593,7 @@ export default function LiveTrading() {
                       if (accountClasses.includes(c)) byClass[c].push(st)
                     }
                     if (accountClasses.includes("stock")) {
-                      byClass.stock = [{ id: "theta_scanner", name: "🎯 Theta Scanner — daily premarket pick (built-in)" }, ...byClass.stock]
+                      byClass.stock = [{ id: "theta_scanner", name: "🎯 Saro — daily premarket pick (built-in)" }, ...byClass.stock]
                     }
                     const groups = [
                       { label: "Futures", emoji: "⚡", items: byClass.futures },

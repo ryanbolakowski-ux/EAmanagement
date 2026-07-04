@@ -21,7 +21,7 @@ shipping a change to the page.
 - [ ] Typing a non-matching string ("zzzzzz") shows the empty-state card
       with an `Email support` link.
 - [ ] Search matches on question text, answer text (including JSX children),
-      and category name — `Tradier`, `EOD close`, `Theta Scanner` all return
+      and category name — `Tradier`, `EOD close`, `Saro` all return
       sensible hits.
 
 ## Sidebar / category nav

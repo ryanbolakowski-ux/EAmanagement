@@ -1137,8 +1137,8 @@ _theta_no_pick_alerted_for_date: set = set()
 
 
 async def _send_no_pick_emails(date_str: str, reason: str) -> None:
-    """Email active Theta Scanner subscribers a short "no pick today" note with
-    the reason. Subject carries "Theta Scanner" so the EMAIL_KILL_SWITCH
+    """Email active Saro subscribers a short "no pick today" note with
+    the reason. Subject carries "Saro" so the EMAIL_KILL_SWITCH
     whitelist passes it. Recipients filtered to active users only."""
     from app.database import async_session_factory
     from app.services.email import _send_tracked
@@ -1152,10 +1152,10 @@ async def _send_no_pick_emails(date_str: str, reason: str) -> None:
     except Exception as _e:
         logger.error(f"[ThetaScanner] no-pick recipient query failed: {_e}")
         return
-    subject = f"\U0001f3af Theta Scanner: No pick today ({date_str})"
+    subject = f"\U0001f3af Saro: No pick today ({date_str})"
     html = (
         "<div style=\"font-family:system-ui,Arial,sans-serif;max-width:520px;margin:0 auto;padding:18px;\">"
-        "<h2 style=\"color:#7c3aed;margin:0 0 10px;\">\U0001f3af Theta Scanner \u2014 no pick today</h2>"
+        "<h2 style=\"color:#7c3aed;margin:0 0 10px;\">\U0001f3af Saro \u2014 no pick today</h2>"
         "<p style=\"font-size:14px;color:#334155;\">The premarket scan ran and stood down: no setup cleared the quality bar.</p>"
         f"<div style=\"background:#f1f5f9;border-radius:8px;padding:10px 12px;font-size:13px;color:#475569;\"><b>Why:</b> {reason}</div>"
         "<p style=\"font-size:12px;color:#94a3b8;margin-top:14px;\">No action needed \u2014 a no-trade day is a valid outcome. You will get the next qualifying pick automatically.</p>"
@@ -1279,7 +1279,7 @@ async def _check_and_run_theta_scanner():
                         try:
                             from app.api.routes.security import notify_admins_security
                             await notify_admins_security(
-                                "Theta Scanner: NO PICK today",
+                                "Saro: NO PICK today",
                                 f"No stock pick for {today_key_visible}. Reason: {_reason} "
                                 f"(scanner ran; no candidate cleared the quality filters).")
                         except Exception as _ae:
@@ -1332,7 +1332,7 @@ async def _check_and_run_theta_scanner():
                 import traceback as _tb
                 from app.engines.pipeline_alerts import send_pipeline_failure_alert
                 await send_pipeline_failure_alert(
-                    reason=f"Theta Scanner pick failed: {type(e).__name__}",
+                    reason=f"Saro pick failed: {type(e).__name__}",
                     context={
                         "job": "premarket_scheduler._check_and_run_theta_scanner",
                         "et_now": et.strftime("%H:%M ET"),

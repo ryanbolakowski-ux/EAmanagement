@@ -182,7 +182,7 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
               <option value="">Select an options strategy...</option>
               {/* Built-in Theta Scanner option — uses the same daily morning pick
                   the live Theta Scanner emails. Always available, no setup needed. */}
-              <option value="theta_scanner">🎯 Theta Scanner (daily pick)</option>
+              <option value="theta_scanner">🎯 Saro (daily pick)</option>
               {optStrats.length > 0 && <option disabled>──── your strategies ────</option>}
               {optStrats.map((s: any) => {
                 // Clean strategy name only. If a session is currently running
@@ -197,7 +197,7 @@ function OptionsPaperPanel({ strategies }: { strategies: any[] }) {
               })}
             </select>
             {optStrats.length === 0 && (
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Theta Scanner uses the same morning pick the live scanner sends. To add your own strategies, create them on the Strategies page.</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Saro uses the same morning pick the live scanner sends. To add your own strategies, create them on the Strategies page.</p>
             )}
           </div>
           <div className="rounded-lg bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-900 p-3">

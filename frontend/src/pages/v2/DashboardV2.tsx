@@ -336,7 +336,7 @@ function TodaysPickCard({ pick, isLoading, isError }: {
       <EmptyState
         icon={Crosshair}
         title="No pick yet today"
-        hint="The Theta Scanner posts one qualifying setup each morning. Nothing has qualified in the last 24 hours."
+        hint="Saro posts one qualifying setup each morning. Nothing has qualified in the last 24 hours."
         className="h-full"
       />
     )

@@ -130,7 +130,7 @@ function OpenPositionsCard() {
     if (realized === 0 && closedToday.length === 0) {
       return (
         <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-5 text-center">
-          <div className="text-sm font-extrabold text-slate-600 dark:text-slate-300">No open Theta Scanner positions</div>
+          <div className="text-sm font-extrabold text-slate-600 dark:text-slate-300">No open Saro positions</div>
           <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">Positions opened by the daily scanner appear here with live P&L + trailing-stop tracking.</div>
         </div>
       )
@@ -171,7 +171,7 @@ function OpenPositionsCard() {
     <div className="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 text-white p-5 shadow-xl">
       <div className="flex items-start justify-between mb-4 gap-3">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70">Open Theta Scanner positions</div>
+          <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70">Open Saro positions</div>
           <div className="text-xs opacity-60 mt-0.5">{data.count} position{data.count === 1 ? '' : 's'} · 3% trailing stop active</div>
           {data.tradier_equity !== null && data.tradier_equity !== undefined && (
             <div className="mt-2 text-xs opacity-80">
@@ -185,15 +185,15 @@ function OpenPositionsCard() {
           )}
         </div>
         <div className="flex gap-2">
-          <button onClick={() => { if (confirm(`Close all ${data.count} Theta Scanner positions at market?`)) closeAll.mutate() }}
+          <button onClick={() => { if (confirm(`Close all ${data.count} Saro positions at market?`)) closeAll.mutate() }}
             disabled={closeAll.isPending}
             className="bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-bold px-3 py-1.5 rounded-lg whitespace-nowrap">
             {closeAll.isPending ? 'Closing...' : 'Close all'}
           </button>
-          <button onClick={() => { if (confirm('FORCE CLOSE everything at Tradier — including positions outside Theta Scanner. Continue?')) forceCloseAll.mutate() }}
+          <button onClick={() => { if (confirm('FORCE CLOSE everything at Tradier — including positions outside Saro. Continue?')) forceCloseAll.mutate() }}
             disabled={forceCloseAll.isPending}
             className="bg-rose-900 hover:bg-rose-950 disabled:opacity-50 text-white text-xs font-bold px-3 py-1.5 rounded-lg whitespace-nowrap border border-rose-700"
-            title="Closes EVERY open position on the Tradier account, not just Theta Scanner picks">
+            title="Closes EVERY open position on the Tradier account, not just Saro picks">
             {forceCloseAll.isPending ? 'Force closing...' : '⚠ Force close all'}
           </button>
         </div>
@@ -239,7 +239,7 @@ function ThetaScannerCriteriaCard() {
         aria-expanded={open}>
         <div>
           <div className="text-[10px] uppercase tracking-[0.18em] font-bold text-violet-700 dark:text-violet-300">
-            How Theta Scanner picks
+            How Saro picks
           </div>
           <div className="text-sm font-bold text-slate-800 dark:text-slate-100 mt-0.5">
             {cur?.ticker
@@ -306,7 +306,7 @@ function TodayPickCard() {
       <div className="rounded-2xl border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/30 p-5 text-center">
         <div className="text-3xl mb-2">🏛️</div>
         <div className="font-extrabold text-rose-800 dark:text-rose-200 mb-1">Markets closed — {ms.holiday_name}</div>
-        <div className="text-xs text-rose-700/80 dark:text-rose-300/80 mt-1">Theta Scanner resumes <strong>{ms.next_open} at 9:25 AM ET</strong>.</div>
+        <div className="text-xs text-rose-700/80 dark:text-rose-300/80 mt-1">Saro resumes <strong>{ms.next_open} at 9:25 AM ET</strong>.</div>
       </div>
     )
   }
@@ -315,7 +315,7 @@ function TodayPickCard() {
       <div className="rounded-2xl border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-900/60 p-5 text-center">
         <div className="text-3xl mb-2">🏖️</div>
         <div className="font-extrabold text-slate-700 dark:text-slate-200 mb-1">Markets are closed — it's {ms.today}</div>
-        <div className="text-xs text-slate-500 dark:text-slate-400">Theta Scanner resumes <strong>{ms.next_open} at 9:25 AM ET</strong>.</div>
+        <div className="text-xs text-slate-500 dark:text-slate-400">Saro resumes <strong>{ms.next_open} at 9:25 AM ET</strong>.</div>
       </div>
     )
   }
@@ -333,7 +333,7 @@ function TodayPickCard() {
     return (
       <div className="rounded-2xl border border-dashed border-violet-300 dark:border-violet-800 bg-violet-50/30 dark:bg-violet-950/30 p-5 text-center">
         <div className="text-2xl mb-2">🎯</div>
-        <div className="font-extrabold text-slate-700 dark:text-slate-200 mb-1">Theta Scanner — no pick today</div>
+        <div className="font-extrabold text-slate-700 dark:text-slate-200 mb-1">Saro — no pick today</div>
         <div className="text-xs text-slate-500 dark:text-slate-400">{data?.message || 'Scanner runs daily at 9:25 ET. No setup met the quality bar.'}</div>
       </div>
     )
@@ -343,7 +343,7 @@ function TodayPickCard() {
     <div className="rounded-2xl bg-gradient-to-br from-violet-600 to-indigo-700 text-white p-5 shadow-xl shadow-violet-900/20">
       <div className="flex items-start justify-between mb-4">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-80">🎯 Theta Scanner · Today's Pick</div>
+          <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-80">🎯 Saro · Today's Pick</div>
           <div className="flex items-baseline gap-3 mt-1 flex-wrap">
             <div className="text-3xl font-extrabold tabular-nums">{pick.ticker}</div>
             {pick.live_price !== undefined && pick.live_price !== null && (
@@ -610,7 +610,7 @@ function SizingPreviewCard() {
               }}
               className="rounded border-slate-300 dark:border-slate-600 text-violet-600 focus:ring-violet-500"
             />
-            Save as default (Theta Scanner)
+            Save as default (Saro)
           </label>
         </div>
       </div>
@@ -1485,7 +1485,7 @@ export default function LiveTradingV2() {
                     // strategy and only relevant for stock-capable accounts.)
                     const tabGroup = groups[0]
                     if (tabGroup && tabClass === 'stock' && accountClasses.includes('stock')) {
-                      tabGroup.items = [{ id: 'theta_scanner', name: '🎯 Theta Scanner — daily premarket pick (built-in)' }, ...tabGroup.items]
+                      tabGroup.items = [{ id: 'theta_scanner', name: '🎯 Saro — daily premarket pick (built-in)' }, ...tabGroup.items]
                     }
                     if (!tabGroup || !accountClasses.includes(tabClass)) {
                       return <option value="">No {tabClass === 'stock' ? 'stock' : tabClass} support on {acct.broker} ({accountClasses.join(', ') || 'unknown broker'}).</option>

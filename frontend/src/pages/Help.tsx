@@ -30,7 +30,7 @@ const CATEGORIES = [
   'Paper Trading',
   'Live Trading',
   'Risk & Position Sizing',
-  'Theta Scanner',
+  'Saro',
   'Strategies',
   'Backtesting & Optimization',
   'Emails & Alerts',
@@ -296,7 +296,7 @@ const FAQS: Faq[] = [
     category: 'Live Trading',
     question: 'What is the end-of-day close?',
     answer: (
-      <p>At <strong>3:55 PM ET</strong> the platform automatically closes any open Theta Scanner positions with a market sell. This is to prevent overnight risk on a strategy designed for intraday only. You can disable EOD close per-strategy in settings if you want to hold overnight.</p>
+      <p>At <strong>3:55 PM ET</strong> the platform automatically closes any open Saro positions with a market sell. This is to prevent overnight risk on a strategy designed for intraday only. You can disable EOD close per-strategy in settings if you want to hold overnight.</p>
     ),
   },
 
@@ -305,7 +305,7 @@ const FAQS: Faq[] = [
     category: 'Risk & Position Sizing',
     question: 'What sizing modes are supported?',
     answer: (
-      <p>Three modes: <strong>% of equity</strong> (risk N% of equity per trade), <strong>fixed $ per trade</strong> (risk exactly $X dollars), and <strong>fixed $ allocation</strong> (put exactly $X into the position regardless of stop distance). Each strategy and each Theta Scanner pick can be configured independently.</p>
+      <p>Three modes: <strong>% of equity</strong> (risk N% of equity per trade), <strong>fixed $ per trade</strong> (risk exactly $X dollars), and <strong>fixed $ allocation</strong> (put exactly $X into the position regardless of stop distance). Each strategy and each Saro pick can be configured independently.</p>
     ),
   },
   {
@@ -319,7 +319,7 @@ const FAQS: Faq[] = [
     category: 'Risk & Position Sizing',
     question: 'What is the max position cap?',
     answer: (
-      <p>Configurable per broker account. The default cap is the lesser of (a) available cash / buying power, and (b) any custom dollar cap you set on the Profile page. Theta Scanner has its own allocation field so you can give it a dedicated bucket separate from your manual deployments.</p>
+      <p>Configurable per broker account. The default cap is the lesser of (a) available cash / buying power, and (b) any custom dollar cap you set on the Profile page. Saro has its own allocation field so you can give it a dedicated bucket separate from your manual deployments.</p>
     ),
   },
   {
@@ -330,52 +330,52 @@ const FAQS: Faq[] = [
     ),
   },
 
-  // ── Theta Scanner ───────────────────────────────────────────────────────
+  // ── Saro ───────────────────────────────────────────────────────
   {
-    category: 'Theta Scanner',
-    question: 'What is the Theta Scanner?',
+    category: 'Saro',
+    question: 'What is Saro?',
     answer: (
-      <p>The Theta Scanner is our daily premarket stock-pick algorithm. Every US trading day, starting at 4 AM ET, it scores the universe of premarket gappers by gap %, volume, relative volume, and catalyst quality, then picks the highest-scoring setup to email and (optionally) auto-trade.</p>
+      <p>Saro — the daily stock scanner — is our premarket stock-pick algorithm. Every US trading day, starting at 4 AM ET, it scores the universe of premarket gappers by gap %, volume, relative volume, and catalyst quality, then picks the highest-scoring setup to email and (optionally) auto-trade.</p>
     ),
   },
   {
-    category: 'Theta Scanner',
+    category: 'Saro',
     question: 'What does it look for?',
     answer: (
       <p>Stocks gapping <strong>between 5% and 25%</strong> on the open vs. yesterday&apos;s close, with high relative volume (real interest, not just a thin print), and a news / PR catalyst on the wire (earnings, FDA, M&amp;A, contract). All three boxes have to check.</p>
     ),
   },
   {
-    category: 'Theta Scanner',
+    category: 'Saro',
     question: 'How is the score calculated?',
     answer: (
       <p>The exact formula is <code>gap × log(volume) × catalyst_weight × min(rel_vol, 10) / 100</code>. The <code>log(volume)</code> term keeps mega-cap volume from dominating; the <code>min(rel_vol, 10)</code> cap prevents one spike from skewing the ranking. Higher score = better setup.</p>
     ),
   },
   {
-    category: 'Theta Scanner',
+    category: 'Saro',
     question: 'When does it run?',
     answer: (
       <p>Premarket, from <strong>4 AM ET onward</strong> on US trading days. The first qualifying setup of the day fires — the scanner doesn&apos;t wait for the bell. Earlier fires require a higher score threshold (a 4 AM pick needs to be more decisive than a 9:25 AM pick).</p>
     ),
   },
   {
-    category: 'Theta Scanner',
+    category: 'Saro',
     question: 'Why was a specific stock selected?',
     answer: (
       <p>The Live Trading page shows a <strong>criteria card</strong> next to each scanner pick that breaks down the inputs — gap %, volume, rel vol, catalyst headline, and the final score. If the pick surprises you, the card tells you why it scored highest.</p>
     ),
   },
   {
-    category: 'Theta Scanner',
-    question: 'Is the Theta Scanner pick a recommendation?',
+    category: 'Saro',
+    question: 'Is the Saro pick a recommendation?',
     answer: (
       <p><strong>No.</strong> The pick is an algorithmic ranking of premarket setups, not investment advice. You decide whether to take the trade. See our <A href="/disclosures">Disclosures</A> page for the full statement.</p>
     ),
   },
   {
-    category: 'Theta Scanner',
-    question: 'Does Theta Scanner work for options?',
+    category: 'Saro',
+    question: 'Does Saro work for options?',
     answer: (
       <p>Currently stock-only. We do have an options paper engine that can replay scanner picks against the corresponding ATM option, and a dedicated options scanner is in development — but the stock pick is the production output today.</p>
     ),
@@ -458,9 +458,9 @@ const FAQS: Faq[] = [
   // ── Emails & Alerts ─────────────────────────────────────────────────────
   {
     category: 'Emails & Alerts',
-    question: 'What is the daily Theta Scanner email?',
+    question: 'What is the daily Saro email?',
     answer: (
-      <p>The Theta Scanner email goes out around <strong>9:25 AM ET</strong> on US trading days with that day&apos;s top premarket pick — ticker, gap %, entry, stop, target, score, and the catalyst headline. Use it as a heads-up even if you don&apos;t auto-trade.</p>
+      <p>The Saro email goes out around <strong>9:25 AM ET</strong> on US trading days with that day&apos;s top premarket pick — ticker, gap %, entry, stop, target, score, and the catalyst headline. Use it as a heads-up even if you don&apos;t auto-trade.</p>
     ),
   },
   {
@@ -547,14 +547,14 @@ const FAQS: Faq[] = [
     category: 'Trading Hours',
     question: 'What hours does the scanner run?',
     answer: (
-      <p>Premarket <strong>4 AM ET</strong> through the open at <strong>9:30 AM ET</strong>, then regular trading hours through <strong>4 PM ET</strong>. Theta Scanner picks fire premarket; intraday strategies run during RTH.</p>
+      <p>Premarket <strong>4 AM ET</strong> through the open at <strong>9:30 AM ET</strong>, then regular trading hours through <strong>4 PM ET</strong>. Saro picks fire premarket; intraday strategies run during RTH.</p>
     ),
   },
   {
     category: 'Trading Hours',
     question: 'What about overnight?',
     answer: (
-      <p>Theta Scanner positions auto-close at <strong>3:55 PM ET</strong> via the EOD close routine to prevent overnight risk on intraday setups. Strategies marked as swing or position-trade hold through the close normally.</p>
+      <p>Saro positions auto-close at <strong>3:55 PM ET</strong> via the EOD close routine to prevent overnight risk on intraday setups. Strategies marked as swing or position-trade hold through the close normally.</p>
     ),
   },
   {
@@ -577,7 +577,7 @@ const FAQS: Faq[] = [
     category: 'Billing & Subscription',
     question: 'What does each tier include?',
     answer: (
-      <p>Tier 1 (Free) — paper, basic backtests. Tier 2 (Futures Signals, $49/mo) — ICT futures signals via email. Tier 3 (Options Scanner, $99/mo) — daily Theta Scanner picks. Tier 4 (Options Live, $199/mo) — broker integration + one-click execution. Tier 5 (Fully Automated, $399/mo) — full auto-trade across all strategies. Full breakdown on the <A href="/pricing">Pricing page</A>.</p>
+      <p>Tier 1 (Free) — paper, basic backtests. Tier 2 (Futures Signals, $49/mo) — ICT futures signals via email. Tier 3 (Options Scanner, $99/mo) — daily Saro picks. Tier 4 (Options Live, $199/mo) — broker integration + one-click execution. Tier 5 (Fully Automated, $399/mo) — full auto-trade across all strategies. Full breakdown on the <A href="/pricing">Pricing page</A>.</p>
     ),
   },
   {
@@ -837,7 +837,7 @@ export default function Help() {
             Help &amp; FAQ
           </h1>
           <p className="text-base md:text-lg text-slate-600 dark:text-slate-300 max-w-2xl">
-            Answers to common questions about Theta Algos — accounts, brokers, the Theta Scanner, strategies, billing, and more. Search below or browse by category. Can&apos;t find what you need? Email <a href="mailto:support@thetaalgos.com" className="text-violet-600 dark:text-violet-400 underline">support@thetaalgos.com</a>.
+            Answers to common questions about Theta Algos — accounts, brokers, Saro (our daily stock scanner), strategies, billing, and more. Search below or browse by category. Can&apos;t find what you need? Email <a href="mailto:support@thetaalgos.com" className="text-violet-600 dark:text-violet-400 underline">support@thetaalgos.com</a>.
           </p>
 
           {/* Search input */}

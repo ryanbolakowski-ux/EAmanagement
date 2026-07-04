@@ -613,8 +613,9 @@ def send_trade_receipt_email(*, to: str, username: str, ticker: str,
     risk_pct = (risk / entry * 100.0) if entry > 0 else 0.0
     target_pct = (reward / entry * 100.0) if entry > 0 else 0.0
     # 2026-06-04: re-prefixed with "Theta Scanner" so the killswitch whitelist lets these through.
+    # 2026-07: subject rebranded to "Saro" — also whitelisted (see is_theta in _send_tracked_impl).
     # Duplicates are guarded at every call site via Redis-backed session+daily cap claims.
-    subject = f"\U0001F525 Theta Scanner Signal \u00b7 {side_word} {ticker} @ {entry:.2f} (+{target_pct:.1f}% target)"
+    subject = f"\U0001F525 Saro Signal \u00b7 {side_word} {ticker} @ {entry:.2f} (+{target_pct:.1f}% target)"
     urgency_line = (
         f"Bot is targeting +{target_pct:.1f}% continuation in this session. "
         f"Enter NOW at ${entry:.2f} or close to it \u2014 the longer you wait, the worse the entry."

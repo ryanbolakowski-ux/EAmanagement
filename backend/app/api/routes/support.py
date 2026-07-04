@@ -124,7 +124,7 @@ HARD RULES:
 
 PLATFORM:
 - Pricing tiers: Tier 1 Free Trial (30 days, no card), Tier 2 Futures Signals ($49/mo), Tier 3 Options Scanner ($99/mo), Tier 4 Options Live ($199/mo - most popular), Tier 5 Fully Automated ($399/mo).
-- Theta Scanner: morning options pick, fires once/day between 6-9:50 AM ET. Earlier time requires higher score (6am=score 20, 9am=10, 9:25=any). Sends entry, stop -3%, target +10%, gap%, rel vol, score, catalyst.
+- Saro (the daily stock scanner; formerly "Theta Scanner" — always call it Saro): morning options pick, fires once/day between 6-9:50 AM ET. Earlier time requires higher score (6am=score 20, 9am=10, 9:25=any). Sends entry, stop -3%, target +10%, gap%, rel vol, score, catalyst.
 - 5 scanner strategies: Pre-Market Gap Runner, Low-Float Squeeze (Sykes-style), 52-Week High Breakout, Oracle 5-Min Opening Candle (STT clone), Momentum Gappers.
 - ICT futures strategies: FVG Inversion Tap (1m FVG sweep + reclaim), ICT Silver Bullet (10-11am ET kill zone), Liquidity Sweep + FVG. 1 email per user per strategy per session (LONDON/NY_AM/NY_PM/ASIA).
 - Brokers: Tradier (stocks+options, free sandbox at developer.tradier.com), Tradovate (futures), prop firms via signal emails (Apex/TPT/Topstep ban algos). Webull/IBKR/TradeStation coming.

@@ -26,7 +26,7 @@ Branch: `feat/finalize-pipeline-2026-06-09`
       no longer reads `... (paused)` / `... (draft)`).
 - [ ] Start an options-paper session for a strategy, then reopen the dropdown:
       that strategy now reads `Name · Active 🟢`.
-- [ ] Built-in `🎯 Theta Scanner (daily pick)` option still present and selectable.
+- [ ] Built-in `🎯 Saro (daily pick)` option still present and selectable.
 
 ### 1b. Futures paper modal selector ("Start Paper Session" → Strategy)
 - [ ] Click **Start Session**.
@@ -52,7 +52,7 @@ tabs exist.)
       under a **"Not deployable (activate first)"** optgroup as a **disabled**
       option labelled `Name — draft, activate first` / `Name — paused, activate
       first`, with a `title=` tooltip explaining it must be set to Active.
-- [ ] Built-in Theta Scanner still listed under Stocks for stock-capable brokers.
+- [ ] Built-in Saro still listed under Stocks for stock-capable brokers.
 - [ ] Before a broker is chosen: "Select a broker account first…" message shown.
 
 ---
@@ -68,7 +68,7 @@ tabs exist.)
 - [ ] A **draft/paused** strategy matching the selected tab's asset class appears
       under a **"Not deployable (activate first)"** optgroup as a **disabled**
       option with the reason in the label + `title=` tooltip.
-- [ ] Theta Scanner still injected into the Stocks tab for stock-capable brokers.
+- [ ] Saro still injected into the Stocks tab for stock-capable brokers.
 - [ ] "No <class> support on <broker>" / "No <class> strategies yet" messages
       still shown in their respective empty states.
 

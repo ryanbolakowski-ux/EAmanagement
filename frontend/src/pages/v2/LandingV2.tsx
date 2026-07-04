@@ -390,7 +390,7 @@ export default function LandingV2() {
   useScrollReveal()
 
   return (
-    <div className="v2-root v2-page v2-lp">
+    <div className="v2-root v2-page v2-lp v2-force-light">
 
       {/* ── NAV ─────────────────────────────────────────────────────────── */}
       <nav className="v2-lp-nav">
@@ -493,6 +493,45 @@ export default function LandingV2() {
             value={NEWS_BLACKOUT}
             hint="plus PPI, NFP, GDP, Retail Sales — auto-skipped"
           />
+        </div>
+      </section>
+
+      {/* ── 2b. SARO ADVERTISEMENT ────────────────────────────────────── */}
+      <section id="saro" className="v2-lp-section v2-lp-anchor reveal" aria-label="Saro daily stock scanner">
+        <div className="v2-saro">
+          <div className="v2-saro__head">
+            <span className="v2-saro__eyebrow">Introducing</span>
+            <h2 className="v2-saro__name">SARO</h2>
+            <p className="v2-saro__tag">The daily stock scanner. One pick before the open&nbsp;— or no pick at all.</p>
+          </div>
+          <p className="v2-saro__desc">
+            Every trading morning Saro sweeps <strong>6,000+ US stocks</strong>, demands real volume expansion,
+            real liquidity and a confirmed move above VWAP at the open&nbsp;— then emails exactly one setup with
+            structure-based entry, stop and target. When nothing clears the bar, Saro says so.
+            <strong> A no-trade day is a feature, not a failure.</strong>
+          </p>
+          <div className="v2-saro__stats">
+            <div className="v2-saro__stat">
+              <span className="v2-saro__num">50.0%</span>
+              <span className="v2-saro__lbl">win rate in a 6-week historical replay — vs 23.8% for the engine it replaces</span>
+            </div>
+            <div className="v2-saro__stat">
+              <span className="v2-saro__num">+1.53%</span>
+              <span className="v2-saro__lbl">average move per pick across the same replay window</span>
+            </div>
+            <div className="v2-saro__stat">
+              <span className="v2-saro__num">12 / 31</span>
+              <span className="v2-saro__lbl">mornings it refused to force a trade — discipline, encoded</span>
+            </div>
+          </div>
+          <div className="v2-saro__cta">
+            <Link to="/register" className="v2-btn v2-btn--primary v2-btn--lg">Get Saro’s next pick</Link>
+            <a href="#pricing" className="v2-btn v2-btn--ghost v2-btn--lg">See plans</a>
+          </div>
+          <p className="v2-saro__fineprint">
+            Replay: Saro’s exact rules re-run over May 19 – Jul 2, 2026 market data, outcomes scored by the same
+            rules applied to live picks. Historical results do not guarantee future performance. Not financial advice.
+          </p>
         </div>
       </section>
 

@@ -550,9 +550,9 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     qty = max(1, int(1000 / pick["price"]))
     _watch = bool(pick.get("watch_only"))
     _qr = pick.get("quality_reasons") or []
-    subject = f"🎯 Saro — Today's Pick: {pick['ticker']} +{pick['projected_move_pct']:.0f}% target (Theta Scanner)"
+    subject = f"🎯 Saro — Today's Pick: {pick['ticker']} +{pick['projected_move_pct']:.0f}% target"
     if _watch:
-        subject = f"🎯 Saro: 👀 WATCH ONLY — {pick['ticker']} (no clean setup today) (Theta Scanner)"
+        subject = f"🎯 Saro: 👀 WATCH ONLY — {pick['ticker']} (no clean setup today)"
     alt_html = ""
     if pick.get("alternatives"):
         alt_html = "<p style='font-size:11px;color:#94a3b8;'>Runners-up: " + ", ".join(
@@ -623,7 +623,7 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     else:
         logger.info(f"[ThetaScanner] chart skipped (invalid geometry) {pick.get('ticker')} e={pick.get('entry')} s={pick.get('stop')} t={pick.get('target')}")
     html = f"""<div style="font-family:-apple-system,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
-      <h1 style="margin:0 0 8px;color:#7c3aed;">🎯 Theta Scanner pick</h1>
+      <h1 style="margin:0 0 8px;color:#7c3aed;">🎯 Saro — Today's Pick</h1>
       {watch_banner}{reasons_html}
       <p style="color:#64748b;font-size:12px;margin:0 0 20px;">STT-style single highest-conviction setup for {datetime.now(timezone.utc).date()}</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
@@ -637,7 +637,7 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
         <tr><td style="padding:8px;color:#475569;">Score</td><td style="text-align:right;">{pick['score']}</td></tr>
       </table>
       {_chart_img_html}
-      <p style="margin:16px 0;font-size:12px;color:#64748b;">Picked by <b>Theta Scanner</b> — your sole auto-pick source. All 22 ICT/options strategies remain in your Live Trading library for manual trades.</p>
+      <p style="margin:16px 0;font-size:12px;color:#64748b;">Picked by <b>Saro</b> — the daily stock scanner and your sole auto-pick source. All 22 ICT/options strategies remain in your Live Trading library for manual trades.</p>
       {alt_html}
       <p style="font-size:10px;color:#94a3b8;margin-top:24px;">Risk: 10% target is historical median for setups matching this profile. Not a guarantee. Confirm size + stop before adding.</p>
     </div>"""

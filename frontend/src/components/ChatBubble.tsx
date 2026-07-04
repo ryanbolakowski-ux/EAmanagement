@@ -17,7 +17,7 @@ const SUGGESTIONS = [
   'What is the morning email?',
   'How do I connect Tradier?',
   'Explain FVG Inversion Tap',
-  'What does the Theta Scanner do?',
+  'What does Saro do?',
   "What's the difference between paper and live?",
 ]
 

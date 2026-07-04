@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { useThemeStore } from './stores/themeStore'
 import { lazy, Suspense, useEffect } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useAuthStore } from './stores/authStore'
@@ -106,6 +107,24 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />
 }
 
+// PUBLIC-LIGHT GUARD (Ryan 2026-07-03): dark mode does not exist outside the
+// app. Public/marketing routes always render light regardless of the visitor's
+// OS or a logged-in user's stored theme; the stored theme re-applies the
+// moment the route enters /app. (All existing light styling is keyed on
+// html:not(.dark), so stripping the class flips everything consistently.)
+function PublicLightGuard() {
+  const { pathname } = useLocation()
+  const theme = useThemeStore((s) => s.theme)
+  useEffect(() => {
+    const inApp = pathname === '/app' || pathname.startsWith('/app/')
+    const root = document.documentElement
+    if (!inApp) root.classList.remove('dark')
+    else if (theme === 'dark') root.classList.add('dark')
+    else root.classList.remove('dark')
+  }, [pathname, theme])
+  return null
+}
+
 function AdminAwareIndex() {
   // Admins always land on /app/admin instead of the trader Dashboard.
   const user = useAuthStore((s) => s.user)
@@ -180,6 +199,8 @@ export default function App() {
         keep their own nested boundary (V2Route above), so they still fall
         back to the V2 skeleton shell rather than this spinner. */}
     <Suspense fallback={<PageLoadFallback />}>
+    <>
+    <PublicLightGuard />
     <Routes>
       {/* Public routes */}
       <Route path="/"         element={<V2Route><LandingV2 /></V2Route>} />
@@ -248,6 +269,7 @@ export default function App() {
       {/* Fallback */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
     </Suspense>
     </>
   )

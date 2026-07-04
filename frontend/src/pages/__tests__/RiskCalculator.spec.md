@@ -72,7 +72,7 @@ Pre-flight: at least one active broker account linked, hard-refresh
       and re-fetches sizing.** No stale data from the previous account
       bleeds through.
 
-## 6. Theta Scanner allocation persistence
+## 6. Saro allocation persistence
 
 - [ ] **Set $1k + check "Save as default" → next-day pre-fill.** With the
       cash account selected, type `1000`, check the box. ~600ms later the

@@ -503,7 +503,7 @@ def send_signal_email(
         )
     else:
         _lg.info(f"[signal-email] chart skipped (invalid geometry) sym={instrument} dir={direction} e={entry} s={stop} t={target}")
-    subject = f"🎯 Theta Scanner (Futures): {side_word} {instrument} @ {entry:.2f} · {strategy_name}"
+    subject = f"🎯 Saro (Futures): {side_word} {instrument} @ {entry:.2f} · {strategy_name}"
     html = f"""
     <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
       {_logo_header()}
