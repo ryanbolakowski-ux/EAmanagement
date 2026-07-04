@@ -85,8 +85,8 @@ def _build_synthetic_chain(underlying: str, spot: float, iv: float = 0.30,
             for opt_type in ("call", "put"):
                 chain.append(OptionContract(
                     underlying=underlying, expiration=exp,
-                    strike=float(k), option_type=opt_type,
-                    symbol=f"{underlying}{exp.strftime('%y%m%d')}{opt_type[0].upper()}{int(k*1000):08d}",
+                    strike=float(k), right=opt_type,
+                    ticker=f"O:{underlying}{exp.strftime('%y%m%d')}{opt_type[0].upper()}{int(k*1000):08d}",
                 ))
     return chain
 
@@ -124,7 +124,7 @@ async def _persist_close(trader, result, session_id, strategy_id, user_id, under
                 session_id=session_id,
                 mode="options_paper",
                 status="closed",
-                instrument=f"{underlying} {result.contract.option_type.upper()} {result.contract.strike} {result.contract.expiration}",
+                instrument=f"{underlying} {result.contract.right.upper()} {result.contract.strike} {result.contract.expiration}",
                 direction=result.direction,
                 contracts=result.contracts,
                 entry_price=result.entry_premium,
@@ -140,7 +140,7 @@ async def _persist_close(trader, result, session_id, strategy_id, user_id, under
                 notes={
                     "underlying": underlying,
                     "strike": result.contract.strike,
-                    "option_type": result.contract.option_type,
+                    "option_type": result.contract.right,
                     "expiration": str(result.contract.expiration),
                     "estimated_iv": result.estimated_iv,
                     "entry_spot": result.entry_spot,
@@ -283,7 +283,7 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                             bar_ts=latest_ts,
                         )
                         if opened:
-                            logger.info(f"[OptionsPaperRunner] opened: {side} {opened.contract.option_type} "
+                            logger.info(f"[OptionsPaperRunner] opened: {side} {opened.contract.right} "
                                          f"{opened.contract.strike} exp {opened.contract.expiration} @ ${opened.entry_premium:.2f}")
                             logger.info(
                                 f"[paper-runner] sid={session_id} ENTERED inst={underlying} "
