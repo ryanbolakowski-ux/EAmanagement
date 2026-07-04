@@ -268,7 +268,23 @@ export default function StrategyBuilder() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => strategiesApi.delete(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['strategies'] }); setDeleteConfirm(null) },
+    // DELETE-UX-FIX (2026-07-03, Ryan): the row now disappears the instant you
+    // confirm (optimistic), the button locks while in flight, and failures
+    // roll the row back + surface the error — previously the modal gave zero
+    // feedback and users triple-clicked (three 204s for one strategy in logs).
+    onMutate: async (id: string) => {
+      await qc.cancelQueries({ queryKey: ['strategies'] })
+      const prev = qc.getQueryData<any>(['strategies'])
+      qc.setQueryData<any>(['strategies'], (cur: any) =>
+        Array.isArray(cur) ? cur.filter((s: any) => s.id !== id) : cur)
+      setDeleteConfirm(null)
+      return { prev }
+    },
+    onError: (e: any, _id, ctx: any) => {
+      if (ctx?.prev !== undefined) qc.setQueryData(['strategies'], ctx.prev)
+      setError(e?.response?.data?.detail || 'Failed to delete strategy — it was restored to the list.')
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['strategies'] }),
   })
 
   const starMutation = useMutation({
@@ -784,8 +800,8 @@ export default function StrategyBuilder() {
             <h3 className="font-bold text-slate-900 mb-2 dark:text-slate-100">Delete Strategy?</h3>
             <p className="text-sm text-slate-500 mb-5 dark:text-slate-400">This will permanently remove this strategy and cannot be undone.</p>
             <div className="flex gap-3">
-              <button onClick={() => setDeleteConfirm(null)} className="flex-1 border border-slate-200 text-slate-600 py-2.5 rounded-xl text-sm font-medium dark:text-slate-300 dark:border-slate-700">Cancel</button>
-              <button onClick={() => deleteMutation.mutate(deleteConfirm)} className="flex-1 bg-red-500 hover:bg-red-600 text-white py-2.5 rounded-xl text-sm font-semibold transition-colors">Delete</button>
+              <button onClick={() => setDeleteConfirm(null)} disabled={deleteMutation.isPending} className="flex-1 border border-slate-200 text-slate-600 py-2.5 rounded-xl text-sm font-medium disabled:opacity-50 dark:text-slate-300 dark:border-slate-700">Cancel</button>
+              <button onClick={() => deleteMutation.mutate(deleteConfirm)} disabled={deleteMutation.isPending} className="flex-1 bg-red-500 hover:bg-red-600 text-white py-2.5 rounded-xl text-sm font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed">{deleteMutation.isPending ? 'Deleting…' : 'Delete'}</button>
             </div>
           </div>
         </div>
