@@ -510,28 +510,11 @@ export default function LandingV2() {
             structure-based entry, stop and target. When nothing clears the bar, Saro says so.
             <strong> A no-trade day is a feature, not a failure.</strong>
           </p>
-          <div className="v2-saro__stats">
-            <div className="v2-saro__stat">
-              <span className="v2-saro__num">50.0%</span>
-              <span className="v2-saro__lbl">win rate in a 6-week historical replay — vs 23.8% for the engine it replaces</span>
-            </div>
-            <div className="v2-saro__stat">
-              <span className="v2-saro__num">+1.53%</span>
-              <span className="v2-saro__lbl">average move per pick across the same replay window</span>
-            </div>
-            <div className="v2-saro__stat">
-              <span className="v2-saro__num">12 / 31</span>
-              <span className="v2-saro__lbl">mornings it refused to force a trade — discipline, encoded</span>
-            </div>
-          </div>
           <div className="v2-saro__cta">
             <Link to="/register" className="v2-btn v2-btn--primary v2-btn--lg">Get Saro’s next pick</Link>
             <a href="#pricing" className="v2-btn v2-btn--ghost v2-btn--lg">See plans</a>
           </div>
-          <p className="v2-saro__fineprint">
-            Replay: Saro’s exact rules re-run over May 19 – Jul 2, 2026 market data, outcomes scored by the same
-            rules applied to live picks. Historical results do not guarantee future performance. Not financial advice.
-          </p>
+          <p className="v2-saro__fineprint">Signals are informational only. Historical results do not guarantee future performance. Not financial advice.</p>
         </div>
       </section>
 
