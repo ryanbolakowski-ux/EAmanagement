@@ -42,9 +42,12 @@ from typing import Iterable, Optional
 from loguru import logger
 
 # ── Flag / env plumbing ─────────────────────────────────────────────────────
-# REALTIME_FEED: "" (off — the default) | "polygon". Read at CALL time, not
-# import time, so a compose env flip + restart (and monkeypatch in tests)
-# is all it takes.
+# REALTIME_FEED: "" (off — the default) | "polygon" | "fmp". Read at CALL
+# time, not import time, so a compose env flip + restart (and monkeypatch in
+# tests) is all it takes. The FMP provider (REALTIME-FEED-FMP: batch-quote
+# REST polling -> minute buckets -> this same store, optional ws, plus
+# on-demand REAL-TIME 1-min bars for arbitrary scanner candidates) lives in
+# app/engines/data_feeds/fmp_feed.py and is lazy-imported only when selected.
 _FLAG_ENV = "REALTIME_FEED"
 _SYMBOLS_ENV = "REALTIME_SYMBOLS"
 # Default subscription set: the two headline futures ETF proxies (QQQ→NQ,
@@ -74,7 +77,7 @@ def realtime_provider() -> str:
 def realtime_enabled() -> bool:
     """True only when a known provider is configured. Checked at CALL time by
     every consumer helper so flag-off behavior is byte-identical to today."""
-    return realtime_provider() in ("polygon",)
+    return realtime_provider() in ("polygon", "fmp")
 
 
 def _symbols_from_env() -> list[str]:
@@ -504,16 +507,29 @@ def create_feed_from_env() -> Optional[RealtimeFeed]:
     provider = realtime_provider()
     if provider in ("", "0", "off", "false", "none"):
         return None  # default: feed off, zero behavior change
-    if provider != "polygon":
-        logger.warning(f"[realtime-feed] unknown REALTIME_FEED provider '{provider}' — feed disabled")
-        return None
-    key = os.environ.get("POLYGON_API_KEY", "")
-    if not key:
-        logger.warning("[realtime-feed] REALTIME_FEED=polygon but POLYGON_API_KEY is empty — feed disabled")
-        return None
-    _feed = PolygonRealtimeFeed(store=_default_store, api_key=key, symbols=_symbols_from_env())
-    logger.info(f"[realtime-feed] polygon feed configured (symbols={_symbols_from_env()})")
-    return _feed
+    if provider == "polygon":
+        key = os.environ.get("POLYGON_API_KEY", "")
+        if not key:
+            logger.warning("[realtime-feed] REALTIME_FEED=polygon but POLYGON_API_KEY is empty — feed disabled")
+            return None
+        _feed = PolygonRealtimeFeed(store=_default_store, api_key=key, symbols=_symbols_from_env())
+        logger.info(f"[realtime-feed] polygon feed configured (symbols={_symbols_from_env()})")
+        return _feed
+    if provider == "fmp":
+        key = (os.environ.get("FMP_API_KEY", "") or "").strip()
+        if not key:
+            logger.warning("[realtime-feed] REALTIME_FEED=fmp but FMP_API_KEY is empty — feed disabled")
+            return None
+        # Lazy import: the FMP module is only paid for when actually selected.
+        from app.engines.data_feeds.fmp_feed import FMPRealtimeFeed
+        _feed = FMPRealtimeFeed(store=_default_store, api_key=key, symbols=_symbols_from_env())
+        logger.info(
+            f"[realtime-feed] fmp feed configured (symbols={_symbols_from_env()}, "
+            f"poll={_feed._poll_seconds:g}s, ws={'on' if _feed._ws_enabled else 'off'})"
+        )
+        return _feed
+    logger.warning(f"[realtime-feed] unknown REALTIME_FEED provider '{provider}' — feed disabled")
+    return None
 
 
 def get_fresh_bars(symbol: str, n: Optional[int] = None, max_age_s: float = STALE_AFTER_S) -> list:
@@ -545,6 +561,33 @@ def get_fresh_price(symbol: str, max_age_s: float = STALE_AFTER_S) -> Optional[f
     except Exception as e:
         logger.warning(f"[realtime-feed] get_fresh_price({symbol}) failed: {e}")
         return None
+
+
+async def get_ondemand_intraday_bars(
+    symbol: str,
+    n: Optional[int] = None,
+    date_et: Optional[str] = None,
+) -> list:
+    """On-demand REAL-TIME 1-min bars for an ARBITRARY ticker — no
+    subscription required. FMP-only: its /historical-chart/1min endpoint is
+    real-time on the live-entitled plan, TTL-cached in fmp_feed
+    (≤ 1 request/symbol/15s) with a hard timeout. This is what makes the
+    scanner's 09:35 confirmation real-time for EVERY candidate, not just the
+    symbols already streaming into the store.
+
+    Returns [] (never raises) when the provider isn't 'fmp', the key is
+    missing, or the fetch fails/times out — callers keep their delayed-REST
+    fallback, the exact same discipline as get_fresh_bars(). `date_et`
+    ('YYYY-MM-DD') filters to one ET session; bars come back in the REST-aggs
+    dict shape, oldest→newest."""
+    try:
+        if realtime_provider() != "fmp":
+            return []
+        from app.engines.data_feeds.fmp_feed import fetch_intraday_bars
+        return await fetch_intraday_bars(symbol, n=n, date_et=date_et)
+    except Exception as e:
+        logger.warning(f"[realtime-feed] get_ondemand_intraday_bars({symbol}) failed: {e}")
+        return []
 
 
 def request_symbols(symbols: Iterable[str]) -> None:

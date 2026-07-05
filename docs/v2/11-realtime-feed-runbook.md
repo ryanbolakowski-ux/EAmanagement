@@ -1,8 +1,14 @@
 # 11 — Real-Time Feed Go-Live Runbook (REALTIME-FEED-V1)
 
-**Status:** built, tested, flag-OFF in prod. Waiting on the vendor real-time
-entitlement (most likely a Polygon plan upgrade — same API key, real-time
-websocket access added).
+**Status:** built, tested, flag-OFF in prod. TWO providers are wired behind
+the same abstraction:
+
+* **`REALTIME_FEED=polygon`** — waiting on the Polygon real-time ws
+  entitlement (same API key, plan upgrade). Checklist directly below.
+* **`REALTIME_FEED=fmp`** — Financial Modeling Prep, the owner's LIVE-entitled
+  plan. Ready the moment `FMP_API_KEY` lands in the env — see the
+  **[FMP variant](#fmp-variant-go-live-realtime_feedfmp)** section for its
+  own go-live checklist.
 
 **What it is:** a supervised background task (`app/engines/data_feeds/
 realtime_feed.py`) that streams Polygon `AM.*` minute aggregates over a
@@ -144,6 +150,13 @@ The consumers only ever touch `LatestBarStore` via `get_fresh_bars()` /
 new `RealtimeFeed` subclass + one branch in `create_feed_from_env()` + a new
 `REALTIME_FEED=<provider>` value. Nothing else changes.
 
+**FMP is exactly that second provider** (`app/engines/data_feeds/fmp_feed.py`,
+`REALTIME_FEED=fmp`) — see the FMP variant section below. It also adds one
+NEW consumer capability the abstraction now exposes:
+`realtime_feed.get_ondemand_intraday_bars()` — on-demand REAL-TIME 1-min bars
+for ARBITRARY tickers (fmp-only; every other configuration returns `[]` so
+callers keep their REST fallback).
+
 ## Failure modes and what they look like
 
 | Failure | Behavior | Log signature |
@@ -164,8 +177,118 @@ preferred over Alpaca/Polygon, scanner confirms from store bars alone — the
 09:35 case), default symbols QQQ,SPY + runner auto-subscribe of IWM/DIA,
 reconnect backoff caps, not-authorized slow-retry.
 
+`backend/tests/test_fmp_feed.py` (no network, no DB): batch poll = ONE request
+per cycle, minute-bucket aggregation (incl. cumulative-volume deltas and
+minute-boundary rolls), fmp staleness gate, on-demand bar TTL cache + failure
+cooldown, factory selection (fmp/polygon/none), 429 backoff cap in the live
+poll loop, scanner FMP-preference + Polygon fallback, ws login rejection
+handled once with polling unaffected.
+
 ```bash
 IMG=$(docker inspect edge_backend --format '{{.Image}}')
 docker run --rm --cpus=2 -v /root/worktrees/v2-redesign/backend:/app -w /app $IMG \
-  sh -c 'pip install -q pytest && python -m pytest tests/test_realtime_feed.py -q'
+  sh -c 'pip install -q pytest && python -m pytest tests/test_realtime_feed.py tests/test_fmp_feed.py -q'
 ```
+
+---
+
+## FMP variant go-live (`REALTIME_FEED=fmp`)
+
+**Why FMP:** the owner's Financial Modeling Prep plan is LIVE-entitled today —
+no waiting on a Polygon upgrade. The FMP provider
+(`app/engines/data_feeds/fmp_feed.py`) drives the SAME store and the SAME
+three consumers, plus one extra capability Polygon's ws can't give us cheaply:
+
+* **Transport:** REST-polls the batch quote endpoint
+  (`/api/v3/quote-short/{SYM1,SYM2,...}`) every `FMP_POLL_SECONDS` (default
+  5s) — **one request per cycle regardless of symbol count** — and aggregates
+  the quotes into minute bars in-process (volume = delta of the cumulative
+  day volume; `v=0` if the payload ever omits volume). Optionally
+  (`FMP_WEBSOCKET=1`) it ALSO tries the FMP websocket; if the plan lacks ws
+  entitlement the rejection is logged once, ws is disabled for the run and
+  polling carries the feed — no crash-loop.
+* **On-demand real-time 1-min bars (the scanner's killer feature):**
+  `/api/v3/historical-chart/1min/{SYM}` is real-time on the live plan. The
+  scanner confirmation path calls it for EVERY candidate ticker (no
+  subscription needed) behind a 15s per-symbol TTL cache and a hard timeout,
+  and falls back to the delayed Polygon REST aggs on any failure. That makes
+  Saro confirmation real-time at 09:35 for every candidate.
+
+### 1. Env (add to `/root/edge-asset-management/backend/.env`)
+```
+REALTIME_FEED=fmp
+FMP_API_KEY=<the live-entitled key>
+```
+Optional knobs (defaults are fine):
+```
+FMP_POLL_SECONDS=5        # batch-quote poll cadence (floor 1s; 1 req/cycle total)
+FMP_WEBSOCKET=0           # 1 = also try wss://websockets.financialmodelingprep.com;
+                          #     auth rejection logs once + falls back to polling
+REALTIME_SYMBOLS=QQQ,SPY  # boot subscriptions (same defaults/dynamics as polygon:
+                          # IWM/DIA, tape stocks, scanner candidates self-subscribe)
+REALTIME_BACKOFF_BASE_S=2 # shared 429/5xx + ws reconnect backoff (exponential)
+REALTIME_BACKOFF_CAP_S=60 # hard cap
+```
+Then recreate (NOT just restart) the backend:
+```bash
+cd /root/edge-asset-management && docker compose up -d backend
+```
+
+### 2. Immediate verification (works even while markets are CLOSED)
+Auth + endpoint reachability can be checked the moment the key lands:
+```bash
+# quote endpoint (expect a JSON array, not an error object):
+curl -s "https://financialmodelingprep.com/api/v3/quote-short/QQQ,SPY?apikey=$FMP_API_KEY"
+# on-demand 1-min bars (expect bars from the last session):
+curl -s "https://financialmodelingprep.com/api/v3/historical-chart/1min/QQQ?apikey=$FMP_API_KEY" | head -c 400
+# feed boot logs:
+docker logs edge_backend 2>&1 | grep fmp-feed | tail -20
+```
+Expect at boot:
+- `[realtime-feed] fmp feed configured (symbols=['QQQ', 'SPY'], poll=5s, ws=off)`
+- `[fmp-feed] FMP feed starting: poll every 5s, ws=off, symbols=['QQQ', 'SPY']`
+- `[fmp-feed] quote poll #1: 2/2 symbols ingested (store symbols: 2)` (then
+  every ~10 min a `quote poll #N` heartbeat line)
+- With `FMP_WEBSOCKET=1` but no ws entitlement, exactly ONE
+  `[fmp-feed] ws login rejected (...) — ... REST polling continues unchanged.`
+
+> **Markets are closed this weekend** — quotes won't move and store ages will
+> read stale (that is correct behavior: stale store = consumers on their REST
+> paths). Full liveness verification happens **Monday premarket**.
+
+### 3. Full liveness verification (Monday premarket / RTH)
+1. **Store ages < 90s** — same check as polygon:
+   `docker logs edge_backend 2>&1 | grep "source=realtime-store" | tail -5`
+   (futures watchers log `source=realtime-store proxy=QQQ ... age=NNs`).
+2. **Tape LIVE from the store** — two curls a few seconds apart during RTH:
+   `curl -s localhost:8000/api/v1/public/tape` → `live: true`, prices move
+   between calls inside the 60s payload cache window.
+3. **Scanner confirmation source=fmp at 09:35** — on the first scan tick:
+   `docker logs edge_backend 2>&1 | grep "source=fmp"` →
+   `[ThetaScanner] <TICKER>: confirmation bars source=fmp (N live 1-min bars)`
+   and NO `no Polygon intraday bars — UNCONFIRMED` for actively-trading
+   tickers.
+4. **Rate discipline sanity** — the poll heartbeat log shows 1 batch request
+   per `FMP_POLL_SECONDS`; on-demand bars are ≤ 1 request/symbol/15s; on
+   429/5xx expect `quote poll HTTP <status> — backing off Ns` lines with N
+   growing to the 60s cap, never a tight loop.
+
+### Rollback (instant, zero-risk)
+```bash
+# remove/comment REALTIME_FEED (and optionally FMP_API_KEY) in backend/.env:
+cd /root/edge-asset-management && docker compose up -d backend
+```
+Flag off returns every consumer — including the scanner's on-demand FMP path —
+to today's REST behavior byte-for-byte (verified by
+`tests/test_realtime_feed.py` + `tests/test_fmp_feed.py`). Switching BACK to
+`REALTIME_FEED=polygon` later is equally safe: the fmp module is only imported
+when selected.
+
+### FMP failure modes
+| Failure | Behavior | Log signature |
+|---|---|---|
+| `FMP_API_KEY` missing | feed disabled at boot, consumers on REST | `REALTIME_FEED=fmp but FMP_API_KEY is empty` |
+| 429 / 5xx on the quote poll | exponential backoff (2s→60s cap), store goes stale → consumers auto-fall back | `quote poll HTTP 429 — backing off Ns` |
+| On-demand bars fail/timeout | `[]` + 15s per-symbol cooldown → scanner falls back to Polygon REST for that tick | `1min bars <SYM> ... cooling down 15s` |
+| Ws not entitled (`FMP_WEBSOCKET=1`) | logged ONCE, ws off for the run, polling unaffected | `ws login rejected ... REST polling continues` |
+| Poll silently returns junk | entries skipped per-quote, never raises | `bad quote entry skipped` / `unexpected quote payload shape` |

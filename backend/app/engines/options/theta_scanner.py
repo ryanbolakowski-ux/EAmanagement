@@ -126,11 +126,28 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
         reasons.append(f"catalyst: {c['catalyst_reason']}")
 
     date_et = _today_et_date_str()
+    # REALTIME-FEED-FMP: with REALTIME_FEED=fmp, FMP's 1-min endpoint is
+    # REAL-TIME for ANY candidate ticker (no subscription needed) — prefer it
+    # so the 09:30-09:35 candles are readable AT 09:35 for every candidate.
+    # Same discipline as the store path below: the helper returns [] on any
+    # failure / other provider / flag off (it never raises), and we fall back
+    # to the (15-min-delayed) Polygon REST aggs — flag-off behavior stays
+    # byte-identical to today.
+    bars_1m = None
     try:
-        bars_1m = await _polygon_1min_bars(ticker, date_et)
-    except Exception as e:
-        logger.info(f"[ThetaScanner] {ticker}: 1-min bar fetch errored ({type(e).__name__}: {e}) — skipping bar filters")
+        from app.engines.data_feeds.realtime_feed import get_ondemand_intraday_bars
+        bars_1m = await get_ondemand_intraday_bars(ticker, date_et=date_et)
+        if bars_1m:
+            logger.info(f"[ThetaScanner] {ticker}: confirmation bars source=fmp ({len(bars_1m)} live 1-min bars)")
+    except Exception as _fmp_exc:  # helper never raises — belt and braces
+        logger.info(f"[ThetaScanner] {ticker}: fmp on-demand bars skipped ({type(_fmp_exc).__name__}: {_fmp_exc})")
         bars_1m = None
+    if not bars_1m:
+        try:
+            bars_1m = await _polygon_1min_bars(ticker, date_et)
+        except Exception as e:
+            logger.info(f"[ThetaScanner] {ticker}: 1-min bar fetch errored ({type(e).__name__}: {e}) — skipping bar filters")
+            bars_1m = None
 
     # REALTIME-FEED-V1: merge seconds-fresh ws minute bars from the in-process
     # store over the (15-min-delayed) REST aggs. At 09:35 the delayed REST
