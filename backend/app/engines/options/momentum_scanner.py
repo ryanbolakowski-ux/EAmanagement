@@ -89,6 +89,18 @@ def _polygon_grouped_two_days():
     return (days[0], days[1]) if len(days) >= 2 else ({}, {})
 # --- end polygon-grouped-daily-source ---
 
+def _maybe_universe_compare(rows: list) -> None:
+    """[universe-compare] shadow hook (TRACK fmp-universe): when
+    SARO_UNIVERSE=polygon and SARO_UNIVERSE_SHADOW=fmp, fire-and-forget an FMP
+    universe fetch + one structured comparison log line right after the REAL
+    Polygon snapshot is built. Fully try/excepted — can never touch the scan."""
+    try:
+        from app.engines.data_feeds.fmp_universe import maybe_spawn_universe_compare
+        maybe_spawn_universe_compare(rows)
+    except Exception:
+        pass
+
+
 async def _fetch_market_snapshot() -> list[dict]:
     """Pull recent quotes + prev-close for the momentum universe via yfinance.
 
@@ -99,12 +111,36 @@ async def _fetch_market_snapshot() -> list[dict]:
     scanner code doesn't care which source it came from:
         {ticker, day: {c, v}, prevDay: {c, v},
          lastTrade: {p}, todaysChangePerc}
+
+    SARO_UNIVERSE=fmp (default polygon) routes to the FMP-sourced universe
+    (app.engines.data_feeds.fmp_universe) with graceful fallback to the
+    Polygon path below on ANY failure or a too-thin build.
     """
     now = datetime.now(timezone.utc)
+    source = (_os.environ.get("SARO_UNIVERSE", "polygon") or "polygon").strip().lower()
     if (_snapshot_cache["data"] is not None
             and _snapshot_cache["fetched_at"]
+            and _snapshot_cache.get("source", "polygon") == source
             and (now - _snapshot_cache["fetched_at"]).total_seconds() < _SNAPSHOT_TTL_SEC):
         return _snapshot_cache["data"]
+
+    if source == "fmp":
+        try:
+            from app.engines.data_feeds.fmp_universe import (
+                fetch_fmp_universe, FMP_MIN_UNIVERSE_ROWS,
+            )
+            fmp_rows = await fetch_fmp_universe()
+            if fmp_rows and len(fmp_rows) >= FMP_MIN_UNIVERSE_ROWS:
+                _snapshot_cache["data"] = fmp_rows
+                _snapshot_cache["fetched_at"] = now
+                _snapshot_cache["source"] = "fmp"
+                logger.info(f"[Momentum] FMP universe: {len(fmp_rows)} tickers (SARO_UNIVERSE=fmp)")
+                return fmp_rows
+            logger.warning(f"[Momentum] FMP universe too thin "
+                           f"({len(fmp_rows or [])} rows) — falling back to Polygon path")
+        except Exception as e:
+            logger.warning(f"[Momentum] FMP universe failed "
+                           f"({type(e).__name__}: {e}) — falling back to Polygon path")
 
     # Polygon grouped-daily (Stocks Starter): ~12k US tickers per call
     today_map, prev_map = _polygon_grouped_two_days()
@@ -136,7 +172,9 @@ async def _fetch_market_snapshot() -> list[dict]:
         if len(rows) > 200:
             _snapshot_cache["data"] = rows
             _snapshot_cache["fetched_at"] = now
+            _snapshot_cache["source"] = "polygon"
             logger.info(f"[Momentum] Polygon grouped-daily: {len(rows)} liquid tickers (>$10M/day)")
+            _maybe_universe_compare(rows)
             return rows
         logger.warning(f"[Momentum] Polygon returned only {len(rows)} rows, falling back to yfinance")
 
@@ -189,7 +227,10 @@ async def _fetch_market_snapshot() -> list[dict]:
 
     _snapshot_cache["data"] = rows
     _snapshot_cache["fetched_at"] = now
+    _snapshot_cache["source"] = "polygon"
     logger.info(f"[Momentum] yfinance pulled {len(rows)} tickers (from {len(MOMENTUM_UNIVERSE)} requested)")
+    if rows:
+        _maybe_universe_compare(rows)
     return rows
 
 
