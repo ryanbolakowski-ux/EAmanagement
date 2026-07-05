@@ -206,9 +206,11 @@ def test_fmp_provider_enables_helpers_and_staleness_gate(monkeypatch):
     assert rt.get_fresh_price("QQQ") == 600.0
 
     # Stale bucket (10 min old) -> refused, callers fall back to REST.
+    # NOTE: uses a DIFFERENT price — identical (price, cum_vol) re-observations
+    # are intentionally skipped by the closed-market freshness guard.
     store.clear()
     feed._agg.clear()
-    feed._ingest_tick("QQQ", 600.0, ts_s=time.time() - 600)
+    feed._ingest_tick("QQQ", 601.0, ts_s=time.time() - 600)
     age = store.age_seconds("QQQ")
     assert age is not None and age > rt.STALE_AFTER_S
     assert rt.get_fresh_bars("QQQ") == []
