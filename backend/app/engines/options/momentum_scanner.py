@@ -172,7 +172,12 @@ async def _fetch_market_snapshot() -> list[dict]:
         if len(rows) > 200:
             _snapshot_cache["data"] = rows
             _snapshot_cache["fetched_at"] = now
-            _snapshot_cache["source"] = "polygon"
+            # Tag with the REQUESTED source, not the path that produced the
+            # rows: under SARO_UNIVERSE=fmp these fallback rows are what the
+            # fmp source serves right now, and tagging them "polygon" would
+            # make the cache check above never hit — every snapshot call
+            # (17 per funnel cycle) would re-run the two heavy grouped calls.
+            _snapshot_cache["source"] = source
             logger.info(f"[Momentum] Polygon grouped-daily: {len(rows)} liquid tickers (>$10M/day)")
             _maybe_universe_compare(rows)
             return rows
@@ -227,7 +232,7 @@ async def _fetch_market_snapshot() -> list[dict]:
 
     _snapshot_cache["data"] = rows
     _snapshot_cache["fetched_at"] = now
-    _snapshot_cache["source"] = "polygon"
+    _snapshot_cache["source"] = source  # requested source — see grouped-path note
     logger.info(f"[Momentum] yfinance pulled {len(rows)} tickers (from {len(MOMENTUM_UNIVERSE)} requested)")
     if rows:
         _maybe_universe_compare(rows)
@@ -303,7 +308,7 @@ async def scan_for_momentum(
             price       = float(last_trade.get("p") or day.get("c") or 0)
             prev_close  = float(prev.get("c") or 0)
             day_volume  = int(day.get("v") or 0)
-            prev_volume = int(prev.get("v") or 0) or 1   # avoid divide-by-zero
+            prev_volume = int(prev.get("v") or 0)
             change_pct  = float(row.get("todaysChangePerc") or 0)
 
             # Filter
@@ -319,6 +324,14 @@ async def scan_for_momentum(
                 # reversal risk. Skip.
                 continue
             if change_pct < 0 and not include_negative:
+                continue
+            if prev_volume <= 0:
+                # No completed-session volume baseline (recent IPO, or an FMP
+                # mover missing from the Polygon prev map — fmp_universe emits
+                # prevDay.v=0 by its never-fabricate contract). The old
+                # `or 1` fallback fabricated a monster vol_ratio here and let
+                # such rows auto-pass the surge gate; a surge that can't be
+                # verified is not a surge — skip.
                 continue
             vol_ratio = day_volume / prev_volume
             if vol_ratio < min_vol_ratio:

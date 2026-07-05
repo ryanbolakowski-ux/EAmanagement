@@ -956,6 +956,22 @@ async def start_premarket_scheduler():
             except Exception as _sv2e:
                 logger.warning(f"[shadow-v2] check failed: {_sv2e}")
 
+            # ── FMP EOD volume snapshot (TRACK fmp-self-sufficiency) — once
+            # per trading day after 16:15 ET (loop runs until 20:00), persist
+            # the post-close screener close/volume into fmp_eod_snapshot so
+            # the next morning's universe build reads prevDay{c,v} from the
+            # table (zero Polygon, zero extra requests) instead of burning
+            # the <=200-request per-symbol EOD bridge. Own Redis latch
+            # (fmp:eod_snapshot:{date}) + try/except, same isolation pattern
+            # as the shadow hooks above — can never touch the scan loop.
+            try:
+                from app.engines.data_feeds.fmp_eod_snapshot import (
+                    _check_and_run_eod_snapshot,
+                )
+                await _check_and_run_eod_snapshot()
+            except Exception as _eode:
+                logger.warning(f"[fmp-eod-snapshot] check failed: {_eode}")
+
             # ── Pending stock-entry timing gate (2026-06-05) ──
             # Iterates Redis-queued picks and decides per the ICT timing
             # gate whether to fire pre-mkt, MOO, or defer.
@@ -1402,7 +1418,11 @@ async def _run_trailing_stop_watcher(reprice_only: bool = False):
     from sqlalchemy import text as _t
     import requests as _rq, os as _os
     key = _os.environ.get("POLYGON_API_KEY", "")
-    if not key: return
+    # POLYGON-EXIT: this position-protection loop must survive Polygon
+    # cancellation. FMP quote-short is primary when REALTIME_FEED=fmp; the
+    # Polygon snapshot below is the per-row fallback. Only bail out when
+    # NEITHER source is usable.
+    if not key and not _fmp_primary(): return
     async with async_session_factory() as db:
         rows = (await db.execute(_t("""
             SELECT id, user_id, broker_account_id, ticker, qty, entry_price,
@@ -1418,15 +1438,27 @@ async def _run_trailing_stop_watcher(reprice_only: bool = False):
         if not rows: return
         for r in rows:
             try:
-                # Get live price from Polygon snapshot
-                u = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{r.ticker}"
-                resp = _rq.get(u, params={"apiKey": key}, timeout=4)
-                if resp.status_code != 200: continue
-                t = (resp.json() or {}).get("ticker") or {}
                 price = None
-                for fld, sub in (("lastTrade","p"), ("min","c"), ("day","c"), ("prevDay","c")):
-                    v = (t.get(fld) or {}).get(sub)
-                    if v and float(v) > 0: price = float(v); break
+                # POLYGON-EXIT: FMP quote-short primary when REALTIME_FEED=fmp.
+                if _fmp_primary():
+                    try:
+                        from app.engines.data_feeds.fmp_feed import (
+                            fetch_quote_short_price_sync, log_fmp_primary_once)
+                        _pxf = fetch_quote_short_price_sync(r.ticker)
+                        if _pxf and _pxf > 0:
+                            price = float(_pxf)
+                            log_fmp_primary_once("premarket_scheduler._run_trailing_stop_watcher")
+                    except Exception:
+                        price = None
+                if price is None and key:
+                    # Get live price from Polygon snapshot (fallback)
+                    u = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{r.ticker}"
+                    resp = _rq.get(u, params={"apiKey": key}, timeout=4)
+                    if resp.status_code != 200: continue
+                    t = (resp.json() or {}).get("ticker") or {}
+                    for fld, sub in (("lastTrade","p"), ("min","c"), ("day","c"), ("prevDay","c")):
+                        v = (t.get(fld) or {}).get(sub)
+                        if v and float(v) > 0: price = float(v); break
                 if not price: continue
 
                 # SYSTEMS-CHECK-V2 heartbeat: record that we SUCCESSFULLY priced
@@ -1763,6 +1795,48 @@ def _polygon_key() -> str:
     return os.environ.get("POLYGON_API_KEY", "")
 
 
+def _fmp_primary() -> bool:
+    """POLYGON-EXIT: True when REALTIME_FEED=fmp — the bar/price helpers below
+    then serve FMP FIRST and keep their original Polygon code as the fallback.
+    Flag off / other provider -> False, so behavior is byte-identical to the
+    pre-migration code. Never raises."""
+    try:
+        from app.engines.data_feeds.realtime_feed import realtime_provider
+        return realtime_provider() == "fmp"
+    except Exception:
+        return False
+
+
+def _resample_1min_to_5min(bars_1m: list) -> list:
+    """Aggregate REST-aggs-shaped 1-min bars (oldest→newest) into 5-min bars:
+    bucket t = floor(t / 5min)·5min, o = first bar's open, h/l = extremes,
+    c = last bar's close, v = sum. Pure — unit-tested in
+    tests/test_polygon_exit.py. Bars with unusable timestamps are dropped."""
+    out: dict = {}
+    for b in bars_1m or []:
+        try:
+            t = int(b.get("t") or 0)
+            o = float(b.get("o") or 0)
+            h = float(b.get("h") or 0)
+            l = float(b.get("l") or 0)
+            c = float(b.get("c") or 0)
+            v = float(b.get("v") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if t <= 0:
+            continue
+        bt = (t // 300_000) * 300_000
+        cur = out.get(bt)
+        if cur is None:
+            out[bt] = {"t": bt, "o": o, "h": h, "l": l, "c": c, "v": v}
+        else:
+            cur["h"] = max(cur["h"], h)
+            cur["l"] = min(cur["l"], l)
+            cur["c"] = c
+            cur["v"] += v
+    return [out[k] for k in sorted(out)]
+
+
 def _today_et_date_str() -> str:
     """Return today's ET date as YYYY-MM-DD for Polygon range queries."""
     et = _eod_now_et()
@@ -1790,8 +1864,22 @@ async def _polygon_5min_bars(ticker: str, date_et: str) -> list:
     Returns a list of dicts: [{'t': epoch_ms, 'o': float, 'h': float,
                                 'l': float, 'c': float, 'v': int}, ...]
     Sorted ascending by time. Empty list on any failure."""
+    if not ticker or not date_et:
+        return []
+    # POLYGON-EXIT: FMP-primary when REALTIME_FEED=fmp — real-time 1-min bars
+    # resampled locally to 5-min. Empty/failed FMP falls through to Polygon.
+    if _fmp_primary():
+        try:
+            from app.engines.data_feeds.fmp_feed import fetch_intraday_bars, log_fmp_primary_once
+            bars_5m = _resample_1min_to_5min(
+                await fetch_intraday_bars(ticker, date_et=date_et))
+            if bars_5m:
+                log_fmp_primary_once("premarket_scheduler._polygon_5min_bars")
+                return bars_5m
+        except Exception:
+            pass
     key = _polygon_key()
-    if not key or not ticker or not date_et:
+    if not key:
         return []
     url = (
         f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}/"
@@ -1810,8 +1898,22 @@ async def _polygon_5min_bars(ticker: str, date_et: str) -> list:
 
 async def _polygon_1min_bars(ticker: str, date_et: str) -> list:
     """Fetch 1-minute bars for VWAP / pre-mkt-low computation."""
+    if not ticker or not date_et:
+        return []
+    # POLYGON-EXIT: FMP-primary when REALTIME_FEED=fmp. fetch_intraday_bars
+    # returns the same REST-aggs dict shape (and is TTL-cached + real-time on
+    # the live-entitled plan). Empty/failed FMP falls through to Polygon.
+    if _fmp_primary():
+        try:
+            from app.engines.data_feeds.fmp_feed import fetch_intraday_bars, log_fmp_primary_once
+            bars_1m = await fetch_intraday_bars(ticker, date_et=date_et)
+            if bars_1m:
+                log_fmp_primary_once("premarket_scheduler._polygon_1min_bars")
+                return bars_1m
+        except Exception:
+            pass
     key = _polygon_key()
-    if not key or not ticker or not date_et:
+    if not key:
         return []
     url = (
         f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}/"
@@ -1969,8 +2071,21 @@ def has_higher_high(bars_5m: list, now_et_min: int) -> bool:
 
 async def _polygon_last_trade_price(ticker: str) -> Optional[float]:
     """Fetch the most recent trade price for live pre-market gating."""
+    if not ticker:
+        return None
+    # POLYGON-EXIT: FMP quote-short primary when REALTIME_FEED=fmp (real-time
+    # on the live-entitled plan). None/failed FMP falls through to Polygon.
+    if _fmp_primary():
+        try:
+            from app.engines.data_feeds.fmp_feed import fetch_quote_short_price, log_fmp_primary_once
+            px = await fetch_quote_short_price(ticker)
+            if px and px > 0:
+                log_fmp_primary_once("premarket_scheduler._polygon_last_trade_price")
+                return float(px)
+        except Exception:
+            pass
     key = _polygon_key()
-    if not key or not ticker:
+    if not key:
         return None
     url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker.upper()}"
     resp = await _poly_get(url, {"apiKey": key}, timeout=4.0)

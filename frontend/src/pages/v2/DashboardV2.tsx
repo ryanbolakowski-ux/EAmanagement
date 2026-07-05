@@ -30,10 +30,10 @@
  * rest of the codebase composes pages. Namespaced under .v2-root so V1
  * screens are untouched.
  */
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, Briefcase, Compass, Crosshair, LayoutGrid,
+  Activity, Briefcase, Compass, Cpu, Crosshair, LayoutGrid,
 } from 'lucide-react'
 import {
   dashboardApi, liveTradingApi, paperTradingApi, scannerApi, strategiesApi, tradesApi,
@@ -41,7 +41,7 @@ import {
 } from '../../api/endpoints'
 import type { DashboardSummary, Strategy, Trade } from '../../types'
 import {
-  EmptyState, ErrorBoundary, LiveNumber, SectionHeader, Skeleton, Sparkline, StatCard,
+  EmptyState, EngineField, ErrorBoundary, LiveNumber, SectionHeader, Skeleton, Sparkline, StatCard,
 } from '../../components/v2'
 import { fmtEntryTime, fmtHold } from '../../components/TradeMetrics'
 import { useEventStream } from '../../hooks/useEventStream'
@@ -674,6 +674,36 @@ function ActivityFeed({ trades, isLoading, isError }: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 7. Engine — particle-field visual with REAL system-activity captions.
+// Decorative but honest: every caption is derived from data the page already
+// holds (stream state, positions, latest pick/signal) or a true static fact
+// about the system. No fabricated stats. See components/v2/EngineField.tsx
+// for the perf contract (30fps cap, offscreen/hidden pause, reduced motion).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function EnginePanel({ activity, live }: { activity: string[]; live: boolean }) {
+  return (
+    <div className="v2-card p-4">
+      <SectionHeader
+        title="Engine"
+        subtitle="live system activity"
+        icon={Cpu}
+        actions={live ? (
+          <span
+            className="v2-type-micro inline-flex items-center gap-1.5 whitespace-nowrap"
+            title="Live updates streaming — background polling paused"
+          >
+            <span className="v2-ticker__live-dot" />
+            LIVE
+          </span>
+        ) : undefined}
+      />
+      <EngineField height={220} activity={activity} live={live} />
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -770,6 +800,51 @@ export default function DashboardV2() {
 
   const openPositions = openPositionsQ.data ?? []
   const latestPick = pickQ.data?.picks?.[0] ?? null
+  const recentTrades = tradesQ.data ?? []
+  const strategies = strategiesQ.data ?? []
+
+  // ── Engine panel captions — REAL lines only, derived from data already
+  // on this page plus a few honest static system facts. Nothing invented.
+  const engineActivity = useMemo(() => {
+    const lines: string[] = []
+    lines.push(streamLive
+      ? 'live stream connected'
+      : 'stream offline — polling fallback active')
+
+    const liveOpen = portfolioQ.data?.open_positions_count ?? 0
+    const openCount = openPositions.length + liveOpen
+    lines.push(`monitoring ${openCount} open position${openCount === 1 ? '' : 's'}`)
+
+    if (!pickQ.isError && pickQ.data) {
+      lines.push(latestPick
+        ? `Saro: latest pick ${latestPick.ticker}`
+        : 'Saro: no pick today')
+    }
+
+    // Latest signal = newest trade entry in the fetched window (same data
+    // the Activity feed renders).
+    let lastEntry: Trade | null = null
+    let lastEntryTs = -Infinity
+    for (const t of recentTrades) {
+      if (!t.entry_time || t.entry_price == null) continue
+      const ts = new Date(t.entry_time).getTime()
+      if (ts > lastEntryTs) { lastEntryTs = ts; lastEntry = t }
+    }
+    if (lastEntry) {
+      lines.push(`signal: ${lastEntry.direction.toUpperCase()} ${lastEntry.instrument} @ ${fmtPx(lastEntry.entry_price)}`)
+    }
+
+    const activeStrategies = strategies.filter(s => s.status === 'active').length
+    if (activeStrategies > 0) {
+      lines.push(`V2 forward-test: ${activeStrategies} strateg${activeStrategies === 1 ? 'y' : 'ies'}`)
+    }
+
+    // Honest static system facts — real cadences, no invented stats.
+    lines.push('FMP quotes polling 5s')
+    lines.push('risk guardrails armed')
+    lines.push('daily bias engine: EMA 9/21 · 5m refresh')
+    return lines
+  }, [streamLive, openPositions.length, portfolioQ.data, pickQ.isError, pickQ.data, latestPick, recentTrades, strategies])
 
   return (
     <div className="v2-root v2-page">
@@ -860,6 +935,11 @@ export default function DashboardV2() {
             </ErrorBoundary>
           </div>
         </div>
+
+        {/* 7. Engine — live system activity field */}
+        <ErrorBoundary title="Engine">
+          <EnginePanel activity={engineActivity} live={streamLive} />
+        </ErrorBoundary>
 
       </div>
     </div>

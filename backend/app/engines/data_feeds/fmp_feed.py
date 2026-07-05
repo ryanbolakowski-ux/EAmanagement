@@ -253,6 +253,154 @@ async def fetch_intraday_bars(
     return _slice_bars(bars, n, date_et) if bars else []
 
 
+# ── POLYGON-EXIT: quote + settled-close helpers for the migrated call sites ─
+# Every runtime Polygon dependency (P&L marks, trailing-stop watcher, pre-mkt
+# confirmation, chart bars, systems-check) is FMP-primary when
+# REALTIME_FEED=fmp, keeping its original Polygon code as the fallback. These
+# helpers are that FMP layer. They NEVER raise — any failure returns
+# None/{} so the caller falls through to Polygon exactly as before.
+
+EOD_URL = "https://financialmodelingprep.com/stable/historical-price-eod/full"
+
+# [fmp-primary] first-use log dedupe — exactly one line per call site per
+# process, so prod logs show which migrated sites actually serve from FMP.
+_fmp_primary_logged: set = set()
+_fmp_primary_log_lock = threading.Lock()
+
+
+def log_fmp_primary_once(site: str) -> None:
+    """Emit the [fmp-primary] tag ONCE per call site (per process)."""
+    with _fmp_primary_log_lock:
+        if site in _fmp_primary_logged:
+            return
+        _fmp_primary_logged.add(site)
+    logger.info(
+        f"[fmp-primary] {site}: serving from FMP (REALTIME_FEED=fmp) — Polygon is fallback only"
+    )
+
+
+async def fetch_quote_short_price(symbol: str, timeout_s: float = 4.0) -> Optional[float]:
+    """Async /stable/quote-short last price for ONE symbol (the stable batch
+    endpoint is plan-restricted). None on any failure — callers keep their
+    existing Polygon-snapshot fallback. Never raises."""
+    sym = (symbol or "").strip().upper()
+    key = _env_api_key()
+    if not sym or not key:
+        return None
+    try:
+        import aiohttp
+
+        session = _get_session()
+        async with session.get(
+            QUOTE_URL,
+            params={"symbol": sym, "apikey": key},
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning(f"[fmp-feed] quote-short {sym}: HTTP {resp.status}")
+                return None
+            rows = await resp.json(content_type=None)
+        if isinstance(rows, list) and rows:
+            px = float(rows[0].get("price") or 0)
+            return px if px > 0 else None
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"[fmp-feed] quote-short {sym} failed ({type(e).__name__}: {e})")
+    return None
+
+
+def fetch_quote_short_price_sync(symbol: str, timeout_s: float = 3.0) -> Optional[float]:
+    """Sync twin of fetch_quote_short_price for the request/response P&L-mark
+    paths that already make blocking `requests` calls today. Never raises."""
+    sym = (symbol or "").strip().upper()
+    key = _env_api_key()
+    if not sym or not key:
+        return None
+    try:
+        import requests as _rq
+
+        r = _rq.get(QUOTE_URL, params={"symbol": sym, "apikey": key}, timeout=timeout_s)
+        if r.status_code != 200:
+            return None
+        rows = r.json() or []
+        if isinstance(rows, list) and rows:
+            px = float(rows[0].get("price") or 0)
+            return px if px > 0 else None
+    except Exception as e:
+        logger.warning(f"[fmp-feed] quote-short(sync) {sym} failed ({type(e).__name__}: {e})")
+    return None
+
+
+# Settled-close cache: symbol -> (monotonic_ts, close). A settled close only
+# changes once per session, so a 10-min TTL keeps the outside-RTH P&L loops
+# at ≤ 1 request/symbol/10min.
+SETTLED_CLOSE_TTL_S = 600.0
+_settled_close_cache: dict = {}
+_settled_close_lock = threading.Lock()
+
+
+def fetch_last_settled_close_sync(symbol: str, timeout_s: float = 4.0,
+                                  ttl_s: float = SETTLED_CLOSE_TTL_S) -> Optional[float]:
+    """Most recent SETTLED session close via /stable/historical-price-eod/full.
+    This is the FMP equivalent of Polygon's PNL-MARK-FREEZE-V1 freeze source
+    (day.c once today has settled, else prevDay.c): before today's settle the
+    newest EOD row is yesterday's close; after settle it becomes today's.
+    Never raises; None on any failure."""
+    sym = (symbol or "").strip().upper()
+    key = _env_api_key()
+    if not sym or not key:
+        return None
+    now = time.monotonic()
+    with _settled_close_lock:
+        hit = _settled_close_cache.get(sym)
+    if hit is not None and (now - hit[0]) < ttl_s:
+        return hit[1]
+    close: Optional[float] = None
+    try:
+        import requests as _rq
+
+        r = _rq.get(EOD_URL, params={"symbol": sym, "apikey": key}, timeout=timeout_s)
+        if r.status_code == 200:
+            rows = r.json() or []
+            if isinstance(rows, dict):  # tolerate a {"historical": [...]} wrapper
+                rows = rows.get("historical") or []
+            best_date = ""
+            for row in rows or []:
+                d = str(row.get("date") or "")
+                c = row.get("close")
+                if not d or c is None or d <= best_date:
+                    continue
+                try:
+                    cf = float(c)
+                except (TypeError, ValueError):
+                    continue
+                if cf > 0:
+                    best_date, close = d, cf
+    except Exception as e:
+        logger.warning(f"[fmp-feed] settled-close {sym} failed ({type(e).__name__}: {e})")
+    if close is not None:
+        with _settled_close_lock:
+            _settled_close_cache[sym] = (time.monotonic(), close)
+    return close
+
+
+def fmp_equity_snapshot_sync(symbol: str, session: str) -> dict:
+    """Polygon-stocks-snapshot-shaped 'ticker' dict built from FMP, honoring
+    the PNL-MARK-FREEZE-V1 session rule BY CONSTRUCTION:
+      'regular' session -> {'lastTrade': {'p': quote-short price}}  (live mark)
+      anything else     -> {'day': {'c': last settled EOD close}}   (frozen)
+    Feeding the result to pnl_marks.pick_equity_mark() keeps the RTH-freeze
+    semantics byte-identical: outside RTH the ONLY price present is the
+    settled close, so an after-hours print can never move open P&L. Returns
+    {} on any failure so callers fall through to the Polygon snapshot path."""
+    if (session or "") == "regular":
+        px = fetch_quote_short_price_sync(symbol)
+        return {"lastTrade": {"p": px}} if px else {}
+    close = fetch_last_settled_close_sync(symbol)
+    return {"day": {"c": close}} if close else {}
+
+
 # ── The feed ────────────────────────────────────────────────────────────────
 class FMPRealtimeFeed(RealtimeFeed):
     """FMP batch-quote poller (+ optional ws) → LatestBarStore.

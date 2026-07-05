@@ -34,3 +34,6 @@ export { sanitizeHtml } from './sanitizeHtml'
 
 export { default as TickerTape } from './TickerTape'
 export type { TickerTapeProps, TickerQuote } from './TickerTape'
+
+export { default as EngineField } from './EngineField'
+export type { EngineFieldProps } from './EngineField'
