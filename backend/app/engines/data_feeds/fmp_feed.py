@@ -54,8 +54,12 @@ from loguru import logger
 from app.engines.data_feeds.realtime_feed import LatestBarStore, RealtimeFeed
 
 # ── Endpoints (overridable for staging/tests) ───────────────────────────────
-QUOTE_URL = "https://financialmodelingprep.com/api/v3/quote-short/{symbols}"
-INTRADAY_URL = "https://financialmodelingprep.com/api/v3/historical-chart/1min/{symbol}"
+# FMP retired /api/v3 for accounts created after 2025-08-31 ("Legacy Endpoint").
+# This account uses the stable API (verified live 2026-07-05). The stable
+# quote endpoint takes ONE symbol per request on this plan (batch endpoint is
+# plan-restricted; a comma list returns []), so the poller iterates symbols.
+QUOTE_URL = "https://financialmodelingprep.com/stable/quote-short"
+INTRADAY_URL = "https://financialmodelingprep.com/stable/historical-chart/1min"
 DEFAULT_WS_URL = "wss://websockets.financialmodelingprep.com"
 
 # On-demand 1-min bars: TTL cache window (≤ 1 request/symbol/TTL) and the hard
@@ -230,10 +234,10 @@ async def fetch_intraday_bars(
         import aiohttp
 
         session = _get_session()
-        url = INTRADAY_URL.format(symbol=sym)
+        url = INTRADAY_URL
         async with session.get(
             url,
-            params={"apikey": key},
+            params={"symbol": sym, "apikey": key},
             timeout=aiohttp.ClientTimeout(total=timeout_s),
         ) as resp:
             if resp.status != 200:
@@ -419,16 +423,20 @@ class FMPRealtimeFeed(RealtimeFeed):
         import aiohttp
 
         session = _get_session()
-        url = QUOTE_URL.format(symbols=",".join(syms))
-        async with session.get(
-            url,
-            params={"apikey": self._api_key},
-            timeout=aiohttp.ClientTimeout(total=max(8.0, self._poll_seconds)),
-        ) as resp:
-            if resp.status != 200:
-                raise FMPHTTPError(resp.status)
-            raw = await resp.json(content_type=None)
-        ingested = self._ingest_quote_payload(raw)
+        # Stable API: one symbol per request (plan has no batch endpoint).
+        # N small requests per cycle; ~2-10 symbols keeps us far under FMP
+        # per-minute limits. First failure raises so the loop backs off.
+        ingested = 0
+        for sym in syms:
+            async with session.get(
+                QUOTE_URL,
+                params={"symbol": sym, "apikey": self._api_key},
+                timeout=aiohttp.ClientTimeout(total=max(8.0, self._poll_seconds)),
+            ) as resp:
+                if resp.status != 200:
+                    raise FMPHTTPError(resp.status)
+                raw = await resp.json(content_type=None)
+            ingested += self._ingest_quote_payload(raw)
         self._polls_total += 1
         if self._polls_total == 1 or self._polls_total % 120 == 0:
             logger.info(

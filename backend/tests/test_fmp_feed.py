@@ -118,18 +118,23 @@ def _clean_slate(monkeypatch):
 def test_quote_poll_single_batch_request_into_store(monkeypatch):
     store = LatestBarStore()
     feed = FMPRealtimeFeed(store=store, api_key="test-key", symbols=["QQQ", "SPY"], poll_seconds=5)
-    fake = _FakeSession([_FakeResponse(payload=[
-        {"symbol": "QQQ", "price": 600.5, "volume": 1_000_000},
-        {"symbol": "SPY", "price": 740.1, "volume": 2_000_000},
-        {"symbol": "JUNK", "price": 0},          # unusable — skipped
-        "not-a-dict",                             # junk — skipped
-    ])])
+    # Stable API: one request PER SYMBOL per cycle (plan has no batch endpoint);
+    # sorted symbol order -> QQQ then SPY. Junk payload shapes still skipped.
+    fake = _FakeSession([
+        _FakeResponse(payload=[{"symbol": "QQQ", "price": 600.5, "volume": 1_000_000}]),
+        _FakeResponse(payload=[
+            {"symbol": "SPY", "price": 740.1, "volume": 2_000_000},
+            {"symbol": "JUNK", "price": 0},          # unusable — skipped
+            "not-a-dict",                             # junk — skipped
+        ]),
+    ])
     monkeypatch.setattr(fmp, "_get_session", lambda: fake)
 
     ingested = asyncio.run(feed._poll_once())
     assert ingested == 2
-    assert len(fake.calls) == 1, "ONE batch request regardless of symbol count"
-    assert "quote-short/QQQ,SPY" in fake.calls[0]["url"]
+    assert len(fake.calls) == 2, "one request per subscribed symbol per cycle"
+    assert fake.calls[0]["params"]["symbol"] == "QQQ"
+    assert fake.calls[1]["params"]["symbol"] == "SPY"
     assert fake.calls[0]["params"]["apikey"] == "test-key"
     assert store.get_last_price("QQQ") == 600.5
     assert store.get_last_price("SPY") == 740.1
@@ -139,7 +144,7 @@ def test_quote_poll_single_batch_request_into_store(monkeypatch):
     # Empty subscription set -> no request at all.
     feed2 = FMPRealtimeFeed(store=store, api_key="test-key", symbols=[])
     assert asyncio.run(feed2._poll_once()) == 0
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2  # unchanged — empty set adds no requests
 
 
 # ── 2. Minute-bucket aggregation ────────────────────────────────────────────
@@ -231,7 +236,7 @@ def test_ondemand_bars_parse_filter_and_ttl_cache(monkeypatch):
 
     bars = asyncio.run(fmp.fetch_intraday_bars("tsla"))
     assert len(fake.calls) == 1
-    assert "historical-chart/1min/TSLA" in fake.calls[0]["url"]
+    assert fake.calls[0]["params"]["symbol"] == "TSLA"
     assert fake.calls[0]["params"]["apikey"] == "test-key"
     assert [b["c"] for b in bars] == [98.2, 100.8, 101.2], "must be sorted oldest→newest"
     # ET→epoch: 2026-07-02 09:31 EDT == 13:31 UTC; aggs shape throughout.
@@ -524,5 +529,6 @@ def test_subscribe_set_add_and_next_poll_pickup(monkeypatch):
     fake = _FakeSession([_FakeResponse(payload=[])])
     monkeypatch.setattr(fmp, "_get_session", lambda: fake)
     asyncio.run(feed._poll_once())
-    assert "quote-short/NVDA,QQQ,TSLA" in fake.calls[0]["url"], \
-        "dynamic subscriptions must ride the next batch poll"
+    polled = [c["params"]["symbol"] for c in fake.calls]
+    assert polled == ["NVDA", "QQQ", "TSLA"], \
+        "dynamic subscriptions must ride the next poll cycle (sorted, per-symbol)"
