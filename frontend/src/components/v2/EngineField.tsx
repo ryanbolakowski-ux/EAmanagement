@@ -84,6 +84,7 @@ export default function EngineField({
   className,
 }: EngineFieldProps) {
   const wrapRef = useRef<HTMLDivElement>(null)
+  const inViewRef = useRef(true)  // shared with the caption spawner (review nit)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const simRef = useRef<Sim | null>(null)
   // Captions change every poll cycle — read through a ref so a new array
@@ -258,6 +259,7 @@ export default function EngineField({
 
     const io = new IntersectionObserver(entries => {
       inView = entries[entries.length - 1]?.isIntersecting ?? false
+      inViewRef.current = inView
       syncLoop()
     })
     io.observe(wrap)
