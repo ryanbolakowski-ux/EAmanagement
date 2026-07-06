@@ -132,6 +132,8 @@ export const paperTradingApi = {
   deleteSession: (id: string) => api.delete(`/api/v1/paper-trading/sessions/${id}`),
   setLabel: (id: string, label: string | null) =>
     api.patch(`/api/v1/paper-trading/sessions/${id}/label`, { label }),
+  setAllocation: (id: string, starting_balance: number) =>
+    api.patch(`/api/v1/paper-trading/sessions/${id}/allocation`, { starting_balance }),
   getSessionDetail: (id: string) =>
     api.get(`/api/v1/paper-trading/sessions/${id}`),
   getTradeChart: (tradeId: string) =>

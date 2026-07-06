@@ -55,6 +55,9 @@ class SessionResponse(BaseModel):
     wins: int = 0
     losses: int = 0
     net_pnl: float
+    # Paper-engine capital allocation (ALLOC-V1). Applies when the session's
+    # runner (re)starts; None on rows created before the column existed.
+    starting_balance: Optional[float] = None
 
 
 class LabelUpdate(BaseModel):
@@ -217,6 +220,7 @@ async def list_paper_sessions(
             total_trades=int(total_closed or 0),
             wins=int(wins or 0), losses=int(losses or 0),
             net_pnl=float(computed_pnl or 0.0),
+            starting_balance=float(s.starting_balance) if s.starting_balance is not None else None,
         )
         for s, strategy_name, wins, losses, total_closed, computed_pnl in rows
     ]

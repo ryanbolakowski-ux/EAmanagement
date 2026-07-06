@@ -430,6 +430,16 @@ function SizingPreviewCard() {
 
   const accts: any[] = data?.per_account || []
 
+  // ALLOC-UX-V1: today's pick for the “Tomorrow’s buy” spot in the summary
+  // strip below. Same queryKey/queryFn as TodayPickCard above, so react-query
+  // shares one cache entry and dedupes the network call.
+  const { data: pickData } = useQuery({
+    queryKey: ['theta-today-pick'],
+    queryFn: () => api.get('/api/v1/scanner/today-pick').then((r: any) => r.data),
+    refetchInterval: 60_000,
+  })
+  const todayPick = pickData?.pick
+
   // Default the account selector to the first account once data loads.
   if (selectedAccountId === null && accts.length > 0) {
     setSelectedAccountId(accts[0].broker_account_id)
@@ -508,6 +518,54 @@ function SizingPreviewCard() {
         </div>
         {isFetching && <div className="text-[10px] text-slate-400">refreshing…</div>}
       </div>
+
+      {/* ── PLAIN-ENGLISH SUMMARY STRIP (ALLOC-UX-V1) ──────────────────
+           One sentence per connected broker account + a “Tomorrow’s buy”
+           spot, driven by the same sizing-preview + today-pick data. */}
+      {accts.length > 0 && (() => {
+        const effAlloc = (allocation !== '' && Number.isFinite(allocNum) && allocNum > 0)
+          ? allocNum
+          : Number(selected?.sizing?.allocation_usd || 0)
+        const px = todayPick ? Number(todayPick.live_price ?? todayPick.entry ?? 0) : 0
+        const estShares = (todayPick && effAlloc > 0 && px > 0) ? Math.floor(effAlloc / px) : null
+        return (
+          <div className="mt-3 rounded-xl border border-violet-200 dark:border-violet-800 bg-violet-50/60 dark:bg-violet-950/30 p-3">
+            <div className="space-y-1">
+              {accts.map((a: any) => {
+                const s = a.sizing || {}
+                const sentence =
+                  s.risk_model === 'allocation' ? `This account buys about $${Number(s.allocation_usd || 0).toLocaleString()} of Saro’s pick every day.`
+                  : s.risk_model === 'usd' ? `This account risks $${Number(s.risk_per_trade_usd || 0).toLocaleString()} per trade on Saro’s pick.`
+                  : s.risk_model === 'pct' ? `This account risks ${Number(s.risk_per_trade_pct || 0)}% per trade on Saro’s pick.`
+                  : `This account risks 1% per trade on Saro’s pick.`
+                return (
+                  <div key={a.broker_account_id} className="text-xs text-slate-700 dark:text-slate-200">
+                    <span className="font-bold">{a.account_name}</span>
+                    <span className="text-slate-400 dark:text-slate-500"> — </span>
+                    {sentence}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="mt-2 pt-2 border-t border-violet-200/70 dark:border-violet-800/50 text-xs text-slate-700 dark:text-slate-200">
+              <span className="text-[10px] uppercase tracking-wider font-extrabold text-violet-600 dark:text-violet-300 mr-2">Tomorrow’s buy</span>
+              {todayPick ? (
+                estShares != null ? (
+                  <>Today it bought/would buy ~{estShares.toLocaleString()} shares of <span className="font-bold">{todayPick.ticker}</span> at ~${px.toFixed(2)}.</>
+                ) : (
+                  <>Today’s pick is <span className="font-bold">{todayPick.ticker}</span>{px > 0 ? ` at ~$${px.toFixed(2)}` : ''} — set an Allocation $ above to see the share count.</>
+                )
+              ) : (
+                effAlloc > 0 ? (
+                  <>Decided tomorrow at 9:36 ET — with ${effAlloc.toLocaleString()} it will buy roughly ${effAlloc.toLocaleString()} worth of the pick.</>
+                ) : (
+                  <>Decided tomorrow at 9:36 ET — set an Allocation $ above to preview roughly how much it will buy.</>
+                )
+              )}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ── TOP STRIP: per-account status ───────────────────────────────── */}
       {selected && (() => {
