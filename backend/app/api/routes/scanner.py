@@ -401,7 +401,21 @@ def _polygon_snapshot_price(ticker: str):
     return None
 
 def _polygon_daily_range(ticker: str, start_iso: str, end_iso: str):
-    """Return daily OHLC bars for ticker. Empty list on failure."""
+    """Return daily OHLC bars for ticker. Empty list on failure.
+    POLYGON-EXIT: falls back to FMP daily EOD (same row shape) when Polygon
+    has no key or returns nothing — survives the Polygon cancellation."""
+    rows = _polygon_daily_range_polygon(ticker, start_iso, end_iso)
+    if rows:
+        return rows
+    try:
+        from app.engines.data_feeds.fmp_feed import fetch_daily_bars_sync
+        return fetch_daily_bars_sync(ticker, start_iso, end_iso) or []
+    except Exception:
+        return []
+
+
+def _polygon_daily_range_polygon(ticker: str, start_iso: str, end_iso: str):
+    """Original Polygon implementation (primary while the key lives)."""
     key = _os.environ.get("POLYGON_API_KEY", "")
     if not key: return []
     try:

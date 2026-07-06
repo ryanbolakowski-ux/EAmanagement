@@ -833,3 +833,56 @@ class FMPRealtimeFeed(RealtimeFeed):
             )
         self._ws_auth_rejected = True
         self._ws_authed = False
+
+
+# Daily-bars cache: (symbol,start,end) -> (monotonic_ts, rows). Daily history
+# only changes once per session, so a 10-min TTL matches the settled-close cache.
+DAILY_BARS_TTL_S = 600.0
+_daily_bars_cache: dict = {}
+_daily_bars_lock = threading.Lock()
+
+
+def fetch_daily_bars_sync(symbol: str, start_iso: str, end_iso: str,
+                          timeout_s: float = 6.0) -> list:
+    """Daily OHLCV via /stable/historical-price-eod/full, mapped to the
+    Polygon aggs row shape ({t,o,h,l,c,v}, ascending) so Polygon call sites
+    can fall back without changes. [] on any failure. Never raises."""
+    import time as _time
+
+    sym = (symbol or "").strip().upper()
+    key = _env_api_key()
+    if not sym or not key or not start_iso or not end_iso:
+        return []
+    ck = (sym, start_iso, end_iso)
+    now = _time.monotonic()
+    with _daily_bars_lock:
+        hit = _daily_bars_cache.get(ck)
+        if hit and (now - hit[0]) < DAILY_BARS_TTL_S:
+            return hit[1]
+    try:
+        import requests as _rq
+
+        r = _rq.get(
+            "https://financialmodelingprep.com/stable/historical-price-eod/full",
+            params={"symbol": sym, "from": start_iso, "to": end_iso, "apikey": key},
+            timeout=timeout_s,
+        )
+        if r.status_code != 200:
+            logger.warning(f"[fmp-feed] daily-bars {sym}: HTTP {r.status_code}")
+            return []
+        rows = r.json() or []
+        out = []
+        for row in rows if isinstance(rows, list) else []:
+            d, c = row.get("date"), row.get("close")
+            if not d or c is None:
+                continue
+            out.append({"t": _et_datestr_to_ms(str(d)[:10]), "o": row.get("open"),
+                        "h": row.get("high"), "l": row.get("low"),
+                        "c": float(c), "v": float(row.get("volume") or 0)})
+        out.sort(key=lambda b: b["t"])  # FMP returns newest-first
+        with _daily_bars_lock:
+            _daily_bars_cache[ck] = (now, out)
+        return out
+    except Exception as e:
+        logger.warning(f"[fmp-feed] daily-bars {sym} failed ({type(e).__name__}: {e})")
+        return []

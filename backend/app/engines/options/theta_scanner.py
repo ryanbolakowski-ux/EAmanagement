@@ -791,6 +791,132 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     return ok
 
 
+def _compose_simple_plan(*, ticker: str, price: float, would_be_pick: bool,
+                         is_candidate: bool, above_vwap: bool, overext: bool,
+                         illiquid: bool, vwap, swing_low, lv: dict,
+                         analyst) -> dict:
+    """Plain-English game plan for 'Analyze any ticker' (owner request
+    2026-07-06): the price to wait for -> buy -> hold-to target -> long-term
+    analyst target. Long-only (the stock side is long-biased). Truthful
+    numbers only: entries come from VWAP/structure, swing targets from
+    compute_levels, long-term targets from Wall St analyst consensus (FMP) —
+    nothing invented. Pure function: no I/O, easy to test."""
+
+    def _r2(v):
+        return round(float(v), 2) if v is not None else None
+
+    def _when(buy_at: float) -> str:
+        dist = abs(price - buy_at) / price * 100.0 if price else 0.0
+        if dist <= 0.3:
+            return "today"
+        if dist <= 1.5:
+            return "possibly today"
+        if dist <= 4.0:
+            return "in the next day or two"
+        return "in the next few days"
+
+    action, buy_how, buy_at = "wait", None, None
+    if illiquid:
+        action = "skip"
+    elif would_be_pick:
+        action, buy_how, buy_at = "buy_now", "now", price
+    elif is_candidate and not above_vwap and vwap:
+        action, buy_how, buy_at = "wait", "break_above", vwap
+    elif overext and vwap and vwap < price:
+        action, buy_how, buy_at = "wait", "dip_to", vwap
+    else:
+        supports = [v for v in (vwap, swing_low) if v and 0 < v < price]
+        if supports:
+            action, buy_how, buy_at = "wait", "dip_to", max(supports)
+        else:
+            action = "stand_aside"
+
+    sell_at = lv.get("target")
+    stop_at = lv.get("stop")
+    stop_note = "the setup's structure stop"
+    # A dip-buy entry below the computed stop makes that stop meaningless.
+    if buy_at and stop_at and stop_at >= buy_at:
+        stop_at = _r2(buy_at * 0.97)
+        stop_note = "about 3% under your entry"
+
+    steps = []
+    base = buy_at or price
+    up_swing = ((sell_at / base) - 1) * 100.0 if (sell_at and base) else None
+    if action == "skip":
+        steps.append(f"Skip {ticker} for now — it doesn't trade enough shares "
+                     f"to get in and out safely.")
+    elif action == "stand_aside":
+        steps.append(f"No clean buy price on {ticker} right now — don't chase "
+                     f"it. Check back tomorrow.")
+    elif action == "buy_now":
+        steps.append(f"{ticker} is a buy right now around ${_r2(price)}.")
+    elif buy_how == "break_above":
+        steps.append(f"Wait for {ticker} to climb back above ${_r2(buy_at)} "
+                     f"({_when(buy_at)}), then buy.")
+    else:
+        steps.append(f"Wait for {ticker} to dip to about ${_r2(buy_at)} "
+                     f"({_when(buy_at)}), then buy.")
+    if action in ("buy_now", "wait") and stop_at:
+        steps.append(f"If it drops to ${_r2(stop_at)} after you buy, sell and "
+                     f"walk away — the trade didn't work.")
+    if action in ("buy_now", "wait") and sell_at:
+        pct = f" (+{up_swing:.0f}%)" if up_swing and up_swing > 0 else ""
+        steps.append(f"Take your profit around ${_r2(sell_at)}{pct} — usually "
+                     f"within days.")
+
+    long_term = None
+    if analyst and analyst.get("target"):
+        t = float(analyst["target"])
+        up = (t / price - 1) * 100.0 if price else 0.0
+        long_term = {"target": _r2(t), "upside_pct": round(up, 1),
+                     "rating": analyst.get("rating"),
+                     "analysts": analyst.get("analysts")}
+        who = (f"{analyst['analysts']} analysts" if analyst.get("analysts")
+               else "Wall Street analysts")
+        rate = f", rated {analyst['rating']}" if analyst.get("rating") else ""
+        if up >= 5:
+            steps.append(f"Bigger picture: {who} average a ${_r2(t)} target "
+                         f"(+{up:.0f}% from here{rate}) — that's the "
+                         f"long-term hold level.")
+        elif up <= -5:
+            steps.append(f"Careful holding long-term: {who} average a "
+                         f"${_r2(t)} target — {abs(up):.0f}% BELOW today's "
+                         f"price{rate}.")
+        else:
+            steps.append(f"Long-term, {who} see it near ${_r2(t)} — about "
+                         f"flat from here{rate}. Treat this as a short-term "
+                         f"trade.")
+    else:
+        steps.append("No Wall Street analyst coverage on this one — treat it "
+                     "as a short-term trade only, not a long-term hold.")
+
+    if action == "skip":
+        headline = f"Skip {ticker} — too thin to trade safely."
+    elif action == "stand_aside":
+        headline = f"{ticker}: no clean buy level right now — wait."
+    elif action == "buy_now":
+        headline = (f"Buy {ticker} now (~${_r2(price)}), sell around "
+                    f"${_r2(sell_at)}." if sell_at
+                    else f"Buy {ticker} now (~${_r2(price)}).")
+    else:
+        verb = "breaks back above" if buy_how == "break_above" else "dips to"
+        headline = (f"Wait until {ticker} {verb} ~${_r2(buy_at)}, then buy"
+                    + (f" and hold to ${_r2(sell_at)}." if sell_at else "."))
+    if long_term and long_term["upside_pct"] >= 5:
+        headline = (headline.rstrip(".")
+                    + f" — or hold long-term toward ${long_term['target']}.")
+
+    tradeable = action in ("buy_now", "wait")
+    return {"action": action, "headline": headline, "buy_how": buy_how,
+            "buy_at": _r2(buy_at), "buy_when": _when(buy_at) if buy_at else None,
+            "sell_at": _r2(sell_at) if tradeable else None,
+            "stop_at": _r2(stop_at) if tradeable else None,
+            "stop_note": stop_note if tradeable else None,
+            "long_term": long_term, "steps": steps,
+            "source_note": ("Levels from live price structure; long-term "
+                            "target from Wall St analyst consensus (FMP).")}
+
+
 async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
     """On-demand analysis of ANY ticker: live price, structure-based levels
     (compute_levels) and the scanner quality-gate verdict (_apply_quality_filters).
@@ -827,6 +953,7 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
     rel_vol = 0.0          # today vol vs prior-day vol (the scanner's rel-vol metric)
     rel_vol_20d = 0.0      # today vol vs 20-day avg (context)
     today_vol = 0.0
+    dr = []  # 45d daily bars — reused for daily structure + the game plan
     try:
         from app.api.routes.scanner import _polygon_daily_range
         end = _date.today()
@@ -853,8 +980,8 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
     except Exception as e:
         verdict, reasons = "error", [f"{type(e).__name__}: {e}"]
 
-    lv_long = compute_levels("long", float(price), bars, rr=2.0)
-    lv_short = compute_levels("short", float(price), bars, rr=2.0)
+    lv_long = compute_levels("long", float(price), bars, daily_bars=dr, rr=2.0)
+    lv_short = compute_levels("short", float(price), bars, daily_bars=dr, rr=2.0)
 
     # Coarse momentum match: does it clear gap / rel-vol / price / $-vol for any
     # PROMOTED template? This separates "passes the risk gate" (accept) from
@@ -938,6 +1065,33 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
         dreason = "No valid setup right now \u2014 no momentum, no confirmation."
     decision_obj = {"label": decision, "tone": tone, "reason": dreason, "tags": tags}
 
+    # ── Plain-English game plan (owner request 2026-07-06) ──
+    analyst = None
+    try:
+        from app.engines.data_feeds.fmp_analyst import get_analyst_view
+        analyst = await get_analyst_view(tkr)
+    except Exception:
+        analyst = None
+    _lows = [float(b.get("l") or 0) for b in dr[-11:-1] if b.get("l")]
+    swing10_low = min(_lows) if _lows else None
+    plan = _compose_simple_plan(
+        ticker=tkr, price=float(price),
+        would_be_pick=bool(would_be_pick), is_candidate=bool(is_candidate),
+        above_vwap=bool(above_vwap), overext=bool(overext),
+        illiquid=bool(sess_liq < 1_000_000),
+        vwap=float(vwap) if vwap else None, swing_low=swing10_low,
+        lv={"entry": lv_long.entry, "stop": lv_long.stop,
+            "target": lv_long.target, "rr": lv_long.rr, "ok": lv_long.ok,
+            "projected_move_pct": lv_long.projected_move_pct},
+        analyst=analyst,
+    )
+    try:
+        from app.engines.options.premarket_scheduler import _fmp_primary as _fmp_p
+        _src = ("FMP live quote (real-time)" if _fmp_p()
+                else "Polygon/Massive (15-min delayed)")
+    except Exception:
+        _src = "Polygon/Massive (15-min delayed)"
+
     def _lv(lv):
         return {"entry": lv.entry, "stop": lv.stop, "stop_reason": lv.stop_reason,
                 "target": lv.target, "target_reason": lv.target_reason, "rr": lv.rr,
@@ -957,7 +1111,7 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
     return {
         "ticker": tkr,
         "price": round(float(price), 2),
-        "price_source": "Polygon/Massive grouped-daily + 1-min bars (Stocks Starter = 15-min delayed)",
+        "price_source": _src,
         "as_of": now,
         "prev_close": round(prev_close, 2) if prev_close else None,
         "gap_pct": round(gap_pct, 2),
@@ -973,6 +1127,7 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
         "levels_long": _lv(lv_long),
         "levels_short": _lv(lv_short),
         "decision": decision_obj,
+        "plan": plan,
         "summary": summary,
         "note": ("Structure + gate analysis only — NOT a price prediction or guarantee. "
                  "Gate is long-biased (VWAP); short levels are structural references only."),

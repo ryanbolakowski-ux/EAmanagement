@@ -59,6 +59,43 @@ function LevelsCard({ label, dir, lv }: { label: string; dir: 'long' | 'short'; 
   )
 }
 
+const PLAN_BG: Record<string, string> = {
+  buy_now: 'border-emerald-300 bg-emerald-50/70 dark:bg-emerald-900/20 dark:border-emerald-800',
+  wait: 'border-violet-300 bg-violet-50/70 dark:bg-violet-900/20 dark:border-violet-800',
+  stand_aside: 'border-slate-300 bg-slate-50 dark:bg-slate-800/40 dark:border-slate-700',
+  skip: 'border-slate-300 bg-slate-50 dark:bg-slate-800/40 dark:border-slate-700',
+}
+
+// The plain-English plan — what to actually DO, before any metrics.
+function PlanCard({ plan }: { plan: any }) {
+  if (!plan) return null
+  return (
+    <div className={`rounded-xl border p-3.5 ${PLAN_BG[plan.action] || PLAN_BG.stand_aside}`}>
+      <div className="text-[10px] font-bold uppercase tracking-wider text-violet-600 dark:text-violet-400 mb-1">The game plan</div>
+      <div className="text-sm font-extrabold text-slate-900 dark:text-slate-100 leading-snug">{plan.headline}</div>
+      <ol className="mt-2.5 space-y-1.5">
+        {(plan.steps || []).map((s: string, i: number) => (
+          <li key={i} className="flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <span className="flex-shrink-0 w-4 h-4 rounded-full bg-violet-600 text-white text-[10px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
+            <span className="font-medium">{s}</span>
+          </li>
+        ))}
+      </ol>
+      {plan.long_term?.target && (
+        <div className="flex flex-wrap gap-1.5 mt-2.5">
+          <Badge tone={plan.long_term.upside_pct >= 5 ? 'green' : plan.long_term.upside_pct <= -5 ? 'red' : 'slate'}>
+            Long-term target ${plan.long_term.target} ({plan.long_term.upside_pct >= 0 ? '+' : ''}{plan.long_term.upside_pct}%)
+          </Badge>
+          {plan.long_term.rating && (
+            <Badge tone="slate">{plan.long_term.rating}{plan.long_term.analysts ? ` · ${plan.long_term.analysts} analysts` : ''}</Badge>
+          )}
+        </div>
+      )}
+      <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">{plan.source_note}</div>
+    </div>
+  )
+}
+
 export default function TickerAnalyzer() {
   const [ticker, setTicker] = useState('')
   const [loading, setLoading] = useState(false)
@@ -93,7 +130,7 @@ export default function TickerAnalyzer() {
         <Search size={16} className="text-violet-600 dark:text-violet-400" />
         <h2 className="text-sm font-extrabold text-slate-900 dark:text-slate-100">Analyze any ticker</h2>
       </div>
-      <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-3">Live structure levels + scanner verdict. Read-only — not a prediction or guarantee.</p>
+      <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-3">Type any stock — get the plan in plain English: the price to buy at, where to sell, and the long-term target. Not a guarantee.</p>
 
       <div className="flex gap-2">
         <input
@@ -121,6 +158,9 @@ export default function TickerAnalyzer() {
 
       {res && (
         <div className="mt-4 space-y-3">
+          {/* GAME PLAN — plain English, before any metrics */}
+          {res.plan && <PlanCard plan={res.plan} />}
+
           {/* DECISION — the call, front and center */}
           <div className={`rounded-xl border p-3 ${DEC_BG[res.decision?.tone] || DEC_BG.none}`}>
             <div className="flex items-center flex-wrap gap-2">
