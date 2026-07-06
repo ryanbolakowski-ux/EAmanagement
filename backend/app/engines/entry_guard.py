@@ -154,6 +154,18 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
     except Exception as _be:
         logger.warning(f"[entry-guard] bias-alignment errored ({_be}) — failing open")
 
+    # ── NY-LUNCH NO-TRADE WINDOW (owner rule 2026-07-06): no NEW futures
+    # entries 11:00-14:00 ET unless the strategy is explicitly exempted. ──
+    try:
+        from app.engines import lunch_window as _lw
+        _lname = await _lw.strategy_name_for(strategy_id) if _lw._exempt_set() else None
+        _lblocked, _lwhy = _lw.lunch_blocked(instrument, strategy_name=_lname)
+        if _lblocked:
+            logger.info(f"[entry-guard] BLOCKED lunch-window: {_lwhy} (session={session_id})")
+            return Decision(allowed=False, reason=_lwhy)
+    except Exception as _le:
+        logger.warning(f"[entry-guard] lunch-window errored ({_le}) — failing open")
+
     await ensure_strategy_columns()
     limits = await _get_strategy_limits(strategy_id, instrument)
     cooldown_min = limits["cooldown_min"]

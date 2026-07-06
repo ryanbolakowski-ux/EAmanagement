@@ -806,6 +806,18 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     except Exception as _be:
         logger.warning(f"[Signals] bias-alignment errored ({_be}) — failing open")
 
+    # ── NY-LUNCH NO-TRADE WINDOW (owner rule 2026-07-06): no new futures
+    # signals 11:00-14:00 ET unless the strategy is explicitly exempted.
+    # strategy_name is already a parameter here — no DB lookup needed. ──
+    try:
+        from app.engines.lunch_window import lunch_blocked as _lunch_blocked
+        _lblocked, _lwhy = _lunch_blocked(instrument, strategy_name=strategy_name)
+        if _lblocked:
+            logger.info(f"[Signals] SUPPRESSED by lunch-window: {_lwhy} watcher={watcher_id}")
+            return
+    except Exception as _le:
+        logger.warning(f"[Signals] lunch-window errored ({_le}) — failing open")
+
     entry = round(signal.entry_price, 2)
     stop = round(float(signal.stop_loss), 2)
     tp = round(float(signal.take_profit), 2)
