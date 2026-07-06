@@ -1169,3 +1169,12 @@ html:not(.dark) .v2-root .v2-lp-nav { background: rgba(242, 245, 249, 0.88); }
   color: var(--v2-text-3);
   pointer-events: none;
 }
+
+/* ── 23. Saro section constellation (homepage, force-light) ─────────── */
+.v2-root .v2-saro__engine {
+  margin-top: var(--v2-sp-4);
+  border: 1px solid rgba(109, 79, 190, 0.22);
+  border-radius: 8px;
+  overflow: hidden;
+  background: linear-gradient(to bottom, rgba(36, 29, 61, 0.03), rgba(91, 63, 174, 0.07));
+}

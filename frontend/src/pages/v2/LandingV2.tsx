@@ -6,7 +6,7 @@ import {
   TrendingUp, Zap,
 } from 'lucide-react'
 import ThetaLogo from '../../components/ThetaLogo'
-import { StatCard, LiveNumber, TickerTape } from '../../components/v2'
+import { StatCard, LiveNumber, TickerTape, EngineField } from '../../components/v2'
 
 // ═════════════════════════════════════════════════════════════════════════
 // Published platform facts — every figure below already appears on the V1
@@ -510,6 +510,21 @@ export default function LandingV2() {
             structure-based entry, stop and target. When nothing clears the bar, Saro says so.
             <strong> A no-trade day is a feature, not a failure.</strong>
           </p>
+          <div className="v2-saro__engine" aria-hidden="true">
+            <EngineField
+              height={190}
+              density={85}
+              live={true}
+              activity={[
+                'scanning 6,000+ US stocks',
+                'volume expansion check',
+                '9:35 ET confirmation gate',
+                'structure-based stops & targets',
+                'liquidity & VWAP checks',
+                'no clean setup? no trade.',
+              ]}
+            />
+          </div>
           <div className="v2-saro__cta">
             <Link to="/register" className="v2-btn v2-btn--primary v2-btn--lg">Get Saro’s next pick</Link>
             <a href="#pricing" className="v2-btn v2-btn--ghost v2-btn--lg">See plans</a>
