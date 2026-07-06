@@ -795,6 +795,17 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     now = datetime.now(timezone.utc)
     detected_at = now
     direction = signal.signal.value
+    # ── DAILY-BIAS ALIGNMENT (owner hard rule 2026-07-06): a signal whose
+    # direction contradicts the platform daily bias is never emailed. ──
+    try:
+        from app.engines.bias_alignment import direction_allowed as _bias_ok
+        _ok, _why = await _bias_ok(instrument, direction)
+        if not _ok:
+            logger.info(f"[Signals] SUPPRESSED by bias-alignment: {_why} watcher={watcher_id}")
+            return
+    except Exception as _be:
+        logger.warning(f"[Signals] bias-alignment errored ({_be}) — failing open")
+
     entry = round(signal.entry_price, 2)
     stop = round(float(signal.stop_loss), 2)
     tp = round(float(signal.take_profit), 2)

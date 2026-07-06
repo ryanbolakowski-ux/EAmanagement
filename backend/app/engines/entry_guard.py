@@ -144,6 +144,16 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
     the guard falls back to DB-queried open trades — useful for engines
     that DO persist open rows (live, options-paper).
     """
+    # ── DAILY-BIAS ALIGNMENT (owner hard rule 2026-07-06) — first gate ──
+    try:
+        from app.engines.bias_alignment import direction_allowed as _bias_ok
+        _ok, _why = await _bias_ok(instrument, direction)
+        if not _ok:
+            logger.info(f"[entry-guard] BLOCKED bias-alignment: {_why} (session={session_id})")
+            return Decision(allowed=False, reason=_why)
+    except Exception as _be:
+        logger.warning(f"[entry-guard] bias-alignment errored ({_be}) — failing open")
+
     await ensure_strategy_columns()
     limits = await _get_strategy_limits(strategy_id, instrument)
     cooldown_min = limits["cooldown_min"]
