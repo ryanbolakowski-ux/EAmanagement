@@ -14,6 +14,8 @@ selectivity for intraday templates is the intraday confirmation done live during
 forward-testing. Options templates (14-17) are eligible=True but stay paper/
 watch-only and do not run in the equity funnel until a paid options feed is live.
 """
+import os
+
 from app.engines.scanner.templates import (
     StrategyTemplate, LiquidityReqs, StructureLevels, OptionsEligibility,
 )
@@ -360,6 +362,34 @@ _reg(StrategyTemplate(
                               max_option_spread_pct=10.0, target_delta_low=0.55, target_delta_high=0.70,
                               dte_min=21, dte_max=45, iv_rank_max=50.0),
     validation_method="backtest_daily", **_SC,
+))
+
+# ── 18. Capitulation Gap Reclaim (SARO-RANK-UPGRADE, 2026-07-06) ────────────
+# multi-day capitulation (-15%+ / 5d) reclaimed with a +5% gap — IREN
+# 2026-07-06 class (5d -18.7%, 20d -40.7%, gapped +8.1% Monday on fresh
+# catalysts, +13% on the day, while Saro picked the GPC post-pop fade). The
+# coarse daily gate only sees today's gap; the -15%/5d requirement is enforced
+# POST-ENRICHMENT in find_best_pick_via_funnel — candidates matched ONLY by
+# this template are dropped when chg_5d_pct > -15 (or unknown). `enabled`
+# follows the SARO_RANK_UPGRADE env gate (read at import) so flag-off behavior
+# is byte-identical to before this template existed.
+_reg(StrategyTemplate(
+    key="capitulation_gap_reclaim", display_name="Capitulation Gap Reclaim",
+    enabled=(os.environ.get("SARO_RANK_UPGRADE", "1") == "1"),
+    family="mean_reversion", direction="long", hold_horizon="intraday",
+    thesis="multi-day capitulation (-15%+ / 5d) reclaimed with a +5% gap — IREN 2026-07-06 class",
+    daily_filters={"gap_min": 5.0, "gap_max": 60.0, "rel_vol_min": 1.0,
+                   "price_min": 5.0, "price_max": 500.0, "dollar_vol_min": 50_000_000},
+    liquidity=LiquidityReqs(min_price=5.0, max_price=500.0, min_dollar_vol_premarket=1_000_000,
+                            min_avg_daily_dollar_vol=50_000_000, max_spread_bps=30,
+                            min_float=10_000_000, min_mktcap=300_000_000),
+    atr_min_pct=2.0, atr_max_pct=15.0,
+    confirmation=["chg_5d<=-15%(post-enrichment)", "gap>=+5%", "above_vwap", "liquid_adv20"],
+    levels=StructureLevels(entry_basis="reclaim_breakout", stop_basis="intraday_swing_low|OR_low",
+                           target_basis="measured_move(gap)|prior_supply_shelf", atr_period=14,
+                           atr_stop_mult=1.0, rr_ratio=2.0),
+    options=OptionsEligibility(eligible=False),
+    validation_method="forward_test", **_SC,
 ))
 
 

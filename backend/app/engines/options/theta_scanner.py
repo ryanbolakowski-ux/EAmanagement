@@ -7,6 +7,25 @@ from loguru import logger
 _NOPICK_STATE: dict = {"last": None}
 from sqlalchemy import text
 
+def _rank_upgrade_enabled() -> bool:
+    """SARO_RANK_UPGRADE env gate (default ON) — 2026-07-06 GPC/IREN fix."""
+    return os.environ.get("SARO_RANK_UPGRADE", "1") == "1"
+
+
+def _stale_quote_check(snapshot_price, live_price, max_diff_pct: float = 3.0) -> tuple:
+    """(is_stale, diff_pct). PURE. Fail-open (False, None) when either side is
+    missing/non-positive — a missing live quote must never block a pick."""
+    try:
+        snap = float(snapshot_price or 0)
+        live = float(live_price or 0)
+        if snap <= 0 or live <= 0:
+            return False, None
+        diff_pct = (live - snap) / snap * 100.0
+        return abs(diff_pct) > float(max_diff_pct), round(diff_pct, 2)
+    except Exception:
+        return False, None
+
+
 _CATALYST_WEIGHTS = {
     "1.01": 2.0, "2.02": 1.3, "7.01": 1.4, "8.01": 1.5, "5.02": 1.2,
 }
@@ -124,6 +143,29 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
     reasons.append(f"rel-vol {c.get('rel_vol', 0)}x")
     if c.get("catalyst_reason") and c["catalyst_reason"] != "high rel-vol gap":
         reasons.append(f"catalyst: {c['catalyst_reason']}")
+
+    # ── SARO-RANK-UPGRADE STALE-QUOTE HARD GATE (2026-07-06) ──
+    # The GPC pick was made entirely on Thursday 7/02's session (delayed-tier
+    # snapshot over a holiday weekend): "gap +12.92% / $132.57" while GPC really
+    # traded ~$126 Monday. When a LIVE FMP quote is available and disagrees with
+    # the snapshot price by >3%, the whole candidate row is untrustworthy —
+    # hard reject. Fail-open when no live quote is obtainable.
+    if _rank_upgrade_enabled() and (os.environ.get("REALTIME_FEED", "") or "").lower() == "fmp":
+        _live_px = None
+        try:
+            _live_px = c.get("live_price")
+            if not _live_px:
+                from app.engines.data_feeds.fmp_feed import fetch_quote_short_price
+                _live_px = await fetch_quote_short_price(ticker)
+        except Exception:
+            _live_px = None
+        _is_stale, _diff_pct = _stale_quote_check(price, _live_px)
+        if _is_stale:
+            _msg = (f"stale snapshot: live ${float(_live_px):.2f} vs snapshot "
+                    f"${price:.2f} ({_diff_pct:+.1f}%) — data mismatch")
+            logger.warning(f"[ThetaScanner] reject {ticker}: {_msg}")
+            reasons.append(_msg)
+            return "reject", reasons
 
     date_et = _today_et_date_str()
     # REALTIME-FEED-FMP: with REALTIME_FEED=fmp, FMP's 1-min endpoint is
@@ -263,6 +305,7 @@ async def find_best_pick_via_funnel(db):
 
     # coarse + score across all promoted templates; keep best (score, template) per ticker
     best_by_tkr = {}
+    best_alt_by_tkr = {}  # SARO-RANK-UPGRADE: best NON-capitulation match per ticker
     for tpl in tpls:
         for r in rows:
             c = _coarse(tpl, r)
@@ -275,11 +318,66 @@ async def find_best_pick_via_funnel(db):
             prev = best_by_tkr.get(c["ticker"])
             if prev is None or c["score"] > prev["score"]:
                 best_by_tkr[c["ticker"]] = c
+            # fallback pool: if a ticker's winning match is capitulation_gap_reclaim
+            # but enrichment later shows it is NOT a -15%/5d capitulation, we swap
+            # to this next-best template match instead of mislabeling the setup.
+            if tpl.key != "capitulation_gap_reclaim":
+                _palt = best_alt_by_tkr.get(c["ticker"])
+                if _palt is None or c["score"] > _palt["score"]:
+                    best_alt_by_tkr[c["ticker"]] = c
     cands = sorted(best_by_tkr.values(), key=lambda x: x["score"], reverse=True)
     if not cands:
         _NOPICK_STATE["last"] = {"ticker": None, "score": 0,
             "reason": "no liquid candidate matched a promoted template today"}
         return None
+
+    # ── SARO-RANK-UPGRADE (2026-07-06): enrich the finalists with LIVE data
+    # (live quote/gap, 70d daily history, analyst consensus) and RE-SCORE them
+    # before the quality walk. Root cause of the GPC-over-IREN miss: the whole
+    # snapshot was Thursday's session, so every score was fiction. Env-gated;
+    # ANY failure proceeds exactly as today with the snapshot scores.
+    if _rank_upgrade_enabled():
+        try:
+            from app.engines.scanner.enrich import enrich_finalists
+            _top = list(cands[:12])
+            await enrich_finalists(_top, top_n=12)
+            _kept = []
+            for c in _top:
+                if c.get("matched_strategy") == "capitulation_gap_reclaim":
+                    # post-enrichment template requirement: a real multi-day
+                    # capitulation (chg_5d_pct <= -15) — else this match is void.
+                    _chg5 = c.get("chg_5d_pct")
+                    if _chg5 is None or float(_chg5) > -15.0:
+                        _alt = best_alt_by_tkr.get(c["ticker"])
+                        if _alt is None:
+                            logger.info(
+                                f"[stock-scanner] {c['ticker']}: capitulation_gap_reclaim "
+                                f"requires chg_5d<=-15% post-enrichment (got {_chg5}) and no "
+                                "other template matched — dropped")
+                            continue
+                        for _k, _v in c.items():
+                            _alt.setdefault(_k, _v)  # carry enrichment; keep alt's template
+                        c = _alt
+                _kept.append(c)
+            _tpl_by_key = {t.key: t for t in tpls}
+            for c in _kept:
+                _tpl = _tpl_by_key.get(c.get("matched_strategy"))
+                if _tpl is None:
+                    continue
+                _sb2 = score_candidate(c, atr_min_pct=_tpl.atr_min_pct, atr_max_pct=_tpl.atr_max_pct)
+                c["score"] = _sb2.total
+            _kept.sort(key=lambda x: x["score"], reverse=True)
+            cands = _kept + list(cands[12:])
+            if not cands:
+                _NOPICK_STATE["last"] = {"ticker": None, "score": 0,
+                    "reason": "all finalists dropped by post-enrichment template requirements"}
+                return None
+            logger.info("[stock-scanner] SARO_RANK_UPGRADE re-scored finalists: "
+                        + ", ".join(f"{c['ticker']} {c['score']:.0f}" for c in cands[:6]))
+        except Exception as _en_exc:
+            logger.warning(
+                f"[stock-scanner] SARO_RANK_UPGRADE enrich/re-score failed "
+                f"({type(_en_exc).__name__}: {_en_exc}) — proceeding with snapshot scores")
 
     for c in cands[:12]:
         try:
