@@ -78,4 +78,15 @@ def test_no_analyst_coverage_degrades():
 
 def test_upside_reaches_headline():
     p = _plan(would_be_pick=True)  # analyst +30%
-    assert "hold long-term toward $130.0" in p["headline"]
+    assert "hold long-term toward $130.00" in p["headline"]
+
+
+def test_faraway_support_stands_aside():
+    # a swing low 60% below price is NOT a dip-buy level (ZCMD regression)
+    p = _plan(vwap=None, swing_low=40.0)
+    assert p["action"] == "stand_aside"
+
+
+def test_money_formatting_two_decimals():
+    p = _plan(would_be_pick=True, lv={**LV, "target": 112.5})
+    assert "$112.50" in p["steps"][2]

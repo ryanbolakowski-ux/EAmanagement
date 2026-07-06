@@ -805,6 +805,9 @@ def _compose_simple_plan(*, ticker: str, price: float, would_be_pick: bool,
     def _r2(v):
         return round(float(v), 2) if v is not None else None
 
+    def _money(v):
+        return f"{float(v):,.2f}"
+
     def _when(buy_at: float) -> str:
         dist = abs(price - buy_at) / price * 100.0 if price else 0.0
         if dist <= 0.3:
@@ -825,7 +828,10 @@ def _compose_simple_plan(*, ticker: str, price: float, would_be_pick: bool,
     elif overext and vwap and vwap < price:
         action, buy_how, buy_at = "wait", "dip_to", vwap
     else:
-        supports = [v for v in (vwap, swing_low) if v and 0 < v < price]
+        # only levels within 10% below price — a -60% micro-cap swing
+        # low is not a dip-buy plan, it is a different stock
+        supports = [v for v in (vwap, swing_low)
+                    if v and price * 0.90 <= v < price]
         if supports:
             action, buy_how, buy_at = "wait", "dip_to", max(supports)
         else:
@@ -849,19 +855,19 @@ def _compose_simple_plan(*, ticker: str, price: float, would_be_pick: bool,
         steps.append(f"No clean buy price on {ticker} right now — don't chase "
                      f"it. Check back tomorrow.")
     elif action == "buy_now":
-        steps.append(f"{ticker} is a buy right now around ${_r2(price)}.")
+        steps.append(f"{ticker} is a buy right now around ${_money(price)}.")
     elif buy_how == "break_above":
-        steps.append(f"Wait for {ticker} to climb back above ${_r2(buy_at)} "
+        steps.append(f"Wait for {ticker} to climb back above ${_money(buy_at)} "
                      f"({_when(buy_at)}), then buy.")
     else:
-        steps.append(f"Wait for {ticker} to dip to about ${_r2(buy_at)} "
+        steps.append(f"Wait for {ticker} to dip to about ${_money(buy_at)} "
                      f"({_when(buy_at)}), then buy.")
     if action in ("buy_now", "wait") and stop_at:
-        steps.append(f"If it drops to ${_r2(stop_at)} after you buy, sell and "
+        steps.append(f"If it drops to ${_money(stop_at)} after you buy, sell and "
                      f"walk away — the trade didn't work.")
     if action in ("buy_now", "wait") and sell_at:
         pct = f" (+{up_swing:.0f}%)" if up_swing and up_swing > 0 else ""
-        steps.append(f"Take your profit around ${_r2(sell_at)}{pct} — usually "
+        steps.append(f"Take your profit around ${_money(sell_at)}{pct} — usually "
                      f"within days.")
 
     long_term = None
@@ -875,15 +881,15 @@ def _compose_simple_plan(*, ticker: str, price: float, would_be_pick: bool,
                else "Wall Street analysts")
         rate = f", rated {analyst['rating']}" if analyst.get("rating") else ""
         if up >= 5:
-            steps.append(f"Bigger picture: {who} average a ${_r2(t)} target "
+            steps.append(f"Bigger picture: {who} average a ${_money(t)} target "
                          f"(+{up:.0f}% from here{rate}) — that's the "
                          f"long-term hold level.")
         elif up <= -5:
             steps.append(f"Careful holding long-term: {who} average a "
-                         f"${_r2(t)} target — {abs(up):.0f}% BELOW today's "
+                         f"${_money(t)} target — {abs(up):.0f}% BELOW today's "
                          f"price{rate}.")
         else:
-            steps.append(f"Long-term, {who} see it near ${_r2(t)} — about "
+            steps.append(f"Long-term, {who} see it near ${_money(t)} — about "
                          f"flat from here{rate}. Treat this as a short-term "
                          f"trade.")
     else:
@@ -895,16 +901,16 @@ def _compose_simple_plan(*, ticker: str, price: float, would_be_pick: bool,
     elif action == "stand_aside":
         headline = f"{ticker}: no clean buy level right now — wait."
     elif action == "buy_now":
-        headline = (f"Buy {ticker} now (~${_r2(price)}), sell around "
-                    f"${_r2(sell_at)}." if sell_at
-                    else f"Buy {ticker} now (~${_r2(price)}).")
+        headline = (f"Buy {ticker} now (~${_money(price)}), sell around "
+                    f"${_money(sell_at)}." if sell_at
+                    else f"Buy {ticker} now (~${_money(price)}).")
     else:
         verb = "breaks back above" if buy_how == "break_above" else "dips to"
-        headline = (f"Wait until {ticker} {verb} ~${_r2(buy_at)}, then buy"
-                    + (f" and hold to ${_r2(sell_at)}." if sell_at else "."))
+        headline = (f"Wait until {ticker} {verb} ~${_money(buy_at)}, then buy"
+                    + (f" and hold to ${_money(sell_at)}." if sell_at else "."))
     if long_term and long_term["upside_pct"] >= 5:
         headline = (headline.rstrip(".")
-                    + f" — or hold long-term toward ${long_term['target']}.")
+                    + f" — or hold long-term toward ${_money(long_term['target'])}.")
 
     tradeable = action in ("buy_now", "wait")
     return {"action": action, "headline": headline, "buy_how": buy_how,
