@@ -330,14 +330,35 @@ def infer_stop_target_reasons(
     bars_df,
     instrument: Optional[str] = None,
     now_utc=None,
+    bars_tf_label: Optional[str] = None,
+    allow_vwap_stop: bool = False,
 ) -> dict:
     """Infer human-readable reasons for a stop and target price.
+
+    NOTE (LABEL-TRUTH-V1): this is a POST-HOC FALLBACK. The futures signal
+    path now gets truthful reasons straight from the strategy branch that
+    chose each level; only call this when no strategy-provided reason exists.
 
     Returns ``{"stop_reason": str, "target_reason": str}``. Compares the stop
     and target against detected market levels (swings, previous-day high/low,
     Asian/London/NY-AM session highs/lows, session VWAP, FVG edges) and labels
     each with the CLOSEST level within tolerance. For a LONG, the stop skews to
     protective *lows* and the target to objective *highs* (mirrored for SHORT).
+
+    Side sanity (doctrine): a candidate can only label a STOP if it sits on
+    the protective side of entry (above entry for shorts, below for longs) and
+    a TARGET only if it sits on the objective side. This is what previously
+    allowed a short's stop — necessarily ABOVE entry — to be labelled
+    "session VWAP" while the VWAP sat BELOW entry: an impossible attribution.
+
+    allow_vwap_stop: doctrine says stops default to STRUCTURE; VWAP is only a
+    valid stop basis when the strategy config explicitly uses a VWAP stop.
+    Pass True only in that case — otherwise "session VWAP" can never be
+    emitted as a stop reason.
+
+    bars_tf_label: timeframe of ``bars_df`` (e.g. "5m"). When given, swing and
+    FVG labels name it ("5m swing low", "5m FVG invalidation") — doctrine
+    requires FVG references to carry a timeframe.
 
     Falls back to ``"strategy stop"`` / ``"strategy target"`` when nothing
     matches or the bars are unusable. NEVER raises and NEVER returns a blank
@@ -389,6 +410,8 @@ def infer_stop_target_reasons(
     low_candidates = []   # things at the downside
     high_candidates = []  # things at the upside
 
+    _tf = (str(bars_tf_label).strip() + " ") if bars_tf_label else ""
+
     # 1. Named session / previous-day levels (most specific).
     for label, (side, val) in sessions.items():
         if side == "low":
@@ -396,13 +419,16 @@ def infer_stop_target_reasons(
         else:
             high_candidates.append((label, val))
 
-    # 2. FVG invalidation edges.
+    # 2. FVG invalidation edges (timeframe-qualified when known — doctrine:
+    #    an FVG reference must name its timeframe).
     for v in fvg_bull:
-        low_candidates.append(("FVG invalidation", v))
+        low_candidates.append((f"{_tf}FVG invalidation", v))
     for v in fvg_bear:
-        high_candidates.append(("FVG invalidation", v))
+        high_candidates.append((f"{_tf}FVG invalidation", v))
 
-    # 3. Session VWAP.
+    # 3. Session VWAP — target-side context only. As a STOP basis it is gated
+    #    behind allow_vwap_stop (doctrine: structure stops by default; VWAP
+    #    stops only when the strategy config explicitly uses one).
     if vwap is not None:
         low_candidates.append(("session VWAP", vwap))
         high_candidates.append(("session VWAP", vwap))
@@ -410,9 +436,9 @@ def infer_stop_target_reasons(
     # 4. Generic swing pivots (least specific — only wins when nothing named
     #    is closer).
     for v in s_lo:
-        low_candidates.append(("swing low", v))
+        low_candidates.append((f"{_tf}swing low", v))
     for v in s_hi:
-        high_candidates.append(("swing high", v))
+        high_candidates.append((f"{_tf}swing high", v))
 
     # ── Assemble per-leg candidate ordering by side ──────────────────────
     if is_long:
@@ -425,6 +451,31 @@ def infer_stop_target_reasons(
         # Unknown direction — consider everything for both legs.
         stop_pool = low_candidates + high_candidates
         target_pool = high_candidates + low_candidates
+
+    # ── Side sanity (doctrine) ────────────────────────────────────────────
+    # A stop label must come from a level on the PROTECTIVE side of entry
+    # (short: >= entry; long: <= entry) and a target label from the OBJECTIVE
+    # side. Without this, a loose tolerance could attribute a short's stop
+    # (above entry) to a level below entry — the fabricated-"session VWAP"
+    # bug on the 2026-07-05 NQ short.
+    def _side_ok(level, protective: bool) -> bool:
+        try:
+            lv = float(level)
+        except (TypeError, ValueError):
+            return False
+        if is_long:
+            return lv <= entry_f if protective else lv >= entry_f
+        if is_short:
+            return lv >= entry_f if protective else lv <= entry_f
+        return True  # unknown direction — no side filter
+
+    stop_pool = [
+        (lbl, lv) for lbl, lv in stop_pool
+        if _side_ok(lv, protective=True)
+        and (allow_vwap_stop or lbl != "session VWAP")
+    ]
+    target_pool = [(lbl, lv) for lbl, lv in target_pool
+                   if _side_ok(lv, protective=False)]
 
     stop_tol = _tolerance_for(stop_f, instrument)
     target_tol = _tolerance_for(target_f, instrument)

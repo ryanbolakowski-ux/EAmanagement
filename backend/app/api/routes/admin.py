@@ -683,6 +683,7 @@ def _redact_secrets(blob):
     endpoint itself (which simply never returns secrets in the first place)."""
     leaked = []
     BAD = ("ANTHROPIC_API_KEY", "STRIPE_SECRET_KEY", "POLYGON_API_KEY",
+           "FMP_API_KEY",  # POLYGON-EXIT: the FMP key is a secret too
            "RESEND_API_KEY", "encrypted_credentials", "hashed_password",
            "admin_passcode_hash")
     def _walk(o):
@@ -965,6 +966,11 @@ async def systems_check(
     except Exception:
         last_resend_code = None
 
+    # POLYGON-EXIT: FMP is the primary market-data provider — the card is
+    # green only when FMP_API_KEY is configured (a lone legacy Polygon key no
+    # longer counts). Helper lives in scanner_health so it's unit-testable.
+    from app.engines.scanner_health import market_data_component as _mdc
+
     integrations = {
         "kyc_webhooks": {
             # Health = webhook CONFIGURED + reachable. KYC events fire only on
@@ -986,10 +992,7 @@ async def systems_check(
             "last_sync_at": broker_last.isoformat() if broker_last else None,
             "accounts": broker_n,
         },
-        "market_data": {
-            "status": "green" if os.environ.get("POLYGON_API_KEY") else "yellow",
-            "providers": ["polygon", "yfinance", "twelvedata"],
-        },
+        "market_data": _mdc(),
         "stripe_webhook": {
             "status": stripe_status,
             "last_received_at": None,
@@ -1115,7 +1118,7 @@ async def systems_check(
         "database": "Postgres unreachable — check the edge_db container and DATABASE_URL.",
         "redis": "Redis unreachable — check the edge_redis container and REDIS_URL.",
         "stripe_webhook": "STRIPE_WEBHOOK_SECRET not set in prod env — add it so Stripe events verify.",
-        "market_data": "POLYGON_API_KEY not set — fallbacks (cache/yfinance) still work, but the primary provider is unconfigured.",
+        "market_data": "FMP_API_KEY not set — fallbacks (polygon/cache/yfinance) still work, but the primary provider (FMP) is unconfigured.",
         "tradier_api": "A real-money live Tradier session is active but its broker account has no stored "
                        "credentials. Reconnect the Tradier account under Settings → Brokers. (The global "
                        "TRADIER_API_KEY env var is NOT used — credentials are per-account.)",
@@ -1131,7 +1134,7 @@ async def systems_check(
         "broker_sync": "resync_broker", "email_provider": "refresh_email_health",
         "queue": "clear_stale_jobs", "redis": "refresh_health", "database": "refresh_health",
         # market_data intentionally NOT auto-fixable: its only failure mode is a
-        # missing POLYGON_API_KEY, which a re-check cannot set -> show instructions.
+        # missing FMP_API_KEY, which a re-check cannot set -> show instructions.
         # futures_scanner intentionally NOT auto-fixable: futures signals are
         # event-driven during RTH, so there's nothing to "re-run" -> show guidance.
     }
@@ -1369,10 +1372,17 @@ async def systems_check_fix(
     try:
         if action == "resync_positions":
             # Round 2: re-price ONLY (never trades), and don't claim success when
-            # the real blocker is a missing Polygon key.
-            if not os.environ.get("POLYGON_API_KEY"):
+            # the real blocker is that NO usable market-data source is configured.
+            # POLYGON-EXIT: the watcher prices from FMP first (REALTIME_FEED=fmp
+            # + FMP_API_KEY) and falls back to Polygon — mirror that gate here.
+            _fmp_usable = (
+                (os.environ.get("REALTIME_FEED", "") or "").strip().lower() == "fmp"
+                and bool(os.environ.get("FMP_API_KEY"))
+            )
+            if not os.environ.get("POLYGON_API_KEY") and not _fmp_usable:
                 ok = False
-                msg = "Cannot re-price: POLYGON_API_KEY is not configured (set it, then retry)."
+                msg = ("Cannot re-price: no market-data source configured — set "
+                       "REALTIME_FEED=fmp + FMP_API_KEY (primary) or POLYGON_API_KEY (fallback), then retry.")
             else:
                 from app.engines.options.premarket_scheduler import _run_trailing_stop_watcher
                 await _run_trailing_stop_watcher(reprice_only=True)

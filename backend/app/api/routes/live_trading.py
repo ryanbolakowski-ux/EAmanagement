@@ -27,6 +27,39 @@ from app.engines.strategy_classification import (
 from app.engines.pnl_marks import (  # PNL-MARK-FREEZE-V1
     pick_equity_mark, equity_session, market_session_label, is_futures_symbol)
 
+
+# ── POLYGON-EXIT: FMP-primary P&L marks ─────────────────────────────────────
+# With REALTIME_FEED=fmp the snapshot loops below mark equities from FMP
+# (/stable/quote-short live during RTH, last settled EOD close frozen outside
+# RTH) and keep the original Polygon snapshot code as the fallback. The mark
+# still flows through pnl_marks.pick_equity_mark, so PNL-MARK-FREEZE-V1
+# semantics are byte-identical. Flag off -> Polygon-only, unchanged.
+
+def _fmp_mark_primary() -> bool:
+    try:
+        from app.engines.data_feeds.realtime_feed import realtime_provider
+        return realtime_provider() == "fmp"
+    except Exception:
+        return False
+
+
+def fmp_equity_snapshot_sync(symbol: str, session: str) -> dict:
+    """Lazy pass-through to fmp_feed.fmp_equity_snapshot_sync. {} on failure."""
+    try:
+        from app.engines.data_feeds.fmp_feed import fmp_equity_snapshot_sync as _f
+        return _f(symbol, session)
+    except Exception:
+        return {}
+
+
+def _fmp_log_once(site: str) -> None:
+    try:
+        from app.engines.data_feeds.fmp_feed import log_fmp_primary_once as _l
+        _l(site)
+    except Exception:
+        pass
+
+
 router = APIRouter()
 # 2FA gate: routes here require totp_enabled if user is on paid/trial subscription
 
@@ -1206,6 +1239,7 @@ async def get_portfolio_summary(
     try:
         import os as _os3, requests as _rq3
         k3 = _os3.environ.get("POLYGON_API_KEY", "")
+        _sess3 = equity_session()  # POLYGON-EXIT: one session read per loop
         open_today = (await db.execute(_t("""
             SELECT instrument, entry_price, contracts FROM trades
              WHERE user_id = :uid AND mode='live' AND status='open'
@@ -1213,11 +1247,22 @@ async def get_portfolio_summary(
         """), {"uid": str(current_user.id), "since": today_start})).fetchall()
         for r in open_today:
             try:
-                u3 = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{r.instrument}"
-                resp = _rq3.get(u3, params={"apiKey": k3}, timeout=3)
-                if resp.status_code != 200: continue
-                t3 = (resp.json() or {}).get("ticker") or {}
-                live, _src = pick_equity_mark(t3)  # PNL-MARK-FREEZE-V1
+                live = None
+                # POLYGON-EXIT: FMP-primary mark (quote-short live / settled
+                # EOD close frozen), same pick_equity_mark decision path so
+                # the RTH-freeze semantics stay byte-identical.
+                if _fmp_mark_primary():
+                    _tk3 = fmp_equity_snapshot_sync(r.instrument, _sess3)
+                    if _tk3:
+                        live, _src = pick_equity_mark(_tk3, _sess3)  # PNL-MARK-FREEZE-V1
+                        if live is not None:
+                            _fmp_log_once("live_trading.today_unrealized_pnl")
+                if live is None:
+                    u3 = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{r.instrument}"
+                    resp = _rq3.get(u3, params={"apiKey": k3}, timeout=3)
+                    if resp.status_code != 200: continue
+                    t3 = (resp.json() or {}).get("ticker") or {}
+                    live, _src = pick_equity_mark(t3)  # PNL-MARK-FREEZE-V1
                 if live and r.entry_price and r.contracts:
                     today_unrealized_pnl += (live - float(r.entry_price)) * int(r.contracts)
             except Exception: continue
@@ -1248,13 +1293,23 @@ async def get_portfolio_summary(
             UNION
             SELECT ticker, entry_price, qty FROM b
         """), {"uid": str(current_user.id)})).fetchall()
+        _sessU = equity_session()  # POLYGON-EXIT: one session read per loop
         for p in positions:
             try:
-                uU = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{p.ticker}"
-                rspU = _rqU.get(uU, params={"apiKey": kU}, timeout=3)
-                if rspU.status_code != 200: continue
-                tU = (rspU.json() or {}).get("ticker") or {}
-                live, _src = pick_equity_mark(tU)  # PNL-MARK-FREEZE-V1
+                live = None
+                # POLYGON-EXIT: FMP-primary mark — see today_unrealized loop.
+                if _fmp_mark_primary():
+                    _tkU = fmp_equity_snapshot_sync(p.ticker, _sessU)
+                    if _tkU:
+                        live, _src = pick_equity_mark(_tkU, _sessU)  # PNL-MARK-FREEZE-V1
+                        if live is not None:
+                            _fmp_log_once("live_trading.total_unrealized_pnl")
+                if live is None:
+                    uU = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{p.ticker}"
+                    rspU = _rqU.get(uU, params={"apiKey": kU}, timeout=3)
+                    if rspU.status_code != 200: continue
+                    tU = (rspU.json() or {}).get("ticker") or {}
+                    live, _src = pick_equity_mark(tU)  # PNL-MARK-FREEZE-V1
                 if live and p.entry_price and p.qty:
                     total_unrealized_pnl += (live - float(p.entry_price)) * int(p.qty)
             except Exception:
@@ -1612,7 +1667,15 @@ async def get_unrealized_pnl(
             import os as _os_up, requests as _rq_up
             from loguru import logger as _lg_pnl
             _k = _os_up.environ.get("POLYGON_API_KEY", "")
-            if _k and not is_futures_symbol(inst):
+            # POLYGON-EXIT: FMP-primary mark; Polygon snapshot is the fallback.
+            if not is_futures_symbol(inst) and _fmp_mark_primary():
+                _tjF = fmp_equity_snapshot_sync(inst, _eq_sess)
+                if _tjF:
+                    _mkF, _srcF = pick_equity_mark(_tjF, _eq_sess)
+                    if _mkF is not None:
+                        cur_price = _mkF; price_source = _srcF
+                        _fmp_log_once("live_trading.unrealized_pnl_endpoint")
+            if price_source == "entry_fallback" and _k and not is_futures_symbol(inst):
                 _u = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{inst}"
                 _r = _rq_up.get(_u, params={"apiKey": _k}, timeout=3)
                 if _r.status_code == 200:

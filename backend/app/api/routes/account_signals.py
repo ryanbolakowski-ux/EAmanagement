@@ -354,6 +354,9 @@ def send_signal_email(
     entry: float, stop: float, target: float, bias: Optional[str], fired_at: str,
     signal_id: Optional[str] = None,
     entry_detected_at: Optional["datetime"] = None,
+    stop_reason: Optional[str] = None,
+    target_reason: Optional[str] = None,
+    price_basis: Optional[str] = None,
 ) -> bool:
     """Send a futures entry-signal email.
 
@@ -365,6 +368,17 @@ def send_signal_email(
     entry_detected_at (recommended): UTC timestamp from the moment the strategy
     confirmed the entry. Logged in the [signal-email-timing] line so the gap
     between detection and send is queryable.
+
+    stop_reason / target_reason (LABEL-TRUTH-V1): when the STRATEGY provides
+    them (generated from the branch that actually chose each level) they are
+    used VERBATIM — the post-hoc level inference below runs only as a fallback
+    for callers that cannot supply them. Post-hoc guessing is what fabricated
+    impossible labels (a short's stop attributed to a session VWAP sitting
+    below entry).
+
+    price_basis (recommended for futures): human note of the bar source the
+    signal priced from (e.g. 'live QQQ IEX proxy scaled to NQ (Alpaca)'),
+    rendered in the email so overnight recipients can judge price relevance.
     """
     from loguru import logger as _lg
     from datetime import datetime as _dt_fs, date as _date_fs, timezone as _tz_fs
@@ -380,27 +394,19 @@ def send_signal_email(
     _attempt_iso  = _now_utc.isoformat()
     _sid = signal_id or f"{to}|{instrument}|{direction}|{entry:.2f}|{_now_utc.strftime('%Y%m%d%H%M')}"
 
-    _sess = "UNKNOWN"
-    _day = _date_fs.today().isoformat()
+    # Session + session-anchored trading day (DUP-SEND FIX): computed by the
+    # shared pure helper. The day used to be the server's UTC calendar date,
+    # so the ASIA session (18:00 ET spans UTC midnight) minted a fresh
+    # one-email-per-session cap key at 00:00 UTC and the same user could get
+    # the same ASIA setup twice in one evening (observed 2026-07-05: 18:33 ET
+    # and 20:40 ET sends). The helper anchors the day to the SESSION START in
+    # ET, so one session == one cap key. Never raises.
+    from app.engines.account_signals.signal_guard import email_session_and_day as _sess_day
+    _sess, _day = _sess_day(_now_utc)
 
     # --- Cap / DEAD-zone gate -------------------------------------------------
     try:
         import redis as _r_sync
-        # Clean timezone-aware ET conversion. The prior version did
-        # utcnow().replace(tzinfo=now().astimezone().tzinfo) which mixes naive
-        # UTC with the system TZ; coincidentally OK in a UTC container, but
-        # produces wrong session labels anywhere else.
-        try:
-            import zoneinfo as _zi_fs
-            _et = _now_utc.astimezone(_zi_fs.ZoneInfo("America/New_York"))
-        except Exception:
-            _et = _now_utc
-        _t_min = _et.hour * 60 + _et.minute
-        if _t_min >= 18*60 or _t_min < 3*60:        _sess = "ASIA"
-        elif 3*60 <= _t_min < 9*60:                 _sess = "LONDON"
-        elif 9*60+30 <= _t_min < 11*60:             _sess = "NY_AM"
-        elif 13*60+30 <= _t_min < 16*60+30:         _sess = "NY_PM"
-        else:                                        _sess = "DEAD"
         _rc = _r_sync.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
 
         # Layer 0 — per-signal idempotency. If we have already attempted this
@@ -424,8 +430,12 @@ def send_signal_email(
             return {"sent": False, "provider_status": "dead_zone_suppressed", "provider_message_id": None, "error": None, "suppressed": True}
 
         # Layer 1 — one futures email per (user, session, day). First wins.
+        # TTL must OUTLIVE the longest session (ASIA runs 9h, 18:00-03:00 ET)
+        # or the cap re-opens mid-session; 4h left exactly that hole. The key
+        # embeds the session-anchored day, so a long TTL cannot collide with
+        # the next day's session.
         _key = f"futures_email:{to}:{_sess}:{_day}"
-        if not _rc.set(_key, "1", ex=4*3600, nx=True):
+        if not _rc.set(_key, "1", ex=10*3600, nx=True):
             _lg.info(
                 f"[signal-email-timing] CAP-HIT signal_id={_sid} symbol={instrument} "
                 f"strategy={strategy_name} to={to} session={_sess} "
@@ -448,30 +458,41 @@ def send_signal_email(
     # (<img src="cid:tradechart">) and stash base64 for the Email Signals page.
     # Any failure (no bars, bad geometry, matplotlib hiccup) degrades to a
     # no-chart email — a chart must NEVER block the signal.
-    # ── Level-reason inference (best-effort, never blank) ────────────────
-    # Label WHY the stop/target sit where they do (swing low, London high,
-    # FVG invalidation, ...) so the email reads e.g. "Stop Loss: 29,895
-    # (swing low)". Falls back to strategy stop / strategy target.
-    stop_reason = "strategy stop"
-    target_reason = "strategy target"
-    try:
-        from app.engines.account_signals.runner import _fetch_bars_sync as _fb_lr
-        from app.engines.level_reasons import infer_stop_target_reasons as _infer_lr
-        import pandas as _pd_lr
-        _lr_bars = _fb_lr(instrument, "5m", 60) or []
-        _lr_df = _pd_lr.DataFrame(_lr_bars) if _lr_bars else None
-        _reasons = _infer_lr(
-            direction=direction, entry=entry, stop=stop, target=target,
-            bars_df=_lr_df, instrument=instrument, now_utc=_now_utc,
-        )
-        stop_reason = _reasons.get("stop_reason") or stop_reason
-        target_reason = _reasons.get("target_reason") or target_reason
+    # ── Level reasons: strategy-provided first, inference only as fallback ──
+    # LABEL-TRUTH-V1: when the strategy passed stop_reason/target_reason they
+    # describe the level ACTUALLY chosen (sweep extreme / swing / FVG-with-TF /
+    # R:R fallback) and are used verbatim. Only when a caller could not supply
+    # them do we fall back to the old post-hoc inference — now side-sane and
+    # never labelling a stop with VWAP (see level_reasons.py).
+    _strat_sr = (stop_reason or "").strip() or None
+    _strat_tr = (target_reason or "").strip() or None
+    stop_reason = _strat_sr or "strategy stop"
+    target_reason = _strat_tr or "strategy target"
+    if _strat_sr and _strat_tr:
         _lg.info(
-            f"[signal-email] level-reasons sym={instrument} dir={direction} "
-            f"stop={stop} ({stop_reason}) target={target} ({target_reason})"
+            f"[signal-email] level-reasons (strategy-provided) sym={instrument} "
+            f"dir={direction} stop={stop} ({stop_reason}) target={target} ({target_reason})"
         )
-    except Exception as _lr_e:
-        _lg.warning(f"[signal-email] reason inference errored sym={instrument}: {type(_lr_e).__name__}: {_lr_e}")
+    else:
+        try:
+            from app.engines.account_signals.runner import _fetch_bars_sync as _fb_lr
+            from app.engines.level_reasons import infer_stop_target_reasons as _infer_lr
+            import pandas as _pd_lr
+            _lr_bars = _fb_lr(instrument, "5m", 60) or []
+            _lr_df = _pd_lr.DataFrame(_lr_bars) if _lr_bars else None
+            _reasons = _infer_lr(
+                direction=direction, entry=entry, stop=stop, target=target,
+                bars_df=_lr_df, instrument=instrument, now_utc=_now_utc,
+                bars_tf_label="5m",
+            )
+            stop_reason = _strat_sr or _reasons.get("stop_reason") or stop_reason
+            target_reason = _strat_tr or _reasons.get("target_reason") or target_reason
+            _lg.info(
+                f"[signal-email] level-reasons (inferred fallback) sym={instrument} "
+                f"dir={direction} stop={stop} ({stop_reason}) target={target} ({target_reason})"
+            )
+        except Exception as _lr_e:
+            _lg.warning(f"[signal-email] reason inference errored sym={instrument}: {type(_lr_e).__name__}: {_lr_e}")
     _chart_png = None
     _chart_b64 = None
     _chart_img_html = ""
@@ -503,6 +524,13 @@ def send_signal_email(
         )
     else:
         _lg.info(f"[signal-email] chart skipped (invalid geometry) sym={instrument} dir={direction} e={entry} s={stop} t={target}")
+    # Price-basis note: which bar source priced this signal (proxy vs real
+    # futures) — critical context overnight when ETF proxies can go stale.
+    _basis_html = (
+        f'<p style="margin:-6px 0 14px;color:#94a3b8;font-size:11px;line-height:1.5;">'
+        f'Price basis: {price_basis}</p>'
+        if price_basis else ""
+    )
     subject = f"🎯 Saro (Futures): {side_word} {instrument} @ {entry:.2f} · {strategy_name}"
     html = f"""
     <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
@@ -527,6 +555,7 @@ def send_signal_email(
         </table>
       </div>
 
+      {_basis_html}
       {_chart_img_html}
 
       <a href="{settings.FRONTEND_URL}/app/signals/{_sid}/review" style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;font-weight:700;padding:11px 20px;border-radius:10px;font-size:14px;margin:4px 0 10px;">Review &amp; approve in app &rarr;</a>

@@ -11,6 +11,11 @@ are monkeypatched. Coverage:
     returns Alpaca-sourced bars scaled to the futures level (price ~= SPY*scale),
     and the slower Polygon/candle_cache paths are NOT consulted.
   • Alpaca miss -> falls through to Polygon, then to the yfinance fallback.
+  • OVERNIGHT-RELEVANCE-V1: stale Alpaca proxy bars (IEX quiet overnight) are
+    discarded past FUTURES_ALPACA_MAX_AGE_SEC (default 900s) so the cascade
+    reaches real futures sources; the ceiling is env-tunable.
+  • PRICE-BASIS-V1: _note_bar_source/get_price_basis round-trip, staleness
+    window, and the basis note recorded when the Alpaca path serves.
 
 Run: pytest backend/tests/test_alpaca_feed.py -v -p no:cacheprovider
 """
@@ -184,31 +189,83 @@ def _build_spy_df(n=10, base_price=740.0):
     return pd.DataFrame(data, index=idx)
 
 
-# ── 4b. No freshness-discard on Alpaca: an "old" last bar is still returned ──
-def test_alpaca_bars_not_discarded_when_old(monkeypatch):
-    """The 900s freshness-discard guard must NOT apply to Alpaca (real-time)."""
+# ── 4b. OVERNIGHT-RELEVANCE-V1: stale Alpaca proxy bars are discarded ────────
+def _old_spy_df(minutes_old=20, n=5, base_price=740.0):
+    """SPY bars whose LATEST bar is `minutes_old` minutes in the past."""
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    idx = pd.to_datetime(
+        [now - timedelta(minutes=minutes_old + (n - 1 - i)) for i in range(n)], utc=True)
+    return pd.DataFrame({
+        "open": [base_price] * n, "high": [base_price + 0.1] * n,
+        "low": [base_price - 0.1] * n, "close": [base_price] * n,
+        "volume": [100000.0] * n,
+    }, index=idx)
+
+
+def test_alpaca_stale_bars_discarded_overnight(monkeypatch):
+    """IEX goes quiet overnight/weekends while futures keep trading on Globex:
+    a latest bar older than FUTURES_ALPACA_MAX_AGE_SEC (default 900s) must be
+    DISCARDED (return []) so the cascade continues to real futures sources —
+    it used to short-circuit on hours-old proxy prices."""
     monkeypatch.setenv("ALPACA_API_KEY", "test-key-id")
     monkeypatch.setenv("ALPACA_API_SECRET", "test-secret")
-    # Even a tiny FUTURES_PROXY_MAX_AGE_SEC (which gates the Polygon path) must
-    # not cause the Alpaca path to drop bars.
-    monkeypatch.setenv("FUTURES_PROXY_MAX_AGE_SEC", "30")
+    monkeypatch.delenv("FUTURES_ALPACA_MAX_AGE_SEC", raising=False)
     import app.engines.data_feeds.proxy_scale as ps
     monkeypatch.setattr(ps, "get_proxy_scale", lambda inst: 10.0, raising=True)
 
-    # Build SPY bars whose latest is ~20 minutes old.
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    idx = pd.to_datetime([now - timedelta(minutes=(24 - i)) for i in range(5)], utc=True)
-    old = pd.DataFrame({
-        "open": [740.0] * 5, "high": [740.1] * 5, "low": [739.9] * 5,
-        "close": [740.0] * 5, "volume": [100000.0] * 5,
-    }, index=idx)
+    old = _old_spy_df(minutes_old=20)  # 20 min > the 900s default
+    monkeypatch.setattr(af, "fetch_alpaca_bars",
+                        lambda symbol, timeframe="1Min", limit=200: old.copy(),
+                        raising=True)
+
+    assert rn._fetch_futures_via_alpaca("ES", "1m", 5) == []
+
+
+def test_alpaca_stale_guard_is_env_tunable_and_ignores_polygon_knob(monkeypatch):
+    """FUTURES_ALPACA_MAX_AGE_SEC raises the ceiling; the Polygon-path knob
+    (FUTURES_PROXY_MAX_AGE_SEC) still has no effect on the Alpaca path."""
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key-id")
+    monkeypatch.setenv("ALPACA_API_SECRET", "test-secret")
+    monkeypatch.setenv("FUTURES_ALPACA_MAX_AGE_SEC", "3600")
+    monkeypatch.setenv("FUTURES_PROXY_MAX_AGE_SEC", "30")  # Polygon-only knob
+    import app.engines.data_feeds.proxy_scale as ps
+    monkeypatch.setattr(ps, "get_proxy_scale", lambda inst: 10.0, raising=True)
+
+    old = _old_spy_df(minutes_old=20)  # 20 min < the 3600s override
     monkeypatch.setattr(af, "fetch_alpaca_bars",
                         lambda symbol, timeframe="1Min", limit=200: old.copy(),
                         raising=True)
 
     bars = rn._fetch_futures_via_alpaca("ES", "1m", 5)
-    assert bars, "Alpaca bars must NOT be discarded by a freshness guard"
+    assert bars, "bars within the tuned ceiling must be returned"
     assert 7390 < bars[-1]["close"] < 7410
+
+
+# ── 4c. PRICE-BASIS-V1: bar-source note + staleness window ──────────────────
+def test_price_basis_recorded_and_expires():
+    rn._note_bar_source("ES", "live SPY IEX proxy scaled to ES (Alpaca real-time)")
+    basis = rn.get_price_basis("es")  # case-insensitive
+    assert basis and "SPY" in basis
+    # A stale note is worse than none: outside max_age_sec -> None.
+    assert rn.get_price_basis("ES", max_age_sec=-1.0) is None
+    assert rn.get_price_basis("NEVER-FETCHED") is None
+
+
+def test_price_basis_noted_when_alpaca_serves(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key-id")
+    monkeypatch.setenv("ALPACA_API_SECRET", "test-secret")
+    import app.engines.data_feeds.proxy_scale as ps
+    monkeypatch.setattr(ps, "get_proxy_scale", lambda inst: 10.0, raising=True)
+    fresh = _build_spy_df(n=10, base_price=740.0)
+    monkeypatch.setattr(af, "fetch_alpaca_bars",
+                        lambda symbol, timeframe="1Min", limit=200: fresh.copy(),
+                        raising=True)
+    rn._BAR_SOURCE.pop("ES", None)
+
+    bars = rn._fetch_bars_uncached("ES", "1m", 5)
+    assert bars
+    basis = rn.get_price_basis("ES")
+    assert basis and "IEX" in basis and "Alpaca" in basis
 
 
 # ── 5. Alpaca miss -> Polygon fallback runs ─────────────────────────────────

@@ -26,9 +26,41 @@ ADMIN_HEARTBEAT_EMAIL: str = os.environ.get(
 
 
 
-# Only these being DOWN means the SYSTEM is down (critical). yfinance + polygon
+# Only these being DOWN means the SYSTEM is down (critical). yfinance + fmp
 # have fallback feeds; a no-pick day is a valid outcome — those are DEGRADED only.
 CRITICAL_HEALTH_KEYS = {"redis", "resend", "database"}
+
+# POLYGON-EXIT: the market-data probe now checks FMP (the primary provider)
+# instead of Polygon, so cancelling Polygon never reddens the health board.
+FMP_PROBE_URL = "https://financialmodelingprep.com/stable/quote-short"
+
+
+def probe_market_data() -> dict:
+    """Probe FMP with a one-symbol quote-short (SPY). Returns the component
+    dict {'ok': bool, 'status': int}; raises on a missing key so the caller's
+    except-block records the reason string, same contract as before."""
+    import httpx
+    key = os.environ.get("FMP_API_KEY", "")
+    if not key:
+        raise RuntimeError("FMP_API_KEY not set")
+    r = httpx.get(FMP_PROBE_URL, params={"symbol": "SPY", "apikey": key}, timeout=8)
+    ok = r.status_code == 200
+    if ok:
+        try:
+            ok = bool(r.json())  # 200 + empty body = bad key/symbol on FMP
+        except Exception:
+            ok = False
+    return {"ok": ok, "status": r.status_code}
+
+
+def market_data_component() -> dict:
+    """Admin System-Check 'market_data' integration card (POLYGON-EXIT):
+    green when the PRIMARY provider (FMP) is configured, yellow otherwise —
+    even if the legacy Polygon key is still present."""
+    return {
+        "status": "green" if os.environ.get("FMP_API_KEY") else "yellow",
+        "providers": ["fmp", "polygon", "yfinance", "twelvedata"],
+    }
 
 
 def apply_criticality(result: dict) -> dict:
@@ -108,18 +140,20 @@ async def check_health(verbose: bool = False) -> dict:
         result["components"]["resend"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
         result["ok"] = False
 
-    # 4. Polygon — for options scanner
+    # 4. Market data (FMP primary — POLYGON-EXIT) — for the scanners
     try:
-        import httpx
-        key = os.environ.get("POLYGON_API_KEY", "")
-        if not key:
-            raise RuntimeError("POLYGON_API_KEY not set")
-        r = httpx.get(f"https://api.polygon.io/v1/marketstatus/now?apiKey={key}", timeout=8)
-        result["components"]["polygon"] = {"ok": r.status_code == 200, "status": r.status_code}
-        if r.status_code != 200:
+        comp = probe_market_data()
+        result["components"]["fmp"] = comp
+        if comp.get("ok"):
+            try:
+                from app.engines.data_feeds.fmp_feed import log_fmp_primary_once
+                log_fmp_primary_once("scanner_health.market_data_probe")
+            except Exception:
+                pass
+        else:
             result["ok"] = False
     except Exception as e:
-        result["components"]["polygon"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+        result["components"]["fmp"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
         result["ok"] = False
 
     # 5. Database — can we query users?

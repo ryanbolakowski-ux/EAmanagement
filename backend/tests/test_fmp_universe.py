@@ -48,6 +48,17 @@ from app.engines.scanner.definitions import TEMPLATES
 from app.engines.scanner.funnel import _coarse
 
 
+@pytest.fixture(autouse=True)
+def _pacing_off(monkeypatch):
+    """Pin RVOL pacing OFF for every test: _paced_prev_volume scales
+    prevDay.v by the WALL-CLOCK ET session fraction (0.01 overnight → 1.00 at
+    the close), which made every exact prevDay.v assertion below fail when
+    the suite ran outside RTH. Prev-volume assertions here are about the
+    prev-map plumbing, not the pace curve — the curve has its own pinned-clock
+    test (test_rvol_pacing_scales_prev_volume)."""
+    monkeypatch.setattr(fu, "_PACING_ON", False)
+
+
 # ── fakes / helpers ─────────────────────────────────────────────────────────
 GAINERS = [
     # real probed shapes (2026-07-05): NO volume field in movers
@@ -718,3 +729,32 @@ def test_compare_hook_never_raises_outside_loop():
         assert fu._compare_last_mono == 0.0, "failed spawn must not burn the throttle"
     finally:
         os.environ.pop("SARO_UNIVERSE_SHADOW", None)
+
+
+# ── RVOL pacing (review finding 4) — pinned clock, no wall-time flake ────────
+def test_rvol_pacing_scales_prev_volume(monkeypatch):
+    """_paced_prev_volume scales the prev-session denominator by the expected
+    intraday volume fraction so rel_vol reads vs-pace. Pinned to fixed ET
+    clock points — the ONLY test allowed to exercise the pace curve (all other
+    tests pin pacing off via the autouse fixture)."""
+    monkeypatch.setattr(fu, "_PACING_ON", True)
+
+    def _at(et_minutes):
+        monkeypatch.setattr(fu, "_now_et_minutes", lambda: et_minutes)
+        return fu._paced_prev_volume(1_000_000)
+
+    assert _at(16 * 60) == 1_000_000          # close -> full prev session
+    assert _at(20 * 60) == 1_000_000          # after hours -> stays full
+    assert _at(2 * 60) == 10_000              # overnight floor = 0.01
+    assert _at(10 * 60) == 210_000            # 10:00 ET curve point = 0.21
+    # 10:30 ET sits halfway between the 0.21 and 0.33 anchors -> 0.27.
+    assert _at(10 * 60 + 30) == 270_000
+    # Guards: junk/zero are passthrough, and the paced value never hits 0.
+    assert fu._paced_prev_volume(None) == 0
+    assert fu._paced_prev_volume(0) == 0
+    monkeypatch.setattr(fu, "_now_et_minutes", lambda: 2 * 60)
+    assert fu._paced_prev_volume(5) == 1      # max(1, ...) floor
+
+    monkeypatch.setattr(fu, "_PACING_ON", False)
+    monkeypatch.setattr(fu, "_now_et_minutes", lambda: 2 * 60)
+    assert fu._paced_prev_volume(1_000_000) == 1_000_000  # kill-switch: raw

@@ -410,8 +410,15 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
             if not (3.0 <= gap_pct <= 30.0): continue  # broadened from 5-25 (was pump-biased)
             if price < 10 or price > 200: continue  # raised floor to skip micro-caps (was 2)
             if today_vol * price < 5_000_000: continue
-            if prev_vol > 0 and today_vol / prev_vol < 2.5: continue
-            rel_vol = today_vol / max(prev_vol, 1)
+            # prev_vol == 0 means NO completed-session baseline (recent IPO, or
+            # an FMP mover missing from the Polygon prev map — fmp_universe
+            # emits prevDay.v=0 by its never-fabricate contract). The old
+            # `prev_vol > 0 and ...` skipped the surge gate entirely for such
+            # rows and max(prev_vol, 1) then granted the max rel_vol score
+            # multiplier — a fabricated hit. No baseline → no candidate.
+            if prev_vol <= 0: continue
+            if today_vol / prev_vol < 2.5: continue
+            rel_vol = today_vol / prev_vol
             cat_w, cat_reason = await _get_8k_catalyst(db, ticker)
             score = gap_pct * math.log(max(today_vol, 1)) * cat_w * min(rel_vol, 10) / 100
             candidates.append({

@@ -6,10 +6,49 @@ Pure functions (no DB / no network) so they are trivially unit-testable.
   risk / reward / RR, and flags unrealistically tight stops per instrument.
 - make_idempotency_key: stable hash of the signal's identifying fields so a
   scanner that re-fires the same setup on consecutive bars maps to ONE key.
+- email_session_and_day: (session, session-anchored trading day) for the
+  one-futures-email-per-user-per-session cap key.
 """
 from __future__ import annotations
 import hashlib
+from datetime import timedelta
 from typing import Optional
+
+
+def email_session_and_day(now_utc) -> tuple[str, str]:
+    """Return ``(session, trading_day_iso)`` for the futures-email session cap.
+
+    Sessions (ET): ASIA 18:00-03:00, LONDON 03:00-09:00, NY_AM 09:30-11:00,
+    NY_PM 13:30-16:30, else DEAD. Matches send_signal_email's historical
+    boundaries exactly.
+
+    DUP-SEND FIX (the 2026-07-05 double-send): the cap key's day used to be
+    the server's UTC calendar date, so the ASIA session — which spans UTC
+    midnight (18:00 ET = 22:00/23:00 UTC) — got a FRESH cap key at 00:00 UTC
+    and the same user could receive the same ASIA-session setup twice (e.g.
+    18:33 ET and 20:40 ET). The day is now the ET date, anchored to the
+    session's START: ASIA bars after ET midnight (00:00-03:00 ET) map back to
+    the previous ET date, so one ASIA session == one cap key. Never raises."""
+    try:
+        import zoneinfo as _zi
+        et = now_utc.astimezone(_zi.ZoneInfo("America/New_York"))
+    except Exception:
+        et = now_utc  # degrade to UTC — still a single, consistent clock
+    m = et.hour * 60 + et.minute
+    if m >= 18 * 60 or m < 3 * 60:
+        sess = "ASIA"
+    elif 3 * 60 <= m < 9 * 60:
+        sess = "LONDON"
+    elif 9 * 60 + 30 <= m < 11 * 60:
+        sess = "NY_AM"
+    elif 13 * 60 + 30 <= m < 16 * 60 + 30:
+        sess = "NY_PM"
+    else:
+        sess = "DEAD"
+    day = et.date()
+    if sess == "ASIA" and m < 3 * 60:
+        day = (et - timedelta(days=1)).date()  # post-midnight ASIA -> session start date
+    return sess, day.isoformat()
 
 
 # Minimum realistic stop distance (in points) per instrument family. Stops

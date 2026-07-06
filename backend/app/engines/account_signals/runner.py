@@ -67,6 +67,34 @@ _FUTURES_PROXY_ETF = {
 _MICRO_PARENT = {"MES": "ES", "MNQ": "NQ", "M2K": "RTY", "MYM": "YM"}
 
 
+# ── PRICE-BASIS-V1: remember which source actually served the last bars ──
+# _fetch_bars_uncached records a human-readable basis string per instrument
+# at every successful return; _emit_signal reads it so the signal email can
+# state its price basis (e.g. "live QQQ IEX proxy scaled to NQ (Alpaca)")
+# — critical context overnight when ETF proxies can go stale.
+import time as _time_src
+_BAR_SOURCE: dict[str, tuple[float, str]] = {}
+
+
+def _note_bar_source(instrument: str, basis: str) -> None:
+    try:
+        _BAR_SOURCE[(instrument or "").upper()] = (_time_src.time(), basis)
+    except Exception:
+        pass
+
+
+def get_price_basis(instrument: str, max_age_sec: float = 900.0):
+    """Basis string for the most recent bar fetch of `instrument`, or None if
+    unknown / older than max_age_sec (a stale note is worse than none)."""
+    hit = _BAR_SOURCE.get((instrument or "").upper())
+    if not hit:
+        return None
+    ts, basis = hit
+    if (_time_src.time() - ts) > max_age_sec:
+        return None
+    return basis
+
+
 def _fetch_futures_via_polygon(instrument: str, timeframe: str, count: int = 50):
     """Return a list of bar dicts for a futures `instrument`, sourced from the
     Polygon ETF proxy and scaled to the futures price level. Returns [] (so the
@@ -174,9 +202,11 @@ def _fetch_futures_via_alpaca(instrument: str, timeframe: str, count: int = 50):
     requested timeframe.
 
     Returns [] (so the caller falls through to the Polygon/yfinance paths) on
-    any miss/error. Alpaca IEX is real-time, so — unlike the delayed Polygon
-    proxy — we do NOT apply the 900s freshness-discard guard here: its bars are
-    trusted as fresh."""
+    any miss/error. Alpaca IEX is real-time DURING equity hours, so its bars
+    need no delay compensation — but IEX goes quiet overnight/weekends while
+    futures keep trading, so a staleness guard (OVERNIGHT-RELEVANCE-V1, env
+    FUTURES_ALPACA_MAX_AGE_SEC, default 900s) discards old proxy bars and
+    lets the cascade continue to real futures sources."""
     import os as _os
     import pandas as _pd
     from datetime import datetime as _dt, timezone as _tz
@@ -230,8 +260,20 @@ def _fetch_futures_via_alpaca(instrument: str, timeframe: str, count: int = 50):
 
     latest_ts = df.index[-1].to_pydatetime()
     age_sec = (_dt.now(_tz.utc) - latest_ts).total_seconds()
-    # NOTE: no freshness-discard guard here — Alpaca IEX bars are real-time and
-    # trusted as fresh (the 900s guard applies only to the delayed Polygon path).
+    # OVERNIGHT-RELEVANCE-V1: Alpaca IEX is real-time DURING equity hours, but
+    # IEX has no prints overnight/weekends — the "latest" bar can be hours old
+    # while futures keep trading on Globex. Returning those stale bars here
+    # used to SHORT-CIRCUIT the cascade (candle_cache/yfinance never consulted)
+    # whenever the market had moved < the drift guard's 0.4%. Discard stale
+    # proxy bars so overnight signals price from real futures sources instead.
+    _max_age = float(_os.environ.get("FUTURES_ALPACA_MAX_AGE_SEC", "900"))
+    if age_sec > _max_age:
+        logger.info(
+            f"[Signals] futures {inst} via Alpaca {etf}: latest bar age "
+            f"{age_sec:.0f}s > {_max_age:.0f}s (IEX quiet — overnight/weekend) "
+            f"— falling back to real futures sources"
+        )
+        return []
     logger.info(
         f"[Signals] futures {inst} source=alpaca proxy={etf} scale={scale:.2f} "
         f"latest_bar={latest_ts.isoformat()} age={age_sec:.0f}s"
@@ -401,15 +443,20 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
             logger.warning(f"[Signals] futures {sym}: realtime-store path crashed ({type(e).__name__}: {e}); falling back")
             store_bars = None
         if _proxy_ok(store_bars):
+            _note_bar_source(sym, f"live {_FUTURES_PROXY_ETF.get(sym)} proxy scaled to {sym} "
+                                  f"(realtime ws feed; cross-checked vs real futures close)")
             return store_bars
-        # (1) Alpaca IEX — preferred when keys are configured. Real-time, so no
-        # freshness-discard guard is applied to its bars (handled in the helper).
+        # (1) Alpaca IEX — preferred when keys are configured. Real-time during
+        # equity hours; the helper discards stale bars (IEX quiet overnight) so
+        # the cascade can continue to real futures sources.
         try:
             alpaca_bars = _fetch_futures_via_alpaca(instrument, timeframe, count)
         except Exception as e:
             logger.warning(f"[Signals] futures {sym}: Alpaca proxy path crashed ({type(e).__name__}: {e}); falling back")
             alpaca_bars = None
         if _proxy_ok(alpaca_bars):
+            _note_bar_source(sym, f"live {_FUTURES_PROXY_ETF.get(sym)} IEX proxy scaled to {sym} "
+                                  f"(Alpaca real-time; cross-checked vs real futures close)")
             return alpaca_bars
         # (2) Polygon proxy — fallback (delayed; keeps its own 900s freshness guard).
         try:
@@ -419,6 +466,8 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
             proxy_bars = None
         if _proxy_ok(proxy_bars):
             logger.info(f"[Signals] futures {sym} source=polygon proxy={_FUTURES_PROXY_ETF.get(sym)}")
+            _note_bar_source(sym, f"{_FUTURES_PROXY_ETF.get(sym)} proxy scaled to {sym} "
+                                  f"(Polygon REST; cross-checked vs real futures close)")
             return proxy_bars
     # Map timeframes to candle_cache resampling. The cache stores 1m bars.
     tf_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}.get(timeframe, 1)
@@ -470,6 +519,9 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
                 if timeframe != "1m":
                     df = df.resample(f"{tf_minutes}min").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
                 df = df.tail(count)
+                _note_bar_source(sym, (f"{sym} real futures bars (candle_cache)"
+                                       if sym in _FUTURES_PROXY_ETF
+                                       else f"{sym} bars (candle_cache)"))
                 return [{
                     "timestamp": ts.to_pydatetime(),
                     "open": float(r["open"]), "high": float(r["high"]),
@@ -485,7 +537,10 @@ def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     fb_sym = YAHOO_SYMBOLS.get(instrument.upper(), instrument + "=F")
     period_map = {"1m": "5d", "5m": "5d", "15m": "10d", "30m": "10d", "1h": "30d", "1d": "60d"}
     period = period_map.get(timeframe, "5d")
-    return _yfinance_cached(fb_sym, period, timeframe, count)
+    _yf_bars = _yfinance_cached(fb_sym, period, timeframe, count)
+    if _yf_bars:
+        _note_bar_source(sym, f"{fb_sym} continuous futures (Globex, Yahoo; ~10-15m delayed)")
+    return _yf_bars
 
 
 # ── yfinance throttle: 60s result cache + single in-process lock ─────────
@@ -744,7 +799,15 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     stop = round(float(signal.stop_loss), 2)
     tp = round(float(signal.take_profit), 2)
     bar_ts = getattr(signal, "timestamp", None) or now
-    bias = (signal.metadata or {}).get("bias")
+    _meta = signal.metadata or {}
+    bias = _meta.get("bias")
+    # LABEL-TRUTH-V1: stop/target reasons generated BY THE STRATEGY from the
+    # branch that actually chose each level (sweep extreme / swing / HTF FVG /
+    # R:R fallback). Passed through to the email verbatim so labels can never
+    # be post-hoc guesses. None for engines that don't provide them (the email
+    # helper then falls back to inference).
+    strat_stop_reason = _meta.get("stop_reason")
+    strat_target_reason = _meta.get("target_reason")
 
     # ── Bug 6: geometry validation BEFORE persisting or sending ──
     geo = validate_geometry(direction, entry, stop, tp, instrument)
@@ -766,8 +829,15 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     _real_now = await asyncio.to_thread(_latest_real_close, instrument)
     _max_entry_drift = float(_os.environ.get("SIGNAL_MAX_ENTRY_DRIFT_PCT", "0.5")) / 100.0
     _sym_map = YAHOO_SYMBOLS.get(instrument.upper(), (instrument or "") + "=F")
+    # PRICE-BASIS-V1: what actually served the bars this signal priced from,
+    # plus the real-close cross-check result — rendered in the email.
+    _price_basis = get_price_basis(instrument)
     if _real_now and _real_now > 0:
         _drift = abs(entry - _real_now) / _real_now
+        _price_basis = (
+            f"{_price_basis or 'unknown bar source'}; entry cross-checked vs real "
+            f"{instrument} close {_real_now:,.2f} (drift {_drift*100:.2f}%)"
+        )
         logger.info(
             f"[signal-source] {instrument}->{_sym_map} provider=candle_cache "
             f"entry={entry} real_now={_real_now:.2f} drift={_drift*100:.2f}%")
@@ -865,6 +935,8 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
                 entry=entry, stop=stop, target=tp, bias=bias,
                 fired_at=now.strftime("%a, %b %-d %-I:%M %p ET"),
                 signal_id=sid, entry_detected_at=detected_at,
+                stop_reason=strat_stop_reason, target_reason=strat_target_reason,
+                price_basis=_price_basis,
             )
         except Exception as e:
             result = {"sent": False, "provider_status": "exception", "error": f"{type(e).__name__}: {e}",
@@ -885,12 +957,13 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         # chart_b64: annotated trade-chart PNG (base64) produced by
         # send_signal_email so the Email Signals page can render it inline.
         _chart_b64 = result.get("chart_b64")
-        # Level reasons (e.g. "swing low", "London high") inferred in
-        # send_signal_email so the Email Signals page can show WHY each
-        # stop/target sits where it does. Never blank (falls back to
-        # "strategy stop"/"strategy target").
-        _stop_reason = result.get("stop_reason")
-        _target_reason = result.get("target_reason")
+        # Level reasons persisted for the Email Signals page. Prefer whatever
+        # send_signal_email actually rendered (strategy-provided verbatim, or
+        # its inference fallback); if the send crashed before returning them,
+        # persist the strategy's own reasons so the DB is never less truthful
+        # than the strategy.
+        _stop_reason = result.get("stop_reason") or strat_stop_reason
+        _target_reason = result.get("target_reason") or strat_target_reason
         async with async_session_factory() as db:
             from app.api.routes.account_signals import _ensure_chart_columns
             await _ensure_chart_columns(db)

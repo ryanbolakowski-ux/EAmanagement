@@ -15,6 +15,12 @@ Rule implemented here:
   * FUTURES (ES/NQ/RTY/YM + micros) trade ~23h/day on Globex, so they keep
     marking; callers just label the session (rth / globex / closed).
 
+POLYGON-EXIT note: with REALTIME_FEED=fmp the callers now build the snapshot
+dict from FMP instead of Polygon (fmp_feed.fmp_equity_snapshot_sync — live
+quote-short during RTH, last SETTLED EOD close otherwise) and still route it
+through pick_equity_mark(), so the freeze rule below is enforced unchanged
+regardless of provider. Polygon remains the fallback shape.
+
 Pure helpers, no I/O except reading the market calendar.
 """
 from __future__ import annotations

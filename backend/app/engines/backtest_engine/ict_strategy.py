@@ -54,6 +54,13 @@ class ICTStrategy(BaseStrategy):
             self._is_futures_inst = False
         self._last_gate = None
         self._last_gate_go = None
+        # LABEL-TRUTH-V1: record WHICH branch actually chose the stop / target
+        # so the emailed reason is generated FROM the chosen level, never
+        # guessed post-hoc. Set by _compute_stop_loss/_compute_take_profit on
+        # every return; read by on_bar to compose the human-readable reasons.
+        self._last_stop_choice: dict = {}
+        self._last_tp_choice: dict = {}
+        self._last_htf_tf: str | None = None  # tf label of _get_htf_data's pick
 
     def _build_ictcontext(self, bars):
         """Adapter: wrap on_bar inputs in an ICTContext for a V2 dedicated setup.
@@ -398,6 +405,10 @@ class ICTStrategy(BaseStrategy):
         entry = self._fvg_entry_price(entry_fvg, bias)
 
         ref_data = exec_data if len(exec_data) > 10 else primary
+        # LABEL-TRUTH-V1: tf labels for the frames the stop scan can use, so
+        # the composed reason names the timeframe the level actually came from.
+        _exec_tf_label = etf
+        _ref_tf_label = ptf if (ref_data is primary) else etf
 
         if bias == "bullish":
             # If the inversion-candle trigger fired, entry = the inversion
@@ -410,12 +421,19 @@ class ICTStrategy(BaseStrategy):
             sl = self._compute_stop_loss(entry, "long", ref_data,
                                             exec_df=bars.get(etf),
                                             sweep_level=inversion_sweep)
+            # Doctrine guard: never emit an inverted stop (no-op on the normal
+            # path — the branches above already keep longs' stops below entry).
+            sl, _sl_guard_reason = self._enforce_stop_side(entry, sl, "long")
             tp = self._compute_take_profit(entry, sl, 'long', primary, htf_df=htf_data)
 
             if abs(entry - sl) < self.tick_size * 2:
                 return None
             if tp <= entry:
                 return None
+
+            stop_reason = _sl_guard_reason or self._compose_stop_reason(
+                "long", current_ts, _exec_tf_label, _ref_tf_label)
+            target_reason = self._compose_target_reason("long", ptf)
 
             be_trig = self._compute_breakeven_trigger(entry, tp, 'long', bars.get(etf), primary)
             return TradeSignal(
@@ -435,6 +453,11 @@ class ICTStrategy(BaseStrategy):
                     "activity_gate": self._gate_meta(),
                     "inversion": inversion_fvg is not None,
                     "sweep_level": inversion_sweep,
+                    # LABEL-TRUTH-V1: reasons generated FROM the chosen branch
+                    "stop_reason": stop_reason,
+                    "target_reason": target_reason,
+                    "stop_basis": dict(self._last_stop_choice or {}),
+                    "target_basis": dict(self._last_tp_choice or {}),
                 },
             )
         else:
@@ -446,12 +469,19 @@ class ICTStrategy(BaseStrategy):
             sl = self._compute_stop_loss(entry, "short", ref_data,
                                             exec_df=bars.get(etf),
                                             sweep_level=inversion_sweep)
+            # Doctrine guard: a short's stop must sit ABOVE entry (no-op on
+            # the normal path).
+            sl, _sl_guard_reason = self._enforce_stop_side(entry, sl, "short")
             tp = self._compute_take_profit(entry, sl, 'short', primary, htf_df=htf_data)
 
             if abs(entry - sl) < self.tick_size * 2:
                 return None
             if tp >= entry:
                 return None
+
+            stop_reason = _sl_guard_reason or self._compose_stop_reason(
+                "short", current_ts, _exec_tf_label, _ref_tf_label)
+            target_reason = self._compose_target_reason("short", ptf)
 
             be_trig = self._compute_breakeven_trigger(entry, tp, 'short', bars.get(etf), primary)
             return TradeSignal(
@@ -471,6 +501,11 @@ class ICTStrategy(BaseStrategy):
                     "activity_gate": self._gate_meta(),
                     "inversion": inversion_fvg is not None,
                     "sweep_level": inversion_sweep,
+                    # LABEL-TRUTH-V1: reasons generated FROM the chosen branch
+                    "stop_reason": stop_reason,
+                    "target_reason": target_reason,
+                    "stop_basis": dict(self._last_stop_choice or {}),
+                    "target_basis": dict(self._last_tp_choice or {}),
                 },
             )
 
@@ -600,14 +635,21 @@ class ICTStrategy(BaseStrategy):
         return True
 
     def _get_htf_data(self, bars, htfs):
-        """Get the highest available timeframe data."""
+        """Get the highest available timeframe data.
+
+        LABEL-TRUTH-V1: records the tf NAME of the frame returned in
+        ``self._last_htf_tf`` so a take-profit anchored to an HTF FVG can name
+        its timeframe truthfully (\"1H FVG\", \"4H FVG\", ...)."""
         tf_priority = ["1H", "4H", "1D", "30m"]
         for tf in tf_priority:
             if tf in bars and not bars[tf].empty and len(bars[tf]) >= 10:
+                self._last_htf_tf = tf
                 return bars[tf]
         for tf in htfs:
             if tf in bars and not bars[tf].empty:
+                self._last_htf_tf = tf
                 return bars[tf]
+        self._last_htf_tf = None
         return None
 
     def _check_displacement(self, df, bias):
@@ -901,6 +943,110 @@ class ICTStrategy(BaseStrategy):
         For a SHORT: entry at the FVG BOTTOM."""
         return fvg.high if bias == "bullish" else fvg.low
 
+    # ── LABEL-TRUTH-V1: truthful stop/target reasons ─────────────────────
+    @staticmethod
+    def _fmt_px(v) -> str:
+        """29902.0 -> '29,902'; 7547.75 -> '7,547.75'. Never raises."""
+        try:
+            return f"{float(v):,.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            return str(v)
+
+    @staticmethod
+    def _session_label_for(ts):
+        """Best-effort ET session name for a bar timestamp — used to name the
+        sweep that anchored a stop ('Asia session sweep high ...'). Returns
+        None when the timestamp is unusable or falls between sessions, in
+        which case the caller uses the generic 'liquidity sweep' wording."""
+        try:
+            import pandas as _pd
+            t = _pd.Timestamp(ts)
+            if t.tzinfo is None:
+                t = t.tz_localize("UTC")
+            et = t.tz_convert("America/New_York")
+            m = et.hour * 60 + et.minute
+            if m >= 18 * 60 or m < 3 * 60:
+                return "Asia session"
+            if 3 * 60 <= m < 9 * 60:
+                return "London session"
+            if 9 * 60 + 30 <= m < 11 * 60:
+                return "NY AM"
+            if 13 * 60 + 30 <= m < 16 * 60 + 30:
+                return "NY PM"
+        except Exception:
+            pass
+        return None
+
+    def _enforce_stop_side(self, entry, sl, direction):
+        """Doctrine guard: a short's stop must be ABOVE entry, a long's BELOW.
+        The structure branches already guarantee this, but if a chosen level
+        ever lands on the wrong side, flip to the deterministic 12-tick
+        fallback instead of emitting an inverted stop. Returns (sl, reason)
+        where reason is None when the guard did not fire (the normal case —
+        so backtest numbers are untouched)."""
+        if direction == "long" and sl >= entry:
+            flipped = entry - (12 * self.tick_size)
+        elif direction == "short" and sl <= entry:
+            flipped = entry + (12 * self.tick_size)
+        else:
+            return sl, None
+        logger.warning(
+            f"[ICT/{self.instrument}] INVERTED-STOP guard: {direction} entry={entry} "
+            f"structure stop {sl} on wrong side — using 12-tick fallback {flipped}")
+        self._last_stop_choice = {"branch": "side_guard_fallback",
+                                  "level": float(flipped), "ticks": 12}
+        return flipped, (f"12-tick fallback {self._fmt_px(flipped)} "
+                         f"(structure stop landed on wrong side of entry)")
+
+    def _compose_stop_reason(self, direction, bar_ts, exec_tf_label, ref_tf_label):
+        """Human reason for the stop, generated FROM the branch that actually
+        chose it (recorded in self._last_stop_choice). Always names the level."""
+        c = self._last_stop_choice or {}
+        branch = c.get("branch")
+        px = self._fmt_px(c.get("level"))
+        tf = exec_tf_label if c.get("df_used") == "exec" else ref_tf_label
+        side = "low" if direction == "long" else "high"
+        if branch == "sweep":
+            if c.get("capped"):
+                return f"max-risk cap {px} (sweep {side} beyond cap)"
+            sess = self._session_label_for(bar_ts)
+            kind = f"{sess} sweep" if sess else "liquidity sweep"
+            return f"{kind} {side} {px}"
+        if branch == "swing":
+            if c.get("capped"):
+                return f"max-risk cap {px} ({tf} swing {side} beyond cap)"
+            return f"{tf} swing {side} {px}"
+        if branch == "ticks_fallback":
+            return f"{c.get('ticks', 12)}-tick fallback {px} (no valid {tf} swing {side})"
+        if branch == "side_guard_fallback":
+            return f"12-tick fallback {px} (structure stop landed on wrong side of entry)"
+        return f"strategy stop {px}"
+
+    def _compose_target_reason(self, direction, primary_tf_label):
+        """Human reason for the take-profit, from self._last_tp_choice.
+        HTF-FVG targets always name their timeframe (doctrine: '1H FVG', never
+        a bare 'FVG'); swing/range targets name the timeframe scanned."""
+        c = self._last_tp_choice or {}
+        branch = c.get("branch")
+        px = self._fmt_px(c.get("level"))
+        side = "high" if direction == "long" else "low"
+        htf = c.get("htf_tf") or "HTF"
+        if branch == "htf_fvg":
+            return f"{htf} FVG (midpoint) {px}"
+        if branch == "swing":
+            return f"{primary_tf_label} prior swing {side} {px}"
+        if branch == "range":
+            return f"{primary_tf_label} range {side} {px} (far side of swept range)"
+        if branch == "rr":
+            rr = c.get("rr") or 2.0
+            return f"{rr:g}R target {px} (no clean structure)"
+        if branch == "rr_cap":
+            raw = {"htf_fvg": f"{htf} FVG", "swing": f"{primary_tf_label} swing {side}",
+                   "range": f"{primary_tf_label} range {side}", "rr": "R:R target"}
+            what = raw.get(c.get("raw_branch"), "structure target")
+            return f"{self.MAX_RR:g}R cap {px} ({what} beyond {self.MAX_RR:g}R)"
+        return f"strategy target {px}"
+
     def _compute_stop_loss(self, entry, direction, df, exec_df=None, sweep_level=None):
         """Structure-based stop at the recent 1m swing extreme.
 
@@ -931,20 +1077,33 @@ class ICTStrategy(BaseStrategy):
             if direction == "long":
                 sl = float(sweep_level) - buffer
                 max_sl = entry - (sweep_cap_ticks * self.tick_size)
+                capped = sl < max_sl
                 sl = max(sl, max_sl)
                 if sl < entry - self.tick_size:
+                    self._last_stop_choice = {
+                        "branch": "sweep", "level": float(sl),
+                        "anchor": float(sweep_level), "capped": capped,
+                        "df_used": "exec" if (exec_df is not None and len(exec_df) >= 15) else "ref",
+                    }
                     return sl
             else:
                 sl = float(sweep_level) + buffer
                 max_sl = entry + (sweep_cap_ticks * self.tick_size)
+                capped = sl > max_sl
                 sl = min(sl, max_sl)
                 if sl > entry + self.tick_size:
+                    self._last_stop_choice = {
+                        "branch": "sweep", "level": float(sl),
+                        "anchor": float(sweep_level), "capped": capped,
+                        "df_used": "exec" if (exec_df is not None and len(exec_df) >= 15) else "ref",
+                    }
                     return sl
             # If sweep_level somehow produced a degenerate stop, fall
             # through to swing-based fallback.
 
         # Prefer execution-TF bars so we get tight, structurally-meaningful stops
         df_to_use = exec_df if (exec_df is not None and len(exec_df) >= 15) else df
+        _df_used = "exec" if (exec_df is not None and len(exec_df) >= 15) else "ref"
         recent = df_to_use.tail(20)
 
         if direction == "long":
@@ -952,22 +1111,42 @@ class ICTStrategy(BaseStrategy):
             if swing_lows:
                 # Anchor to the LOWEST swing low in the window (the actual
                 # sweep low that defined the inversion). 2-tick buffer below.
-                sl = min(s.price for s in swing_lows) - (2 * self.tick_size)
+                anchor = min(s.price for s in swing_lows)
+                sl = anchor - (2 * self.tick_size)
                 max_sl = entry - (max_sl_ticks * self.tick_size)
+                capped = sl < max_sl
                 sl = max(sl, max_sl)
                 if sl < entry:
+                    self._last_stop_choice = {
+                        "branch": "swing", "level": float(sl),
+                        "anchor": float(anchor), "capped": capped,
+                        "df_used": _df_used,
+                    }
                     return sl
             # Fallback: 12-tick stop (wider than the old 8 so it survives normal noise)
-            return entry - (12 * self.tick_size)
+            sl = entry - (12 * self.tick_size)
+            self._last_stop_choice = {"branch": "ticks_fallback", "level": float(sl),
+                                      "ticks": 12, "df_used": _df_used}
+            return sl
         else:
             swing_highs = find_swing_highs(recent, lookback=2)
             if swing_highs:
-                sl = max(s.price for s in swing_highs) + (2 * self.tick_size)
+                anchor = max(s.price for s in swing_highs)
+                sl = anchor + (2 * self.tick_size)
                 max_sl = entry + (max_sl_ticks * self.tick_size)
+                capped = sl > max_sl
                 sl = min(sl, max_sl)
                 if sl > entry:
+                    self._last_stop_choice = {
+                        "branch": "swing", "level": float(sl),
+                        "anchor": float(anchor), "capped": capped,
+                        "df_used": _df_used,
+                    }
                     return sl
-            return entry + (12 * self.tick_size)
+            sl = entry + (12 * self.tick_size)
+            self._last_stop_choice = {"branch": "ticks_fallback", "level": float(sl),
+                                      "ticks": 12, "df_used": _df_used}
+            return sl
 
     MAX_RR = 3.0  # user spec: cap take-profit at 3R; > 3R hard to hit cleanly
 
@@ -1040,11 +1219,11 @@ class ICTStrategy(BaseStrategy):
             if direction == 'long':
                 _far = float(_rng['high'].max()) - buffer
                 if (_far - entry) >= risk * 1.0:
-                    return self._clamp_tp(entry, sl, _far, direction)
+                    return self._record_tp_choice("range", entry, sl, _far, direction)
             else:
                 _far = float(_rng['low'].min()) + buffer
                 if (entry - _far) >= risk * 1.0:
-                    return self._clamp_tp(entry, sl, _far, direction)
+                    return self._record_tp_choice("range", entry, sl, _far, direction)
             # range too tight for a sane target -> fall through to default
 
         # Step 1: nearest swing in trade direction
@@ -1085,12 +1264,31 @@ class ICTStrategy(BaseStrategy):
 
         # Decision
         if htf_fvg_target is not None:
-            return self._clamp_tp(entry, sl, htf_fvg_target, direction)
+            return self._record_tp_choice("htf_fvg", entry, sl, htf_fvg_target, direction)
         if swing_level is not None:
             distance_r = abs(swing_level - entry) / risk if risk > 0 else 0
             if distance_r >= 1.0:
-                return self._clamp_tp(entry, sl, swing_level, direction)
-        return self._clamp_tp(entry, sl, fallback_tp, direction)
+                return self._record_tp_choice("swing", entry, sl, swing_level, direction)
+        return self._record_tp_choice("rr", entry, sl, fallback_tp, direction, rr=min_rr)
+
+    def _record_tp_choice(self, branch, entry, sl, raw_tp, direction, rr=None):
+        """LABEL-TRUTH-V1: clamp exactly like the old inline calls did (same
+        float ops, same order — numbers are byte-identical) and record WHICH
+        branch produced the target so on_bar can compose a truthful reason.
+        When the 3R clamp binds, the recorded branch becomes ``rr_cap`` so the
+        label never claims a structure level the clamp moved the target off."""
+        tp = self._clamp_tp(entry, sl, raw_tp, direction)
+        clamped = abs(tp - raw_tp) > 1e-9
+        self._last_tp_choice = {
+            "branch": ("rr_cap" if clamped else branch),
+            "raw_branch": branch,
+            "level": float(tp),
+            "raw_level": float(raw_tp),
+            "clamped": clamped,
+            "rr": rr,
+            "htf_tf": self._last_htf_tf,
+        }
+        return tp
 
     def _passes_rsi_filter(self, df, bias) -> bool:
         """If RSI filter is on: block longs when RSI is overheated (> rsi_long_max)

@@ -92,6 +92,18 @@ class PolygonOptionsClient:
     def __init__(self, api_key: Optional[str] = None, timeout: float = 30.0):
         self.api_key = api_key or settings.POLYGON_API_KEY
         self.timeout = timeout
+        if not self.api_key:
+            # POLYGON-EXIT (EXPLICIT flagged casualty): FMP has no options-chain
+            # endpoint on this plan, and only LIVE options routes chains through
+            # the broker (options_live_runner uses Tradier's chain API). The
+            # remaining Polygon-chain consumers — options_runner paper scans,
+            # wheel_runner, routes/options.py chain previews, options_backtest —
+            # degrade to empty chains / 502s once the Polygon key is cancelled.
+            logger.warning(
+                "[polygon-exit] PolygonOptionsClient constructed WITHOUT a Polygon key — "
+                "options chains from Polygon are a flagged casualty of the Polygon exit "
+                "(live options uses Tradier chains; paper/preview/backtest chain fetches degrade)."
+            )
 
     async def _get(self, path: str, params: dict = None) -> dict:
         params = dict(params or {})
