@@ -96,3 +96,9 @@ class TradeSession(Base):
     # Cumulative session stats
     total_trades: Mapped[int] = mapped_column(Integer, default=0)
     net_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # ALLOC-V1: per-session paper-engine capital. NULL -> engine default ($10k).
+    # The engine sizes contracts off equity, so this IS the allocation knob
+    # (replaces the killed per-session multiplier). Applied when the session's
+    # runner (re)starts.
+    starting_balance: Mapped[float | None] = mapped_column(Float, nullable=True)

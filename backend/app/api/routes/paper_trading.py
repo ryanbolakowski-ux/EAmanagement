@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.engines.paper_trading.runner import start_paper_session as _start_runner, stop_paper_session as _stop_runner
+from app.engines.paper_trading.allocation import clamp_starting_balance
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text, func, case, delete
@@ -325,6 +326,44 @@ async def set_session_label(
         instrument=session.instrument, label=session.label,
         total_trades=session.total_trades, wins=0, losses=0, net_pnl=session.net_pnl,
     )
+
+
+class AllocationUpdate(BaseModel):
+    starting_balance: float
+
+
+@router.patch("/sessions/{session_id}/allocation")
+async def set_session_allocation(
+    session_id: str,
+    data: AllocationUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the paper-engine capital allocated to this session (ALLOC-V1).
+
+    Replaces the old duplicate-session "multiplier": the engine sizes
+    positions off equity, so raising the starting balance simply sizes up
+    each position. Clamped to [$1k, $1M]. Takes effect when the session's
+    runner (re)starts.
+    """
+    result = await db.execute(
+        select(TradeSession)
+        .where(TradeSession.id == session_id, TradeSession.user_id == current_user.id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    try:
+        balance = clamp_starting_balance(data.starting_balance)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="starting_balance must be a finite number.")
+    session.starting_balance = balance
+    await db.commit()
+    return {
+        "ok": True,
+        "starting_balance": balance,
+        "note": "applies when the session (re)starts \u2014 a backend deploy tonight restarts all paper sessions",
+    }
 
 
 def _compute_metrics(trades: list[Trade]) -> SessionMetrics:

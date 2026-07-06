@@ -189,9 +189,28 @@ async def _run_paper_loop(session_id: str, strategy_id: str, user_id: str, instr
             config.rule_tree = strategy_model.rule_tree or {}
             config.take_profit_mode = (strategy_model.rule_tree or {}).get("take_profit_mode", "auto")
             ict_strategy = ICTStrategy(config, instrument=instrument)
+            # ALLOC-V1: honor the per-session capital override
+            # (trade_sessions.starting_balance). Fail-safe: any lookup or
+            # parse problem falls back to the PaperTrader default — a bad
+            # value must never stop the session from starting.
+            from app.engines.paper_trading.allocation import resolve_starting_balance
+            _alloc_raw = None
+            try:
+                from sqlalchemy import text as _alloc_text
+                _alloc_row = (await db.execute(_alloc_text(
+                    "SELECT starting_balance FROM trade_sessions WHERE id = :sid"
+                ), {"sid": session_id})).fetchone()
+                if _alloc_row:
+                    _alloc_raw = _alloc_row[0]
+            except Exception as _alloc_err:
+                logger.warning(f"[PaperRunner] starting_balance lookup failed ({_alloc_err}); using default")
+            _starting_balance = resolve_starting_balance(_alloc_raw)
+            if _alloc_raw is not None:
+                logger.info(f"[PaperRunner] Session {session_id} allocation: starting_balance={_starting_balance}")
             trader = PaperTrader(
                 ict_strategy, instrument=instrument, session_id=session_id,
                 user_id=user_id, strategy_id=strategy_id,
+                starting_balance=_starting_balance,
             )
             _active_traders[_task_key(session_id, instrument)] = trader
             await trader.start()
