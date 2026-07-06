@@ -150,7 +150,7 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
         _ok, _why = await _bias_ok(instrument, direction)
         if not _ok:
             logger.info(f"[entry-guard] BLOCKED bias-alignment: {_why} (session={session_id})")
-            return Decision(allowed=False, reason=_why)
+            return Decision(allowed=False, reason=_why, debug={"gate": "bias_alignment"})
     except Exception as _be:
         logger.warning(f"[entry-guard] bias-alignment errored ({_be}) — failing open")
 
@@ -162,7 +162,7 @@ async def can_enter(*, session_id: str, strategy_id: str, instrument: str,
         _lblocked, _lwhy = _lw.lunch_blocked(instrument, strategy_name=_lname)
         if _lblocked:
             logger.info(f"[entry-guard] BLOCKED lunch-window: {_lwhy} (session={session_id})")
-            return Decision(allowed=False, reason=_lwhy)
+            return Decision(allowed=False, reason=_lwhy, debug={"gate": "lunch_window"})
     except Exception as _le:
         logger.warning(f"[entry-guard] lunch-window errored ({_le}) — failing open")
 

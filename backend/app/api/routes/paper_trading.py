@@ -357,6 +357,13 @@ async def set_session_allocation(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
+    _mode = getattr(session, "mode", None)
+    _mode = getattr(_mode, "value", _mode)  # Enum or str
+    if str(_mode or "").lower() != "paper":
+        raise HTTPException(
+            status_code=400,
+            detail="Allocation applies to paper futures sessions only — live and "
+                   "options-paper sessions size from their broker account.")
     try:
         balance = clamp_starting_balance(data.starting_balance)
     except (TypeError, ValueError):

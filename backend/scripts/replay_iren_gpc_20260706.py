@@ -14,6 +14,12 @@ Recorded facts (forensics 2026-07-06):
 Claim verified here: under the upgrade the pipeline ranks IREN above GPC AND
 the stale-quote hard gate rejects GPC. No network — recorded numbers only.
 
+HONESTY NOTE: candidate SOURCING still comes from the market snapshot. On a
+stale morning (delayed Polygon universe) the upgrade's real-world effect is
+the stale-quote gate rejecting bad finalists (Saro abstains); IREN-class
+winners can only be SOURCED once the FMP live universe (SARO_UNIVERSE=fmp)
+flips. This replay shows the scoring math is ready for that data.
+
 Run (container): PYTHONPATH=/tmp/wt python scripts/replay_iren_gpc_20260706.py
 """
 import os
@@ -33,9 +39,9 @@ def _mk_gpc() -> dict:
         # ── stale snapshot (Thursday 7/02's session read as 'today') ──
         "price": 132.57,        # Thursday close — the recorded 'entry'
         "gap_pct": 12.92,       # Thursday's gap, reported as Monday's
-        "rel_vol": 3.2,
-        "today_vol": 610_000,
-        "dollar_vol": 80_000_000,
+        "rel_vol": 3.72,
+        "today_vol": 5_088_382,
+        "dollar_vol": 674_600_000,
         "matched_strategy": "momentum_breakout",
     }
     enrichment = {
@@ -138,7 +144,7 @@ def main() -> int:
     ok_rank = new_iren > new_gpc
     ok_gate = gpc_stale and not iren_stale
     print("-" * 74)
-    print(f"CLAIM 1 (IREN ranks above GPC under the upgrade): "
+    print(f"CLAIM 1 (scoring math ranks IREN above GPC once both are live-sourced): "
           f"{'PASS' if ok_rank else 'FAIL'} ({new_iren:.1f} vs {new_gpc:.1f})")
     print(f"CLAIM 2 (stale-quote gate rejects GPC, passes IREN): "
           f"{'PASS' if ok_gate else 'FAIL'} "

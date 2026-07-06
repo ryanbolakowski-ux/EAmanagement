@@ -108,24 +108,37 @@ def test_rel_vol_adv20_rescues_elevated_prior_day_base():
 
 # ── neutrality + bounded drift when enrichment is missing ───────────────────
 
-def test_missing_enrichment_keys_all_neutral_and_bounded_drift():
+def test_missing_enrichment_keys_omitted_and_zero_drift():
     c = _base_candidate()  # no enrichment keys at all
     sb_new = score_candidate(c)
-    # every new/upgraded component sits at its neutral default
-    assert sb_new.components["analyst"]["raw"] == 0.5
-    assert sb_new.components["fade_guard"]["raw"] == 0.5
-    assert sb_new.components["trend"]["raw"] == 0.5
-    # pre-change formula = gate OFF (legacy weights, no new components)
+    # un-enriched candidates carry NO new components at all — byte-identical
+    # to legacy, so the absolute 15/20 gates keep one scale everywhere
+    assert "analyst" not in sb_new.components
+    assert "fade_guard" not in sb_new.components
+    assert sb_new.components["trend"]["raw"] == 0.5  # legacy neutral unchanged
     os.environ["SARO_RANK_UPGRADE"] = "0"
     try:
         sb_old = score_candidate(dict(c))
     finally:
         os.environ["SARO_RANK_UPGRADE"] = "1"
-    assert "analyst" not in sb_old.components
-    assert "fade_guard" not in sb_old.components
-    assert abs(sb_new.total - sb_old.total) <= 3.0, (
-        f"drift {sb_new.total - sb_old.total:+.2f} exceeds 3 points "
-        f"(old {sb_old.total} new {sb_new.total})")
+    assert abs(sb_new.total - sb_old.total) < 0.001
+
+
+def test_zero_drift_at_score_extremes():
+    # the old neutral-add pulled low scores up ~4 pts and high scores down ~4
+    for cand in (
+        {"ticker": "LOW", "price": 10.0, "gap_pct": 2.0, "rel_vol": 1.1,
+         "today_vol": 200_000, "dollar_vol": 2_000_000},
+        {"ticker": "HI", "price": 50.0, "gap_pct": 19.0, "rel_vol": 9.0,
+         "today_vol": 30_000_000, "dollar_vol": 1_500_000_000},
+    ):
+        sb_new = score_candidate(dict(cand))
+        os.environ["SARO_RANK_UPGRADE"] = "0"
+        try:
+            sb_old = score_candidate(dict(cand))
+        finally:
+            os.environ["SARO_RANK_UPGRADE"] = "1"
+        assert abs(sb_new.total - sb_old.total) < 0.001, cand["ticker"]
 
 
 def test_gate_off_is_byte_identical_even_with_enrichment_keys():

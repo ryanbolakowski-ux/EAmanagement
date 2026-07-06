@@ -430,6 +430,22 @@ function SizingPreviewCard() {
 
   const accts: any[] = data?.per_account || []
 
+  // ALLOC-UX-V1 fix: persisted per-account sizing models. allocation_usd:null
+  // makes the backend answer with each account's SAVED model, so the summary
+  // strip is immune to whatever is typed in the calculator above.
+  const { data: persistedData } = useQuery({
+    queryKey: ['sizing-preview-persisted', ticker.trim().toUpperCase(), entry, stop],
+    queryFn: () => api.post('/api/v1/live-trading/sizing-preview', {
+      ticker: ticker.trim().toUpperCase(),
+      entry: entryNum,
+      stop: stopNum,
+      allocation_usd: null,
+    }).then(r => r.data),
+    enabled: inputsOk,
+    refetchInterval: 60000,
+  })
+  const persistedAccts: any[] = persistedData?.per_account || []
+
   // ALLOC-UX-V1: today's pick for the “Tomorrow’s buy” spot in the summary
   // strip below. Same queryKey/queryFn as TodayPickCard above, so react-query
   // shares one cache entry and dedupes the network call.
@@ -520,24 +536,29 @@ function SizingPreviewCard() {
       </div>
 
       {/* ── PLAIN-ENGLISH SUMMARY STRIP (ALLOC-UX-V1) ──────────────────
-           One sentence per connected broker account + a “Tomorrow’s buy”
-           spot, driven by the same sizing-preview + today-pick data. */}
-      {accts.length > 0 && (() => {
-        const effAlloc = (allocation !== '' && Number.isFinite(allocNum) && allocNum > 0)
-          ? allocNum
-          : Number(selected?.sizing?.allocation_usd || 0)
+           One sentence per connected broker account + a "Tomorrow's buy"
+           spot. Driven by PERSISTED per-account sizing models (allocation_usd
+           null request), so calculator keystrokes can't change the claims. */}
+      {persistedAccts.length > 0 && (() => {
+        const selPersisted = (persistedAccts.find((a: any) => a.broker_account_id === selected?.broker_account_id) || persistedAccts[0])?.sizing || {}
+        const isAllocModel = selPersisted.risk_model === 'allocation'
+        const effAlloc = isAllocModel ? Number(selPersisted.allocation_usd || 0) : 0
+        const riskPhrase =
+          selPersisted.risk_model === 'usd' ? `$${Number(selPersisted.risk_per_trade_usd || 0).toLocaleString()} risked per trade`
+          : selPersisted.risk_model === 'pct' ? `${Number(selPersisted.risk_per_trade_pct || 0)}% of the account risked per trade`
+          : '1% of the account risked per trade'
         const px = todayPick ? Number(todayPick.live_price ?? todayPick.entry ?? 0) : 0
-        const estShares = (todayPick && effAlloc > 0 && px > 0) ? Math.floor(effAlloc / px) : null
+        const estShares = (todayPick && isAllocModel && effAlloc > 0 && px > 0) ? Math.floor(effAlloc / px) : null
         return (
           <div className="mt-3 rounded-xl border border-violet-200 dark:border-violet-800 bg-violet-50/60 dark:bg-violet-950/30 p-3">
             <div className="space-y-1">
-              {accts.map((a: any) => {
+              {persistedAccts.map((a: any) => {
                 const s = a.sizing || {}
                 const sentence =
-                  s.risk_model === 'allocation' ? `This account buys about $${Number(s.allocation_usd || 0).toLocaleString()} of Saro’s pick every day.`
-                  : s.risk_model === 'usd' ? `This account risks $${Number(s.risk_per_trade_usd || 0).toLocaleString()} per trade on Saro’s pick.`
-                  : s.risk_model === 'pct' ? `This account risks ${Number(s.risk_per_trade_pct || 0)}% per trade on Saro’s pick.`
-                  : `This account risks 1% per trade on Saro’s pick.`
+                  s.risk_model === 'allocation' ? `This account buys about $${Number(s.allocation_usd || 0).toLocaleString()} of Saro's pick every day.`
+                  : s.risk_model === 'usd' ? `This account risks $${Number(s.risk_per_trade_usd || 0).toLocaleString()} per trade on Saro's pick.`
+                  : s.risk_model === 'pct' ? `This account risks ${Number(s.risk_per_trade_pct || 0)}% per trade on Saro's pick.`
+                  : `This account risks 1% per trade on Saro's pick.`
                 return (
                   <div key={a.broker_account_id} className="text-xs text-slate-700 dark:text-slate-200">
                     <span className="font-bold">{a.account_name}</span>
@@ -548,19 +569,19 @@ function SizingPreviewCard() {
               })}
             </div>
             <div className="mt-2 pt-2 border-t border-violet-200/70 dark:border-violet-800/50 text-xs text-slate-700 dark:text-slate-200">
-              <span className="text-[10px] uppercase tracking-wider font-extrabold text-violet-600 dark:text-violet-300 mr-2">Tomorrow’s buy</span>
+              <span className="text-[10px] uppercase tracking-wider font-extrabold text-violet-600 dark:text-violet-300 mr-2">Tomorrow's buy</span>
               {todayPick ? (
                 estShares != null ? (
                   <>Today it bought/would buy ~{estShares.toLocaleString()} shares of <span className="font-bold">{todayPick.ticker}</span> at ~${px.toFixed(2)}.</>
+                ) : isAllocModel ? (
+                  <>Today's pick is <span className="font-bold">{todayPick.ticker}</span>{px > 0 ? ` at ~$${px.toFixed(2)}` : ''} — save a daily Allocation $ to see the share count.</>
                 ) : (
-                  <>Today’s pick is <span className="font-bold">{todayPick.ticker}</span>{px > 0 ? ` at ~$${px.toFixed(2)}` : ''} — set an Allocation $ above to see the share count.</>
+                  <>Today's pick is <span className="font-bold">{todayPick.ticker}</span>{px > 0 ? ` at ~$${px.toFixed(2)}` : ''} — this account sizes it by risk at buy time ({riskPhrase}).</>
                 )
+              ) : isAllocModel && effAlloc > 0 ? (
+                <>Decided tomorrow at 9:36 ET — with ${effAlloc.toLocaleString()} it will buy roughly ${effAlloc.toLocaleString()} worth of the pick.</>
               ) : (
-                effAlloc > 0 ? (
-                  <>Decided tomorrow at 9:36 ET — with ${effAlloc.toLocaleString()} it will buy roughly ${effAlloc.toLocaleString()} worth of the pick.</>
-                ) : (
-                  <>Decided tomorrow at 9:36 ET — set an Allocation $ above to preview roughly how much it will buy.</>
-                )
+                <>Decided tomorrow at 9:36 ET — sized by this account's risk setting at buy time ({riskPhrase}).</>
               )}
             </div>
           </div>

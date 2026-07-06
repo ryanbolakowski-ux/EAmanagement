@@ -111,3 +111,40 @@ def test_utc_datetime_converted_to_et():
     utc = datetime(2026, 7, 6, 16, 0, 0, tzinfo=ZoneInfo("UTC"))
     blocked, _ = lunch_blocked("NQ", now_et=utc)
     assert blocked is True
+
+
+# ── entry_guard INTEGRATION: the gates must return a real Decision ──────────
+# (regression for the missing Decision.debug TypeError that made both gates
+# silently fail open on every block attempt)
+
+def test_entry_guard_bias_block_returns_decision(monkeypatch):
+    import asyncio
+    from app.engines import entry_guard as eg
+
+    async def _deny(instrument, direction):
+        return False, "daily bias BULLISH — shorts blocked on NQ (owner rule)"
+    monkeypatch.setattr("app.engines.bias_alignment.direction_allowed", _deny)
+    d = asyncio.run(eg.can_enter(session_id="t-sess", strategy_id="t-strat",
+                                 instrument="NQ", direction="short"))
+    assert d.allowed is False
+    assert "BULLISH" in d.reason
+    assert isinstance(d.debug, dict)
+
+
+def test_entry_guard_lunch_block_returns_decision(monkeypatch):
+    import asyncio
+    from app.engines import entry_guard as eg
+
+    async def _allow(instrument, direction):
+        return True, "aligned"
+    monkeypatch.setattr("app.engines.bias_alignment.direction_allowed", _allow)
+    monkeypatch.setattr(
+        "app.engines.lunch_window.lunch_blocked",
+        lambda instrument, strategy_name=None, now_et=None:
+            (True, "NY lunch 11:00-14:00 ET — new futures entries blocked (owner rule)"))
+    monkeypatch.delenv("LUNCH_WINDOW_EXEMPT", raising=False)
+    d = asyncio.run(eg.can_enter(session_id="t-sess", strategy_id="t-strat",
+                                 instrument="NQ", direction="long"))
+    assert d.allowed is False
+    assert "lunch" in d.reason.lower()
+    assert isinstance(d.debug, dict)

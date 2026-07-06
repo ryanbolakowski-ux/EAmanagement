@@ -169,14 +169,13 @@ def score_candidate(features: dict, weights: dict | None = None,
     ol = features.get("options_liquidity")
     add("options_liquidity", 0.0 if ol is None else _clip(float(ol)), "n/a" if ol is None else "opts")
 
-    # ── SARO-RANK-UPGRADE components (env-gated; neutral 0.5 when data absent
-    # so score drift on un-enriched candidates stays small; flag-off skips them
-    # entirely so legacy scores are byte-identical) ──
+    # ── SARO-RANK-UPGRADE components (env-gated; OMITTED entirely when the
+    # enrichment keys are absent, so un-enriched candidates score byte-identical
+    # to the legacy formula — no drift vs the absolute 15/20 gate thresholds
+    # used by the shadow/funnel callers that never enrich) ──
     if _rank_upgrade_enabled():
         up = features.get("analyst_upside_pct")
-        if up is None:
-            add("analyst", 0.5, "n/a (neutral)")
-        else:
+        if up is not None:
             try:
                 up = float(up)
                 a_raw = 0.1 if up <= 0 else _clip(up / 60.0)
@@ -186,12 +185,10 @@ def score_candidate(features: dict, weights: dict | None = None,
                 add("analyst", a_raw, f"{up:+.0f}% to consensus target"
                     + (f" ({_rating})" if _rating else ""))
             except Exception:
-                add("analyst", 0.5, "n/a (neutral)")
+                pass  # unusable analyst data -> component omitted (no drift)
 
         prior = features.get("prior_day_ret_pct")
-        if prior is None:
-            add("fade_guard", 0.5, "n/a (neutral)")
-        else:
+        if prior is not None:
             try:
                 prior = float(prior)
                 fg_gap = features.get("live_gap_pct")
@@ -204,7 +201,7 @@ def score_candidate(features: dict, weights: dict | None = None,
                 else:
                     add("fade_guard", 1.0, "no fade shape")
             except Exception:
-                add("fade_guard", 0.5, "n/a (neutral)")
+                pass  # unusable fade data -> component omitted (no drift)
 
     max_pts = sum(float(w.get(n, 0.0)) for n in comp)
     raw_pts = sum(v["weighted"] for v in comp.values())

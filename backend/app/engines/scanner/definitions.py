@@ -370,12 +370,12 @@ _reg(StrategyTemplate(
 # catalysts, +13% on the day, while Saro picked the GPC post-pop fade). The
 # coarse daily gate only sees today's gap; the -15%/5d requirement is enforced
 # POST-ENRICHMENT in find_best_pick_via_funnel — candidates matched ONLY by
-# this template are dropped when chg_5d_pct > -15 (or unknown). `enabled`
-# follows the SARO_RANK_UPGRADE env gate (read at import) so flag-off behavior
-# is byte-identical to before this template existed.
+# this template are dropped when chg_5d_pct > -15 (or unknown). The template
+# is gated at CALL time in enabled_templates() so an env flip mid-process can
+# never leave it live while its post-enrichment enforcement is off.
 _reg(StrategyTemplate(
     key="capitulation_gap_reclaim", display_name="Capitulation Gap Reclaim",
-    enabled=(os.environ.get("SARO_RANK_UPGRADE", "1") == "1"),
+    enabled=True,  # gated at CALL time in enabled_templates() (env-flip safe)
     family="mean_reversion", direction="long", hold_horizon="intraday",
     thesis="multi-day capitulation (-15%+ / 5d) reclaimed with a +5% gap — IREN 2026-07-06 class",
     daily_filters={"gap_min": 5.0, "gap_max": 60.0, "rel_vol_min": 1.0,
@@ -405,4 +405,9 @@ def equity_templates() -> list:
 
 def enabled_templates() -> list:
     """Templates actually promoted to live (stats cleared + operator flip). Empty for now."""
-    return [t for t in TEMPLATES.values() if t.approved and t.enabled]
+    out = [t for t in TEMPLATES.values() if t.approved and t.enabled]
+    # SARO-RANK-UPGRADE templates are gated at CALL time so an env flip can't
+    # leave one enabled while its post-enrichment enforcement is off.
+    if os.environ.get("SARO_RANK_UPGRADE", "1") != "1":
+        out = [t for t in out if t.key != "capitulation_gap_reclaim"]
+    return out

@@ -391,6 +391,18 @@ async def find_best_pick_via_funnel(db):
     best_watch = None
     _evaluated = []
     for c in cands[:12]:
+        # SARO-RANK-UPGRADE last line of defense: a capitulation-labeled
+        # candidate must carry a VERIFIED -15%/5d, no matter how it got here
+        # (tail backfill after drops, enrich-block exception, env flip).
+        if c.get("matched_strategy") == "capitulation_gap_reclaim":
+            try:
+                _c5 = float(c.get("chg_5d_pct"))
+            except (TypeError, ValueError):
+                _c5 = None
+            if _c5 is None or _c5 > -15.0:
+                logger.info(f"[stock-scanner] {c['ticker']}: capitulation match "
+                            f"without verified -15%/5d (chg_5d={_c5}) — skipped at gate walk")
+                continue
         try:
             verdict, reasons = await _apply_quality_filters(db, c)
         except Exception as e:
