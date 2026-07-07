@@ -22,10 +22,16 @@ import { useEffect, useRef, useState } from 'react'
  *     (dpr capped at 2 — retina glow doesn't need a 4× fill on 4k).
  *
  * prefers-reduced-motion — ONE static frame (particles + links, no
- * drift, no pulses) and the captions render as a static list instead of
- * floating. live=false — same static treatment, plus the field dims and
- * an "idle" chip appears (the parent passes polling-derived captions so
- * the list stays truthful while the stream is down).
+ * drift, no pulses, no comets) and the captions render as a static list.
+ * live=false — the field stays FULLY ANIMATED (owner rule 2026-07-06:
+ * "this should be an animation... like shooting stars") at 65% drift
+ * speed with a lighter dim + the "idle" chip; captions keep floating
+ * (the parent passes polling-derived captions so they stay truthful
+ * while the stream is down).
+ *
+ * Shooting stars — a pre-allocated pool of 3 comet streaks (fading
+ * trail segments behind a glowing head) spawning every ~2.5-6s, alive
+ * in both live and idle modes.
  *
  * Captions are absolutely-positioned DOM elements over the canvas (not
  * canvas text) so they stay crisp at any dpr and inherit v2 tokens.
@@ -73,6 +79,10 @@ const LABEL_LIFE_MS = 3200 // fade-in + linger before fade-out starts
 const LABEL_FADE_MS = 600
 const LABEL_SPAWN_MS = 1500
 const TAU = Math.PI * 2
+const COMET_MAX = 3
+const COMET_TRAIL_SEGS = 6
+const COMET_SEG_LEN = 3.4 // trail segment length in velocity multiples
+const IDLE_SPEED = 0.65 // drift multiplier while the stream is offline
 
 let labelSeq = 0
 
@@ -98,7 +108,12 @@ export default function EngineField({
   )
   const [labels, setLabels] = useState<FloatingLabel[]>([])
 
-  const animate = live && !reduced
+  // live only modulates drift speed + dimming now — it must NOT restart the
+  // simulation effect (deps stay [density, animate]), so read it via a ref.
+  const liveRef = useRef(live)
+  liveRef.current = live
+
+  const animate = !reduced
 
   // Track the OS reduced-motion setting live (mirrors LiveNumber's JS check).
   useEffect(() => {
@@ -137,6 +152,30 @@ export default function EngineField({
     let pulseStart = 0
     let nextPulseAt = performance.now() + 1200 + Math.random() * 1800
 
+    // Shooting-star pool — pre-allocated; a slot is active while life > 0.
+    const cX = new Float32Array(COMET_MAX)
+    const cY = new Float32Array(COMET_MAX)
+    const cVX = new Float32Array(COMET_MAX)
+    const cVY = new Float32Array(COMET_MAX)
+    const cBorn = new Float64Array(COMET_MAX)
+    const cLife = new Float64Array(COMET_MAX)
+    let nextCometAt = performance.now() + 900 + Math.random() * 1600
+
+    const spawnComet = (now: number) => {
+      for (let s = 0; s < COMET_MAX; s++) {
+        if (cLife[s] > 0) continue
+        const fromLeft = Math.random() < 0.5
+        const speed = 5.5 + Math.random() * 3.5 // px per painted frame — a streak
+        cX[s] = fromLeft ? -12 : w + 12
+        cY[s] = h * (0.08 + Math.random() * 0.7)
+        cVX[s] = fromLeft ? speed : -speed
+        cVY[s] = (Math.random() - 0.25) * 1.8 // shallow, mostly-horizontal arc
+        cBorn[s] = now
+        cLife[s] = ((w + 40) / speed) * FRAME_MS // time to cross + margin
+        return
+      }
+    }
+
     const seed = () => {
       for (let i = 0; i < count; i++) {
         xs[i] = Math.random() * w
@@ -150,6 +189,8 @@ export default function EngineField({
     const draw = (now: number, withMotion: boolean) => {
       ctx.clearRect(0, 0, w, h)
 
+      const speedScale = liveRef.current ? 1 : IDLE_SPEED
+
       if (withMotion) {
         // Brownian drift: jitter + damping + speed clamp + soft wall bounce.
         for (let i = 0; i < count; i++) {
@@ -159,8 +200,8 @@ export default function EngineField({
           else if (vx < -MAX_SPEED) vx = -MAX_SPEED
           if (vy > MAX_SPEED) vy = MAX_SPEED
           else if (vy < -MAX_SPEED) vy = -MAX_SPEED
-          let x = xs[i] + vx
-          let y = ys[i] + vy
+          let x = xs[i] + vx * speedScale
+          let y = ys[i] + vy * speedScale
           if (x < 0) { x = 0; vx = -vx } else if (x > w) { x = w; vx = -vx }
           if (y < 0) { y = 0; vy = -vy } else if (y > h) { y = h; vy = -vy }
           xs[i] = x; ys[i] = y; vxs[i] = vx; vys[i] = vy
@@ -220,6 +261,46 @@ export default function EngineField({
             ctx.fill()
             ctx.shadowBlur = 0
           }
+        }
+
+        // ── Shooting stars: advance + trail + glowing head ──
+        if (now >= nextCometAt) {
+          spawnComet(now)
+          nextCometAt = now + 2600 + Math.random() * 3400
+        }
+        for (let s = 0; s < COMET_MAX; s++) {
+          if (cLife[s] <= 0) continue
+          const t = now - cBorn[s]
+          if (t >= cLife[s] || cX[s] < -40 || cX[s] > w + 40 || cY[s] < -40 || cY[s] > h + 40) {
+            cLife[s] = 0
+            continue
+          }
+          cX[s] += cVX[s] * speedScale
+          cY[s] += cVY[s] * speedScale
+          // fade in fast, fade out before the end of life
+          let fade = t / 180
+          const out = (cLife[s] - t) / 420
+          if (out < fade) fade = out
+          if (fade > 1) fade = 1
+          // trail: short segments of decreasing alpha behind the head
+          ctx.strokeStyle = accent
+          ctx.lineWidth = 1.4
+          for (let k = 0; k < COMET_TRAIL_SEGS; k++) {
+            ctx.globalAlpha = fade * 0.5 * (1 - k / COMET_TRAIL_SEGS)
+            ctx.beginPath()
+            ctx.moveTo(cX[s] - cVX[s] * COMET_SEG_LEN * k, cY[s] - cVY[s] * COMET_SEG_LEN * k)
+            ctx.lineTo(cX[s] - cVX[s] * COMET_SEG_LEN * (k + 1), cY[s] - cVY[s] * COMET_SEG_LEN * (k + 1))
+            ctx.stroke()
+          }
+          // head: small bright dot with a soft glow
+          ctx.fillStyle = accent
+          ctx.shadowColor = accent
+          ctx.shadowBlur = 10 * fade
+          ctx.globalAlpha = 0.95 * fade
+          ctx.beginPath()
+          ctx.arc(cX[s], cY[s], 1.9, 0, TAU)
+          ctx.fill()
+          ctx.shadowBlur = 0
         }
       }
 
