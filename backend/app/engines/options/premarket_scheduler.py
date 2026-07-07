@@ -1309,7 +1309,11 @@ async def _check_and_run_theta_scanner():
 
     # Debounce: scanner is expensive (~30s of API calls). Don't run more
     # than once per 5 min wall-clock.
-    if _theta_last_scan_min is not None and (et_min - _theta_last_scan_min) < 5:
+    # 0 <= diff guards the midnight rollover: et_min is minutes-since-
+    # midnight, so after a day WITHOUT a restart yesterday's ~11:55 value
+    # made (et_min - last) negative all morning -> silent return -> the
+    # scanner never scanned on 2026-07-07 until 12:04 (window closes 12:00).
+    if _theta_last_scan_min is not None and 0 <= (et_min - _theta_last_scan_min) < 5:
         return
     _theta_last_scan_min = et_min
 
