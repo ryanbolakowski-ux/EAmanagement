@@ -284,6 +284,23 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
 _LAST_SCAN_DIAG = {"last": None}
 
 
+def _entry_basis(c: dict) -> float:
+    """Executable entry price for a candidate: the enrichment REAL-TIME quote
+    (live_price, FMP — set by enrich_finalists) when present, else the
+    (possibly 15-min-delayed) snapshot price.
+
+    LIVE-PRICE ENTRY HONESTY (2026-07-07): FDUS emailed entry $20.41 off the
+    delayed snapshot while the stock traded $19.84 live — the day high never
+    reached the emailed entry. The emailed entry must be executable."""
+    try:
+        _live = c.get("live_price")
+        if _live is not None and float(_live) > 0:
+            return float(_live)
+    except (TypeError, ValueError):
+        pass
+    return float(c["price"])
+
+
 async def find_best_pick_via_funnel(db):
     """LIVE daily pick from the PROMOTED multi-strategy templates (SCANNER-V1).
 
@@ -434,14 +451,22 @@ async def find_best_pick_via_funnel(db):
         logger.info("[stock-scanner] funnel: no candidate cleared the quality gate")
         return None
 
-    best["entry"] = best["price"]
+    # LIVE-PRICE ENTRY HONESTY (2026-07-07, FDUS): when enrichment attached a
+    # real-time quote, entry AND the stop/target levels are computed off the
+    # LIVE price — not the delayed snapshot close. The >3% stale-quote
+    # hard-reject in _apply_quality_filters is unchanged.
+    _entry_px = _entry_basis(best)
+    if abs(_entry_px - float(best["price"])) > 1e-9:
+        logger.info(f"[stock-scanner] {best['ticker']} entry basis LIVE ${_entry_px:.2f} "
+                    f"(delayed snapshot ${float(best['price']):.2f})")
+    best["entry"] = _entry_px
     from app.engines.options.premarket_scheduler import _polygon_1min_bars, _today_et_date_str
     from app.engines.scanner.levels import compute_levels
     try:
         _bars = await _polygon_1min_bars(best["ticker"], _today_et_date_str())
     except Exception:
         _bars = None
-    _lv = compute_levels("long", float(best["price"]), _bars, rr=float(best.get("_rr", 2.0)))
+    _lv = compute_levels("long", _entry_px, _bars, rr=float(best.get("_rr", 2.0)))
     best["stop"] = _lv.stop
     best["target"] = _lv.target
     best["projected_move_pct"] = _lv.projected_move_pct
@@ -465,7 +490,7 @@ async def find_best_pick_via_funnel(db):
         "evaluated": _evaluated, "pick": best["ticker"], "no_trade_reason": None}
     logger.info(
         f"[stock-scanner] FUNNEL PICK {best['ticker']} via {best.get('matched_strategy')} "
-        f"score={best['score']:.0f} entry=${best['price']:.2f} stop={best['stop']} "
+        f"score={best['score']:.0f} entry=${best['entry']:.2f} stop={best['stop']} "
         f"({best['stop_reason']}) target={best['target']} rr={best['rr']} "
         f"basis={best['levels_basis']} watch_only={best['watch_only']}")
     try:

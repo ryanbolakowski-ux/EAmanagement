@@ -1142,6 +1142,19 @@ async def run_theta_scanner_for_all_users():
                 await _start_theta_pick_paper_session(db, u.id, u.strategy_id, pick.get("ticker"), pick)
             except Exception as e:
                 logger.error(f"[OptionsPaper-Theta] wiring error for {u.email}: {e}")
+            # THETA-LIVE-PICK-V1 (owner 2026-07-07: "It's not entering the
+            # SARO picks on live accounts"): route the daily pick to the
+            # user's live broker account, sized by the Live Trading page's
+            # theta_scanner_allocation_usd. 8-rung fail-CLOSED ladder inside
+            # (env switch, once/day, account, allocation, Phase-E guard,
+            # quote sanity, sizing, market hours). A routing failure must
+            # NEVER break pick emails.
+            try:
+                from app.engines.options.pick_router import route_pick_to_live
+                _placed, _why = await route_pick_to_live(u.id, u.email, pick)
+                logger.info(f"[pick-route] {u.email}: placed={_placed} reason={_why}")
+            except Exception as e:
+                logger.error(f"[pick-route] wiring error for {u.email}: {e}")
 
 
 _theta_fired_today = None  # in-memory cache, backed by Redis
