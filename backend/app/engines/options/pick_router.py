@@ -1,3 +1,8 @@
+# UNWIRED (2026-07-07 verify round): superseded by the upgraded legacy
+# pending-entry path (emit_theta_pick -> theta:pending_entry -> timing gate),
+# which now carries allocation sizing + sandbox routing. Two racing order
+# paths = the double-buy defect; kept for a future native Tradier-OTOCO
+# rebuild but NOT called from the scheduler.
 """Daily-pick LIVE routing — THETA-LIVE-PICK-V1 (owner request 2026-07-07).
 
 The Live Trading page promises "buys $X of Saro's pick every day"

@@ -253,13 +253,21 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
     # 1 + 4. VWAP-relative checks. Below VWAP -> watch-only (long bias unconfirmed);
     #    >7% above VWAP -> overextended reject (chasing). (Widened 5%->7% for momentum.)
     vwap = _session_vwap(bars_1m)
+    # VWAP verdicts judge the price we would actually TRADE: prefer the live
+    # quote (enrichment) over the possibly-delayed snapshot price.
+    try:
+        _vpx = float(cand.get("live_price") or 0)
+    except (TypeError, ValueError):
+        _vpx = 0.0
+    if _vpx <= 0:
+        _vpx = price
     if vwap and vwap > 0:
-        dist_pct = (price - vwap) / vwap * 100.0
+        dist_pct = (_vpx - vwap) / vwap * 100.0
         if dist_pct > 7.0:
-            logger.info(f"[ThetaScanner] reject {ticker}: price ${price:.2f} is {dist_pct:.1f}% above VWAP ${vwap:.2f} (>7% overextended)")
+            logger.info(f"[ThetaScanner] reject {ticker}: price ${_vpx:.2f} is {dist_pct:.1f}% above VWAP ${vwap:.2f} (>7% overextended)")
             return "reject", reasons
-        if price < vwap:
-            logger.info(f"[ThetaScanner] {ticker}: price ${price:.2f} below VWAP ${vwap:.2f} (long-below-VWAP) — watch-only")
+        if _vpx < vwap:
+            logger.info(f"[ThetaScanner] {ticker}: price ${_vpx:.2f} below VWAP ${vwap:.2f} (long-below-VWAP) — watch-only")
             soft_fail = True
             reasons.append(f"below VWAP ${vwap:.2f}")
         else:
@@ -704,6 +712,26 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
     return best
 
 
+def _pick_qty_for_allocation(allocation, basis_price, legacy_usd: float = 1000.0,
+                             cap_usd: float = 100_000.0) -> tuple:
+    """Shares for the daily pick: floor(allocation/basis), allocation capped at
+    $100k (fat-finger guard); legacy $1,000 sizing when no allocation is set.
+    Returns (qty, sized_from) where sized_from is 'allocation' | 'legacy'."""
+    try:
+        basis = float(basis_price)
+    except (TypeError, ValueError):
+        return 0, "invalid"
+    if basis <= 0:
+        return 0, "invalid"
+    try:
+        alloc = float(allocation) if allocation is not None else 0.0
+    except (TypeError, ValueError):
+        alloc = 0.0
+    if alloc > 0:
+        return max(1, int(min(alloc, cap_usd) / basis)), "allocation"
+    return max(1, int(legacy_usd / basis)), "legacy"
+
+
 async def emit_theta_pick(db, user, pick: dict) -> bool:
     from app.services.email import _send, _send_tracked
     qty = max(1, int(1000 / pick["price"]))
@@ -833,7 +861,26 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 broker_account_id = None
         if trade_mode == "live" and broker_account_id:
             from datetime import date as _date
-            qty = max(1, int(1000 / pick["price"]))  # $1000 position
+            # Size from the account's daily allocation (the Live Trading page's
+            # "buys $X of Saro's pick every day"); legacy $1,000 when unset.
+            _alloc = None
+            try:
+                from sqlalchemy import text as _txt
+                _arow = (await db.execute(_txt(
+                    "SELECT theta_scanner_allocation_usd FROM broker_accounts WHERE id = :id"),
+                    {"id": str(broker_account_id)})).scalar()
+                _alloc = float(_arow) if _arow else None
+            except Exception:
+                _alloc = None
+            _basis = float(pick.get("entry") or pick["price"])  # live-price basis
+            qty, _sized_from = _pick_qty_for_allocation(_alloc, _basis)
+            if qty < 1:
+                logger.warning(f"[ThetaScanner] {user.email}: sizing invalid (alloc={_alloc}, basis={_basis}) — no broker entry")
+                broker_account_id = None
+            else:
+                logger.info(f"[ThetaScanner] {user.email}: qty={qty} sized_from={_sized_from} "
+                            f"(alloc={_alloc}, basis=${_basis:.2f})")
+        if trade_mode == "live" and broker_account_id:
             entry_payload = {
                 "user_id": str(user.id),
                 "user_email": user.email,
@@ -841,7 +888,7 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 "ticker": pick["ticker"],
                 "direction": "long",
                 "qty": qty,
-                "pick_price": pick["price"],  # snapshot at scan time — not the entry
+                "pick_price": float(pick.get("entry") or pick["price"]),  # live-price entry basis
                 "target": pick["target"],
                 "pick_date": _date.today().isoformat(),
                 "score": pick.get("score"),

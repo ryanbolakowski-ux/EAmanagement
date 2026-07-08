@@ -599,19 +599,30 @@ async def _resolve_user_broker(user_id: str) -> tuple[Optional[str], str]:
     pending trades to that account in live mode. Otherwise we fall back
     to paper. This is the per-user data-licensing split — Tradier covers
     the data + execution for each user; Theta Algos pays $0."""
+    # THETA-ROUTE-SANDBOX (owner 2026-07-07: "It's not entering the SARO
+    # picks on live accounts"): sandbox/demo Tradier accounts may receive
+    # pick entries too (they route to sandbox.tradier.com — no real money),
+    # so users see the daily pick actually enter. REAL accounts always win
+    # the ORDER BY; set THETA_ROUTE_SANDBOX=0 to restore real-only.
+    _allow_sandbox = os.environ.get("THETA_ROUTE_SANDBOX", "1") == "1"
+    _demo_filter = "" if _allow_sandbox else (
+        " AND COALESCE(is_demo, false) = false"
+        " AND COALESCE(sandbox_mode, false) = false")
     async with async_session_factory() as db:
-        r = (await db.execute(text("""
-            SELECT id FROM broker_accounts
+        r = (await db.execute(text(f"""
+            SELECT id, (COALESCE(is_demo, false) OR COALESCE(sandbox_mode, false)) AS sb
+              FROM broker_accounts
              WHERE user_id = :uid
                AND lower(broker) IN ('tradier', 'alpaca')
                AND is_active = true
-               AND trading_enabled = true
-               AND COALESCE(is_demo, false) = false
-               AND COALESCE(sandbox_mode, false) = false
-             ORDER BY created_at DESC
+               AND trading_enabled = true{_demo_filter}
+             ORDER BY (COALESCE(is_demo, false) OR COALESCE(sandbox_mode, false)) ASC,
+                      created_at DESC
              LIMIT 1
         """), {"uid": str(user_id)})).fetchone()
     if r:
+        if bool(r.sb):
+            logger.info(f"[ThetaScanner] broker resolve user={user_id}: SANDBOX account {r.id} (no real money)")
         return str(r.id), "live"
     return None, "paper"
 
@@ -1142,19 +1153,6 @@ async def run_theta_scanner_for_all_users():
                 await _start_theta_pick_paper_session(db, u.id, u.strategy_id, pick.get("ticker"), pick)
             except Exception as e:
                 logger.error(f"[OptionsPaper-Theta] wiring error for {u.email}: {e}")
-            # THETA-LIVE-PICK-V1 (owner 2026-07-07: "It's not entering the
-            # SARO picks on live accounts"): route the daily pick to the
-            # user's live broker account, sized by the Live Trading page's
-            # theta_scanner_allocation_usd. 8-rung fail-CLOSED ladder inside
-            # (env switch, once/day, account, allocation, Phase-E guard,
-            # quote sanity, sizing, market hours). A routing failure must
-            # NEVER break pick emails.
-            try:
-                from app.engines.options.pick_router import route_pick_to_live
-                _placed, _why = await route_pick_to_live(u.id, u.email, pick)
-                logger.info(f"[pick-route] {u.email}: placed={_placed} reason={_why}")
-            except Exception as e:
-                logger.error(f"[pick-route] wiring error for {u.email}: {e}")
 
 
 _theta_fired_today = None  # in-memory cache, backed by Redis

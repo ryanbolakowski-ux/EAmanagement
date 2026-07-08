@@ -315,3 +315,26 @@ def test_entry_basis_falls_back_to_snapshot():
     assert _entry_basis({"price": 20.41, "live_price": None}) == pytest.approx(20.41)
     assert _entry_basis({"price": 20.41, "live_price": 0}) == pytest.approx(20.41)
     assert _entry_basis({"price": 20.41, "live_price": "junk"}) == pytest.approx(20.41)
+
+
+# ── legacy-path allocation sizing (the WIRED path after consolidation) ──────
+from app.engines.options.theta_scanner import _pick_qty_for_allocation
+
+
+def test_allocation_sizing_basic():
+    assert _pick_qty_for_allocation(5000, 19.84) == (252, "allocation")
+
+
+def test_allocation_sizing_legacy_fallback():
+    assert _pick_qty_for_allocation(None, 20.0) == (50, "legacy")
+    assert _pick_qty_for_allocation(0, 20.0) == (50, "legacy")
+
+
+def test_allocation_sizing_fat_finger_cap():
+    qty, how = _pick_qty_for_allocation(500_000, 10.0)
+    assert qty == 10_000 and how == "allocation"  # capped at $100k
+
+
+def test_allocation_sizing_invalid_basis():
+    assert _pick_qty_for_allocation(5000, 0) == (0, "invalid")
+    assert _pick_qty_for_allocation(5000, None) == (0, "invalid")
