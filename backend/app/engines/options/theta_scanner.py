@@ -256,7 +256,7 @@ async def _apply_quality_filters(db, c: dict) -> tuple:
     # VWAP verdicts judge the price we would actually TRADE: prefer the live
     # quote (enrichment) over the possibly-delayed snapshot price.
     try:
-        _vpx = float(cand.get("live_price") or 0)
+        _vpx = float(c.get("live_price") or 0)
     except (TypeError, ValueError):
         _vpx = 0.0
     if _vpx <= 0:
