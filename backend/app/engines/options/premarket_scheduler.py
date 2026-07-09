@@ -1208,8 +1208,12 @@ def _min_score_for_et(et) -> float:
     time-gate simply refuses to fire before the open."""
     h, m = et.hour, et.minute
     t = h * 60 + m  # ET minutes since midnight
-    if t < 9*60+35:  return 99.0   # before 9:35 ET — DO NOT fire (no pre-market; wait for the opening candle)
-    if t <= 12*60:   return 10.0   # 9:35-12:00 ET — fire a CONFIRMED opening-range / breakout setup
+    # EARLY-FIRE-2026-07-09: BBIO was confirmed at 9:34 ($88.21) but the 9:35
+    # boundary + 5-min debounce delayed the fire to 9:40 ($90.08). Oracle locks
+    # picks 2-5 min after the open; 9:33 keeps 3 opening-candle bars + VWAP as
+    # the confirmation base while cutting the self-inflicted slippage.
+    if t < 9*60+33:  return 99.0   # before 9:33 ET — DO NOT fire (no pre-market)
+    if t <= 12*60:   return 10.0   # 9:33-12:00 ET — fire a CONFIRMED opening-range / breakout setup
     return 99.0                    # after 12:00 ET — window closed
 
 async def _check_and_run_theta_scanner():
@@ -1324,7 +1328,10 @@ async def _check_and_run_theta_scanner():
     # midnight, so after a day WITHOUT a restart yesterday's ~11:55 value
     # made (et_min - last) negative all morning -> silent return -> the
     # scanner never scanned on 2026-07-07 until 12:04 (window closes 12:00).
-    if _theta_last_scan_min is not None and 0 <= (et_min - _theta_last_scan_min) < 5:
+    # EARLY-FIRE-2026-07-09: 1-min cadence through the opening window — a
+    # 5-min debounce cost BBIO 9:35->9:40 ($88->$90). Elsewhere 5 min stands.
+    _debounce_min = 1 if (9*60 + 30) <= et_min < (10*60) else 5
+    if _theta_last_scan_min is not None and 0 <= (et_min - _theta_last_scan_min) < _debounce_min:
         return
     _theta_last_scan_min = et_min
 
