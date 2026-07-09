@@ -230,7 +230,7 @@ async def today_pick(
         pick = json.loads(raw)
         # Enrich with live price + % change vs entry — best-effort
         try:
-            live = _polygon_snapshot_price(pick.get("ticker"))
+            live = await asyncio.to_thread(_polygon_snapshot_price, pick.get("ticker"))
             if live and pick.get("entry"):
                 pick["live_price"] = round(live, 4)
                 pick["live_pct"] = round((live - float(pick["entry"])) / float(pick["entry"]) * 100.0, 2)
@@ -329,9 +329,17 @@ async def scanner_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Best-effort resolve pass — walks unresolved picks against Polygon daily candles
-    try: await _resolve_email_signal_outcomes(db)
-    except Exception: pass
+    # Best-effort resolve pass — DEBOUNCED to once/5min process-wide. The SSE
+    # dashboard stream calls this endpoint continuously; running the full
+    # resolver (up to 100 network fetches) per request froze the platform
+    # (caught live in a py-spy stack, 2026-07-09). run_signal_resolution_loop
+    # (every 10 min) owns resolution; this is only a freshness assist.
+    global _last_inline_resolve_mono
+    _now_mono = _time.monotonic()
+    if _now_mono - _last_inline_resolve_mono > 300.0:
+        _last_inline_resolve_mono = _now_mono
+        try: await _resolve_email_signal_outcomes(db)
+        except Exception: pass
 
     """Return the last N days of Theta Scanner picks. Filterable by asset_type."""
     days = max(1, min(int(days), 90))
@@ -428,6 +436,11 @@ def _polygon_daily_range_polygon(ticker: str, start_iso: str, end_iso: str):
         return []
 
 
+import time as _time
+
+_last_inline_resolve_mono = 0.0  # scanner_history debounce (see above)
+
+
 async def _resolve_email_signal_outcomes(db):
     """Walk unresolved rows in email_signals_history; mark win/loss/expired."""
     from sqlalchemy import text as _t
@@ -452,9 +465,12 @@ async def _resolve_email_signal_outcomes(db):
             bars = await asyncio.to_thread(_polygon_daily_range, r.ticker, start, end)
             if not bars:
                 consecutive_empty += 1
-                if consecutive_empty >= 3 and not _os.environ.get("POLYGON_API_KEY", ""):
+                _no_keys = (not _os.environ.get("POLYGON_API_KEY", "")
+                            and not _os.environ.get("FMP_API_KEY", ""))
+                if consecutive_empty >= 3 and _no_keys:
                     logger.warning("[email-outcomes] 3 consecutive tickers with no bars "
-                                   "and no POLYGON_API_KEY set — aborting this resolution pass")
+                                   "and neither POLYGON_API_KEY nor FMP_API_KEY set — "
+                                   "aborting this resolution pass")
                     break
                 continue
             consecutive_empty = 0
@@ -787,7 +803,7 @@ async def close_specific_trade(
     if not acct:
         return {"ok": False, "error": "broker account missing"}
     # Get live price
-    ep = _polygon_snapshot_price(row.instrument)
+    ep = await asyncio.to_thread(_polygon_snapshot_price, row.instrument)
     broker = build_broker_from_account(acct)
     # MANUAL-CLOSE-FIX: surface broker errors instead of a swallowed 500.
     try:

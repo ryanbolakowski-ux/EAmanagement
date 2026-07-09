@@ -1145,7 +1145,9 @@ async def analyze_ticker(db, ticker: str, direction: str = "long") -> dict:
     try:
         from app.api.routes.scanner import _polygon_daily_range
         end = _date.today()
-        dr = _polygon_daily_range(tkr, (end - _td(days=45)).isoformat(), end.isoformat()) or []
+        import asyncio as _aio
+        dr = await _aio.to_thread(
+            _polygon_daily_range, tkr, (end - _td(days=45)).isoformat(), end.isoformat()) or []
         if len(dr) >= 2:
             prev_close = float(dr[-2].get("c") or 0)
             if prev_close > 0:
