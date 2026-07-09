@@ -87,30 +87,45 @@ def _fmt_price(price: float) -> str:
 def _fetch_quotes() -> list[dict]:
     """Blocking bulk fetch + parse (runs inside asyncio.to_thread).
 
-    Returns [] rather than raising for per-symbol problems; only a total
-    yfinance failure propagates to the caller's except.
+    FMP-first (2026-07-09): Yahoo throttles the prod IP — the old batched
+    yf.download measured 703s, so the tape sat on its own single-flight lock
+    for minutes. FMP daily bars are 10-min cached (fetch_daily_bars_sync) and
+    quote-short is one fast call per symbol. Symbols without FMP coverage on
+    this plan (NQ/YM/RTY/CL/GC futures) are skipped rather than holding the
+    tape hostage. Returns [] rather than raising for per-symbol problems.
     """
-    import yfinance as yf  # local import: keep module import cheap at startup
+    from datetime import date as _date, datetime as _dt, timedelta as _td, timezone as _tz
 
-    # 2-day daily pull gives prev close + latest close in one batched call.
-    # threads=False: threads=True triggers the "dict changed size during
-    # iteration" race in yfinance 1.3.0 (see engines/options/momentum_scanner).
-    df = yf.download(
-        tickers=" ".join(sym for sym, _ in _TAPE_SYMBOLS),
-        period="2d", interval="1d",
-        group_by="ticker", auto_adjust=False, progress=False,
-        threads=False,
-    )
+    from app.engines.data_feeds.fmp_feed import (
+        fetch_daily_bars_sync, fetch_quote_short_price_sync)
+
+    # Futures with a working FMP symbol on this plan (NQUSD is premium-gated).
+    _fmp_futures = {"ES=F": "ESUSD"}
+
+    end_iso = _date.today().isoformat()
+    start_iso = (_date.today() - _td(days=10)).isoformat()
     quotes: list[dict] = []
-    for yf_sym, display in _TAPE_SYMBOLS:
+    for src_sym, display in _TAPE_SYMBOLS:
         try:
-            if yf_sym not in df.columns.levels[0]:
+            fmp_sym = _fmp_futures.get(src_sym) or (src_sym if src_sym == display else None)
+            if not fmp_sym:
+                continue  # no FMP coverage for this symbol on this plan
+            bars = fetch_daily_bars_sync(fmp_sym, start_iso, end_iso)  # 10-min cached
+            if len(bars) < 2:
                 continue
-            sub = df[yf_sym].dropna()
-            if len(sub) < 2:
-                continue
-            prev_close = float(sub.iloc[-2]["Close"])
-            last_close = float(sub.iloc[-1]["Close"])
+            prev_close = float(bars[-2]["c"])
+            last_close = float(bars[-1]["c"])
+            live = fetch_quote_short_price_sync(fmp_sym)
+            if live and float(live) > 0:
+                # +12h nudges the ET-midnight-encoded bar timestamp into the
+                # correct calendar day regardless of DST.
+                last_bar_day = _dt.fromtimestamp(
+                    bars[-1]["t"] / 1000 + 43200, tz=_tz.utc).date().isoformat()
+                if last_bar_day == end_iso:
+                    last_close = float(live)   # today's bar exists: live refines it
+                else:
+                    prev_close = last_close    # pre-open: yesterday becomes the anchor
+                    last_close = float(live)
             if (
                 not math.isfinite(prev_close) or not math.isfinite(last_close)
                 or prev_close <= 0 or last_close <= 0
@@ -123,7 +138,7 @@ def _fetch_quotes() -> list[dict]:
                 "change_pct": round((last_close - prev_close) / prev_close * 100.0, 2),
             })
         except Exception as sym_exc:  # one bad symbol never kills the tape
-            logger.warning(f"[public-tape] skipping {yf_sym}: {sym_exc}")
+            logger.warning(f"[public-tape] skipping {src_sym}: {sym_exc}")
             continue
     return quotes
 

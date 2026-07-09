@@ -153,7 +153,9 @@ def test_no_naked_sync_calls_left_at_fixed_sites():
 def test_resolve_outcomes_bails_out_without_polygon_key(monkeypatch):
     from app.api.routes import scanner as scanner_mod
 
+    # bailout requires BOTH data keys absent (FMP fallback can still resolve)
     monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+    monkeypatch.delenv("FMP_API_KEY", raising=False)
 
     calls = {"n": 0}
 
