@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from app.core.packages import is_fully_automated_tier  # PHASE-D-GUARD
 from app.api.routes.security import (
@@ -1252,14 +1253,14 @@ async def get_portfolio_summary(
                 # EOD close frozen), same pick_equity_mark decision path so
                 # the RTH-freeze semantics stay byte-identical.
                 if _fmp_mark_primary():
-                    _tk3 = fmp_equity_snapshot_sync(r.instrument, _sess3)
+                    _tk3 = await asyncio.to_thread(fmp_equity_snapshot_sync, r.instrument, _sess3)
                     if _tk3:
                         live, _src = pick_equity_mark(_tk3, _sess3)  # PNL-MARK-FREEZE-V1
                         if live is not None:
                             _fmp_log_once("live_trading.today_unrealized_pnl")
                 if live is None:
                     u3 = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{r.instrument}"
-                    resp = _rq3.get(u3, params={"apiKey": k3}, timeout=3)
+                    resp = await asyncio.to_thread(_rq3.get, u3, params={"apiKey": k3}, timeout=3)
                     if resp.status_code != 200: continue
                     t3 = (resp.json() or {}).get("ticker") or {}
                     live, _src = pick_equity_mark(t3)  # PNL-MARK-FREEZE-V1
@@ -1299,14 +1300,14 @@ async def get_portfolio_summary(
                 live = None
                 # POLYGON-EXIT: FMP-primary mark — see today_unrealized loop.
                 if _fmp_mark_primary():
-                    _tkU = fmp_equity_snapshot_sync(p.ticker, _sessU)
+                    _tkU = await asyncio.to_thread(fmp_equity_snapshot_sync, p.ticker, _sessU)
                     if _tkU:
                         live, _src = pick_equity_mark(_tkU, _sessU)  # PNL-MARK-FREEZE-V1
                         if live is not None:
                             _fmp_log_once("live_trading.total_unrealized_pnl")
                 if live is None:
                     uU = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{p.ticker}"
-                    rspU = _rqU.get(uU, params={"apiKey": kU}, timeout=3)
+                    rspU = await asyncio.to_thread(_rqU.get, uU, params={"apiKey": kU}, timeout=3)
                     if rspU.status_code != 200: continue
                     tU = (rspU.json() or {}).get("ticker") or {}
                     live, _src = pick_equity_mark(tU)  # PNL-MARK-FREEZE-V1
@@ -1669,7 +1670,7 @@ async def get_unrealized_pnl(
             _k = _os_up.environ.get("POLYGON_API_KEY", "")
             # POLYGON-EXIT: FMP-primary mark; Polygon snapshot is the fallback.
             if not is_futures_symbol(inst) and _fmp_mark_primary():
-                _tjF = fmp_equity_snapshot_sync(inst, _eq_sess)
+                _tjF = await asyncio.to_thread(fmp_equity_snapshot_sync, inst, _eq_sess)
                 if _tjF:
                     _mkF, _srcF = pick_equity_mark(_tjF, _eq_sess)
                     if _mkF is not None:
@@ -1677,7 +1678,7 @@ async def get_unrealized_pnl(
                         _fmp_log_once("live_trading.unrealized_pnl_endpoint")
             if price_source == "entry_fallback" and _k and not is_futures_symbol(inst):
                 _u = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{inst}"
-                _r = _rq_up.get(_u, params={"apiKey": _k}, timeout=3)
+                _r = await asyncio.to_thread(_rq_up.get, _u, params={"apiKey": _k}, timeout=3)
                 if _r.status_code == 200:
                     _tj = (_r.json() or {}).get("ticker") or {}
                     _mk, _src = pick_equity_mark(_tj, _eq_sess)

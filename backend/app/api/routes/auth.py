@@ -1,3 +1,4 @@
+import asyncio
 import os
 import secrets
 from datetime import datetime, timedelta
@@ -193,7 +194,7 @@ async def login(
     _enforce_login_rate_limit(request)
     result = await db.execute(select(User).where(func.lower(User.email) == form.username.lower().strip()))
     user = result.scalar_one_or_none()
-    if not user or not verify_password(form.password, user.hashed_password):
+    if not user or not await asyncio.to_thread(verify_password, form.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled.")
@@ -362,7 +363,7 @@ async def diag_login(
     user = result.scalar_one_or_none()
     if not user:
         return {'ok': False, 'reason': 'NO_USER_FOUND', 'hint': f'no user with email matching (case-insensitive): {typed_email}'}
-    if not verify_password(form.password, user.hashed_password):
+    if not await asyncio.to_thread(verify_password, form.password, user.hashed_password):
         return {'ok': False, 'reason': 'WRONG_PASSWORD',
                 'hint': 'email matched a user but the password does not — your password manager may be filling an old value',
                 'user_email': user.email, 'is_active': user.is_active}

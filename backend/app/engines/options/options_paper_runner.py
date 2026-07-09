@@ -162,7 +162,7 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
             logger.error(f"[OptionsPaperRunner] strategy {strategy_id} not found"); return
 
         # Pull initial spot to build the chain
-        spot = _fetch_spot(underlying)
+        spot = await asyncio.to_thread(_fetch_spot, underlying)
         if not spot:
             logger.error(f"[OptionsPaperRunner] no spot for {underlying} — aborting"); return
 
@@ -215,7 +215,9 @@ async def _run(session_id: str, strategy_id: str, user_id: str, underlying: str,
                     last_heartbeat = now
 
                 # Pull recent bars
-                df = yf.Ticker(underlying).history(period="2d", interval="1m")
+                df = await asyncio.to_thread(
+                    lambda: yf.Ticker(underlying).history(period="2d", interval="1m")
+                )
                 if df is None or df.empty:
                     await asyncio.sleep(60); continue
                 latest_ts = df.index[-1]

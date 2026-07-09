@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from typing import Optional
 
@@ -599,7 +600,8 @@ async def get_trade_chart(
         win_end   = (trade.exit_time or trade.entry_time) + _td(minutes=window_min)
         if not _chart_is_futures(trade.instrument):
             # Equity trade — candle_cache has no rows; use the equity feed.
-            candles = _chart_equity_ohlc(trade.instrument, win_start, win_end, 5)
+            candles = await asyncio.to_thread(
+                _chart_equity_ohlc, trade.instrument, win_start, win_end, 5)
             rows = []
         else:
             rows = (await db.execute(text("""
@@ -646,7 +648,8 @@ async def get_trade_chart(
                 win_start = trade.entry_time - before
                 win_end   = (trade.exit_time or trade.entry_time) + after
                 if not _chart_is_futures(trade.instrument):
-                    candles_by_tf[tf] = _chart_equity_ohlc(
+                    candles_by_tf[tf] = await asyncio.to_thread(
+                        _chart_equity_ohlc,
                         trade.instrument, win_start, win_end, tf_minutes[tf])
                     continue
                 rows = (await db.execute(text("""

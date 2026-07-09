@@ -143,7 +143,7 @@ async def _fetch_market_snapshot() -> list[dict]:
                            f"({type(e).__name__}: {e}) — falling back to Polygon path")
 
     # Polygon grouped-daily (Stocks Starter): ~12k US tickers per call
-    today_map, prev_map = _polygon_grouped_two_days()
+    today_map, prev_map = await asyncio.to_thread(_polygon_grouped_two_days)
     if today_map and prev_map:
         rows = []
         for ticker, today in today_map.items():

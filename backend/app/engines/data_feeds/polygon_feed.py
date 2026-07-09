@@ -2,6 +2,7 @@
 Polygon.io data feed for paid tier users.
 Provides full historical intraday data (1m, 5m, 15m, etc.) going back years.
 """
+import asyncio
 import os
 import pandas as pd
 from datetime import datetime, timedelta
@@ -157,7 +158,7 @@ async def fetch_polygon_data(
             etf_proxy = ETF_PROXY_TICKERS.get(instrument.upper())
             if etf_proxy and ticker == etf_proxy:
                 from app.engines.data_feeds.proxy_scale import get_proxy_scale
-                scale = get_proxy_scale(instrument)
+                scale = await asyncio.to_thread(get_proxy_scale, instrument)
                 if scale and scale != 1.0:
                     for _c in ("open", "high", "low", "close"):
                         df[_c] = df[_c] * scale

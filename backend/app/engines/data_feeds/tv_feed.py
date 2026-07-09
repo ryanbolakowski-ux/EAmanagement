@@ -207,10 +207,11 @@ async def _fetch_yfinance_robust(instrument, start_date, end_date, interval="15m
                 while chunk_start < end_date:
                     chunk_end = min(chunk_start + td(days=chunk_days), end_date)
                     try:
-                        chunk_df = ticker.history(
+                        chunk_df = await asyncio.to_thread(
+                            ticker.history,
                             start=chunk_start.strftime("%Y-%m-%d"),
                             end=chunk_end.strftime("%Y-%m-%d"),
-                            interval=yf_interval, auto_adjust=True
+                            interval=yf_interval, auto_adjust=True,
                         )
                         if chunk_df is not None and not chunk_df.empty:
                             all_chunks.append(chunk_df)
@@ -225,10 +226,11 @@ async def _fetch_yfinance_robust(instrument, start_date, end_date, interval="15m
                 df = df[~df.index.duplicated(keep='first')]
                 df = df.sort_index()
             else:
-                df = ticker.history(
+                df = await asyncio.to_thread(
+                    ticker.history,
                     start=start_date.strftime("%Y-%m-%d"),
                     end=end_date.strftime("%Y-%m-%d"),
-                    interval=yf_interval, auto_adjust=True
+                    interval=yf_interval, auto_adjust=True,
                 )
 
             if df is not None and not df.empty:

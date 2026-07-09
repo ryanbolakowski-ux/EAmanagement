@@ -1,4 +1,5 @@
 from loguru import logger
+import asyncio
 import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,7 +76,7 @@ async def verify_admin_passcode(
             status_code=500,
             detail="No admin passcode set on this account. Contact platform owner.",
         )
-    if not _verify_password(data.code, current_user.admin_passcode_hash):
+    if not await asyncio.to_thread(_verify_password, data.code, current_user.admin_passcode_hash):
         raise HTTPException(status_code=401, detail="Invalid passcode.")
 
     auth = request.headers.get("authorization", "")

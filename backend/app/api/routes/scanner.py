@@ -1,5 +1,6 @@
 """Read endpoint for the most recent Theta Scanner pick."""
 import os, json
+import asyncio
 from loguru import logger
 from datetime import date
 from fastapi import APIRouter, Depends
@@ -443,13 +444,20 @@ async def _resolve_email_signal_outcomes(db):
         return 0
     resolved = 0
     today = _dt.utcnow().date()
+    consecutive_empty = 0
     for r in rows:
         try:
             start = r.picked_at.date().isoformat()
             end = today.isoformat()
-            bars = _polygon_daily_range(r.ticker, start, end)
+            bars = await asyncio.to_thread(_polygon_daily_range, r.ticker, start, end)
             if not bars:
+                consecutive_empty += 1
+                if consecutive_empty >= 3 and not _os.environ.get("POLYGON_API_KEY", ""):
+                    logger.warning("[email-outcomes] 3 consecutive tickers with no bars "
+                                   "and no POLYGON_API_KEY set — aborting this resolution pass")
+                    break
                 continue
+            consecutive_empty = 0
             entry = float(r.entry); stop = float(r.stop); target = float(r.target)
             outcome = None; outcome_pct = None
             for bar in bars:
@@ -504,7 +512,7 @@ async def open_positions(
         if key:
             try:
                 u = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{r.ticker}"
-                resp = _rq.get(u, params={"apiKey": key}, timeout=3)
+                resp = await asyncio.to_thread(_rq.get, u, params={"apiKey": key}, timeout=3)
                 if resp.status_code == 200:
                     t = (resp.json() or {}).get("ticker") or {}
                     for fld, sub in (("lastTrade","p"), ("min","c"), ("day","c"), ("prevDay","c")):
@@ -600,7 +608,7 @@ async def close_all_positions(
                 import os as _os2, requests as _rq2
                 k2 = _os2.environ.get("POLYGON_API_KEY", "")
                 u2 = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{r.ticker}"
-                resp = _rq2.get(u2, params={"apiKey": k2}, timeout=3)
+                resp = await asyncio.to_thread(_rq2.get, u2, params={"apiKey": k2}, timeout=3)
                 if resp.status_code == 200:
                     tk = (resp.json() or {}).get("ticker") or {}
                     for fld, sub in (("lastTrade","p"), ("min","c"), ("day","c")):

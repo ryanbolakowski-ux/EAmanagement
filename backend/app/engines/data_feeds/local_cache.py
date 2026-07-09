@@ -3,6 +3,7 @@ Read candle data from local PostgreSQL cache.
 Aggregates 1m bars into any requested timeframe on the fly.
 Supports both real futures data (from Databento) and ETF proxy data.
 """
+import asyncio
 import pandas as pd
 from datetime import datetime
 from typing import Optional
@@ -85,7 +86,7 @@ async def fetch_from_cache(
             # (NQ/QQQ was 31, now ~41 => ~25% wrong prices). proxy_scale fetches
             # the live ratio (cached 1h) and falls back to a recent constant.
             from app.engines.data_feeds.proxy_scale import get_proxy_scale
-            scale = get_proxy_scale(inst)
+            scale = await asyncio.to_thread(get_proxy_scale, inst)
             logger.info(f"[price-source] {inst}: ETF-proxy cache data (first_price={first_price:.2f}); scaling x{scale}")
             df["open"] = df["open"] * scale
             df["high"] = df["high"] * scale
