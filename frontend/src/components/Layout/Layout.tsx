@@ -91,32 +91,10 @@ export default function Layout() {
 
   const isMobile = pref === 'mobile'
 
-  if (isMobile) {
-    return (
-      <div className="min-h-screen bg-slate-100 dark:bg-slate-950 flex flex-col">
-        {/* ── Top bar ── */}
-        <header className="sticky top-0 z-30 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between">
-          <Link to="/app" className="flex items-center gap-2.5">
-            <ThetaLogo size={36} />
-            <div className="leading-none">
-              <div className="text-sm font-extrabold tracking-[0.15em] text-slate-900 dark:text-slate-100">
-                THETA ALGOS
-              </div>
-              <div className="text-[8px] font-bold tracking-[0.22em] text-violet-600 dark:text-violet-400 mt-0.5">
-                EST. 2026
-              </div>
-            </div>
-          </Link>
-          <button
-            onClick={() => setDrawerOpen(true)}
-            className="p-2 -mr-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-violet-100/60 dark:hover:bg-violet-900/20"
-          >
-            <Menu size={22} />
-          </button>
-        </header>
-
-        {/* ── Slide-out drawer (full nav) ── */}
-        {drawerOpen && (
+  // Slide-in drawer with the full nav. Shared by the mobile shell and by the
+  // browser shell's below-md fallback (shell choice is a stored preference, not
+  // viewport-based, so a phone can land on the desktop layout).
+  const drawer = drawerOpen && (
           <>
             <div className="fixed inset-0 z-40 bg-black/50" onClick={() => setDrawerOpen(false)} />
             <aside className="fixed top-0 right-0 bottom-0 z-50 w-72 bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 flex flex-col">
@@ -190,7 +168,34 @@ export default function Layout() {
               </div>
             </aside>
           </>
-        )}
+  )
+
+  if (isMobile) {
+    return (
+      <div className="min-h-screen bg-slate-100 dark:bg-slate-950 flex flex-col">
+        {/* ── Top bar ── */}
+        <header className="sticky top-0 z-30 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between">
+          <Link to="/app" className="flex items-center gap-2.5">
+            <ThetaLogo size={36} />
+            <div className="leading-none">
+              <div className="text-sm font-extrabold tracking-[0.15em] text-slate-900 dark:text-slate-100">
+                THETA ALGOS
+              </div>
+              <div className="text-[8px] font-bold tracking-[0.22em] text-violet-600 dark:text-violet-400 mt-0.5">
+                EST. 2026
+              </div>
+            </div>
+          </Link>
+          <button
+            onClick={() => setDrawerOpen(true)}
+            className="p-2 -mr-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-violet-100/60 dark:hover:bg-violet-900/20"
+          >
+            <Menu size={22} />
+          </button>
+        </header>
+
+        {/* ── Slide-out drawer (full nav) ── */}
+        {drawer}
 
         {/* ── Main content ── */}
         <main className="flex-1 overflow-auto p-3 pb-24">
@@ -223,8 +228,31 @@ export default function Layout() {
 
   // ── Default browser layout ──
   return (
-    <div className="flex h-screen bg-slate-300 dark:bg-slate-950">
-      <aside className="w-60 bg-slate-200 dark:bg-slate-900 border-r border-slate-300 dark:border-slate-800 flex flex-col flex-shrink-0 dark:border-slate-700">
+    <div className="flex flex-col md:flex-row h-screen bg-slate-300 dark:bg-slate-950">
+      {/* ── Below-md fallback topbar: 'browser' pref (or no pref yet) on a phone
+          would otherwise get a fixed 240px sidebar and ~135px of content. ── */}
+      <header className="md:hidden sticky top-0 z-30 flex-shrink-0 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between">
+        <Link to="/app" className="flex items-center gap-2.5">
+          <ThetaLogo size={36} />
+          <div className="leading-none">
+            <div className="text-sm font-extrabold tracking-[0.15em] text-slate-900 dark:text-slate-100">
+              THETA ALGOS
+            </div>
+            <div className="text-[8px] font-bold tracking-[0.22em] text-violet-600 dark:text-violet-400 mt-0.5">
+              EST. 2026
+            </div>
+          </div>
+        </Link>
+        <button
+          onClick={() => setDrawerOpen(true)}
+          aria-label="Open menu"
+          className="p-2 -mr-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-violet-100/60 dark:hover:bg-violet-900/20"
+        >
+          <Menu size={22} />
+        </button>
+      </header>
+      <div className="md:hidden">{drawer}</div>
+      <aside className="hidden md:flex w-60 bg-slate-200 dark:bg-slate-900 border-r border-slate-300 dark:border-slate-800 flex-col flex-shrink-0 dark:border-slate-700">
         <div className="px-4 py-5 border-b border-slate-300 dark:border-slate-800 dark:border-slate-700">
           <Link to="/app" className="flex flex-col items-center gap-1.5">
             <ThetaLogo size={120} />
