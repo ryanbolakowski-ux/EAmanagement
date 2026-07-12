@@ -402,7 +402,7 @@ export default function PaperTrading() {
   const winRate   = periodTrades.length > 0 ? (wins / periodTrades.length * 100).toFixed(1) : '—'
 
   return (
-    <div className="p-8 max-w-6xl">
+    <div className="p-4 sm:p-8 max-w-6xl">
       {/* HERO */}
       <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950 dark:from-slate-950 dark:via-slate-950 dark:to-emerald-950 text-white p-6 md:p-8 shadow-xl">
         <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -426,7 +426,7 @@ export default function PaperTrading() {
         {(['futures','options'] as const).map(t => (
           <button key={t} onClick={() => setAssetClass(t)}
             className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${assetClass === t ? 'bg-white dark:bg-slate-800 text-violet-700 dark:text-violet-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'}`}>
-            {t === 'futures' ? 'Futures (ES/NQ/RTY/YM)' : 'Options (Black-Scholes sim)'}
+            {t === 'futures' ? <>Futures<span className="hidden sm:inline">&nbsp;(ES/NQ/RTY/YM)</span></> : <>Options<span className="hidden sm:inline">&nbsp;(Black-Scholes sim)</span></>}
           </button>
         ))}
       </div>
@@ -442,7 +442,7 @@ export default function PaperTrading() {
         </span>
         <PeriodTabs value={pnlPeriod} onChange={setPnlPeriod}/>
       </div>
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
         <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700">
           <div className="text-xs text-slate-400 uppercase tracking-wider font-medium mb-1.5 dark:text-slate-500">Total Trades</div>
           <div className="text-2xl font-extrabold text-slate-900 dark:text-slate-100">{periodTrades.length}</div>
@@ -591,6 +591,7 @@ export default function PaperTrading() {
             <p className="text-xs text-slate-300 mt-1 dark:text-slate-600">Start a session to begin simulated trading</p>
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 dark:bg-slate-900 dark:border-slate-700">
@@ -633,6 +634,7 @@ export default function PaperTrading() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
       {chartTradeId && <TradeChartModal tradeId={chartTradeId} onClose={() => setChartTradeId(null)} />}
