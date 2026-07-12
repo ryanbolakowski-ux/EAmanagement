@@ -136,6 +136,10 @@ button, a, input, select { transition: all 0.15s ease; }
 /* Scroll-triggered reveals — element starts hidden and animates when this class is added */
 .reveal              { opacity: 0; transform: translate3d(0, 28px, 0); transition: opacity 0.65s ease-out, transform 0.65s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .reveal.is-visible   { opacity: 1; transform: translate3d(0, 0, 0); }
+/* MOBILE-REVEAL-SAFETY (2026-07-12): see v2.css — never hide content on phones. */
+@media (max-width: 820px) {
+  .reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
+}
 
 /* ── Mobile mode (forced by DevicePicker, independent of viewport width) ── */
 body.device-mobile .p-5  { padding: 0.75rem; }

@@ -609,6 +609,17 @@ html:not(.dark) .v2-root, .v2-root.v2-force-light {
               transform var(--v2-dur-slow) var(--v2-ease);
 }
 .v2-root .reveal.is-visible { opacity: 1; transform: translate3d(0, 0, 0); }
+/* MOBILE-REVEAL-SAFETY (2026-07-12): scroll-reveal must never hide content on
+   phones — tall single-column sections + a frozen transition clock (measured
+   live: is-visible at opacity 0, CSSTransition currentTime stuck at 0) left
+   everything below the hero blank at 375px. Small screens skip the effect. */
+@media (max-width: 820px) {
+  .v2-root .reveal {
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+  }
+}
 
 /* Nav */
 .v2-root .v2-lp-nav {
@@ -1017,7 +1028,7 @@ html:not(.dark) .v2-root .v2-lp-nav { background: rgba(242, 245, 249, 0.88); }
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10.5px; font-weight: 800; letter-spacing: 0.22em;
   color: #0e7a4e;
-  background: linear-gradient(to right, #f4f1fa 0, #f4f1fa 58%, transparent 100%);
+  background: linear-gradient(to right, #f4f1fa 0, #f4f1fa 76%, transparent 100%);
 }
 .v2-root .v2-ticker__live-dot {
   width: 7px; height: 7px; border-radius: 50%;

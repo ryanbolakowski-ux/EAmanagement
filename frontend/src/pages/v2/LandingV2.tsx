@@ -238,7 +238,16 @@ function useScrollReveal() {
       { threshold: 0.12 },
     )
     els.forEach((el) => io.observe(el))
-    return () => io.disconnect()
+    // Failsafe: any reveal that has not fired within 1.5s becomes visible.
+    // A decorative animation must never be able to hide real content
+    // (frozen transition clocks / never-intersecting tall sections, 2026-07-12).
+    const failsafe = window.setTimeout(() => {
+      els.forEach((el) => el.classList.add('is-visible'))
+    }, 1500)
+    return () => {
+      window.clearTimeout(failsafe)
+      io.disconnect()
+    }
   }, [])
 }
 
