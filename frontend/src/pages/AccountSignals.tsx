@@ -215,7 +215,7 @@ function OpenPositionsCard() {
         {data.positions.map((p: any) => {
           const c = p.unrealized_pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'
           return (
-            <div key={p.id} className="bg-white/5 rounded-lg px-3 py-2.5 flex items-center justify-between gap-3 text-xs">
+            <div key={p.id} className="bg-white/5 rounded-lg px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
               <div className="font-extrabold text-base">{p.ticker}</div>
               <div className="opacity-70">{p.qty} sh · entry ${p.entry_price.toFixed(2)}</div>
               <div className="opacity-70">live ${p.live_price ? p.live_price.toFixed(2) : '--'}</div>
@@ -566,6 +566,7 @@ export default function AccountSignals() {
           </div>
         ) : (
           <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-100 dark:bg-slate-800 text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
@@ -637,6 +638,7 @@ export default function AccountSignals() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         )}
 
