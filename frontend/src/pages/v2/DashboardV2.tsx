@@ -368,7 +368,7 @@ function TodaysPickCard({ pick, isLoading, isError }: {
           </span>
         }
       />
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
         <span className="v2-type-title">{pick.ticker}</span>
         <span className={`v2-badge ${isUp ? 'v2-badge--up' : 'v2-badge--down'}`}>{pick.direction}</span>
         <span className="v2-badge v2-badge--neutral">{pick.asset_type}</span>
@@ -378,9 +378,9 @@ function TodaysPickCard({ pick, isLoading, isError }: {
       </div>
       <div className="grid grid-cols-3 gap-2">
         {levels.map(l => (
-          <div key={l.label} className="v2-well px-3 py-2">
+          <div key={l.label} className="v2-well min-w-0 px-2 py-2 sm:px-3">
             <div className="v2-type-micro">{l.label}</div>
-            <div className="v2-num v2-type-heading">{fmtPx(l.value)}</div>
+            <div className="v2-num v2-type-heading !text-[13px] sm:!text-[15px]">{fmtPx(l.value)}</div>
           </div>
         ))}
       </div>
