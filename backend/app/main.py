@@ -408,6 +408,11 @@ app.include_router(account_signals.router, prefix="/api/v1/account-signals", tag
 app.include_router(account_signals.router, prefix="/api/v1/email-signals", tags=["account-signals"])
 app.include_router(scanner.router, prefix="/api/v1/scanner", tags=["scanner"])
 
+# iOS companion app: APNs device-token registry (push notifications).
+# Sends are hard-gated by APNS_ENABLED (default off) in app/services/push.py.
+from app.api.routes import devices as devices_routes
+app.include_router(devices_routes.router, prefix="/api/v1/devices", tags=["devices"])
+
 # V2 dashboard live updates over Server-Sent Events (ENABLE_SSE_DASHBOARD,
 # default on; flag off => the route 404s and the frontend falls back to
 # polling). See app/api/routes/stream.py for the SSE-vs-WebSocket rationale.

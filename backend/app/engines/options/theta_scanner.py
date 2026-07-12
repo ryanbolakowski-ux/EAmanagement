@@ -830,6 +830,29 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
     </div>"""
     ok = _send_tracked(user.email, subject, html, inline_png=_chart_png).get("sent")
 
+    # === iOS push (2026-07-12) ===
+    # Fire-and-forget APNs push mirroring the pick email. Hard-gated on
+    # APNS_ENABLED (default "0" until the .p8 key is uploaded) and fully
+    # fail-open: nothing here may ever affect the email/broker paths.
+    try:
+        if os.environ.get("APNS_ENABLED", "0") == "1":
+            import asyncio as _aio_push
+            from app.services.push import send_pick_push as _send_pick_push
+            _push_title = (f"Saro: WATCH ONLY \u2014 {pick['ticker']}" if _watch
+                           else f"Saro Pick: {pick['ticker']}")
+            _push_body = (
+                f"Entry ${pick['entry']:.2f} \u00b7 Stop ${pick['stop']:.2f} \u00b7 "
+                f"Target ${pick['target']:.2f} (+{float(pick.get('projected_move_pct') or 0):.0f}%)"
+            )
+            _aio_push.create_task(_send_pick_push(
+                [user.id], _push_title, _push_body,
+                {"kind": "theta_pick", "ticker": pick["ticker"],
+                 "entry": pick["entry"], "stop": pick["stop"],
+                 "target": pick["target"], "watch_only": _watch},
+            ))
+    except Exception as _push_e:
+        logger.warning(f"[ThetaScanner] pick push skipped: {type(_push_e).__name__}: {_push_e}")
+
     # === Entry timing gate (2026-06-05) ===
     # The blind 15-min auto-execute caused SPRC to enter 2.5h after pick at
     # a price that was ALREADY below the stop. Per the user spec, the
