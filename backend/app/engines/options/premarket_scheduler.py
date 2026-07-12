@@ -1247,7 +1247,10 @@ async def _check_and_run_theta_scanner():
 
     et_min = et.hour * 60 + et.minute
     in_window = (6*60 <= et_min <= 12*60)  # extended past the open (was 9:50): scan intraday, fire on a confirmed breakout
-    today_dt = _date.today()
+    # ET-anchored: _date.today() is the UTC date in this container, which
+    # rolls to TOMORROW at 8:00 PM ET — that mismatch mailed a phantom
+    # "no pick today (tomorrow)" every evening (incl. pick days + Saturdays).
+    today_dt = et.date()
     today_key_visible = today_dt.isoformat()
     fired_today_bool = (_theta_fired_today == today_dt)
     # BUG B: heartbeat tick. INFO so it's grep-able; runs even for outside-
@@ -1262,7 +1265,9 @@ async def _check_and_run_theta_scanner():
     # on a date that never produced a fire. We use the same Redis flag the
     # main path uses so we don't false-alarm a worker that lost its
     # in-memory state mid-day.
-    if (not in_window) and et_min > 12*60 and et.weekday() < 5:
+    # Alert ONLY in the same ET afternoon (window close -> digest time);
+    # evening/overnight ticks must never no-pick-alert.
+    if (not in_window) and (12*60 < et_min <= 16*60+30) and et.weekday() < 5:
         if today_key_visible not in _theta_no_pick_alerted_for_date:
             already_fired_via_redis = False
             try:
@@ -1307,14 +1312,10 @@ async def _check_and_run_theta_scanner():
                         pass
                     if not _already_noticed:
                         await _send_no_pick_emails(today_key_visible, _reason)
-                        try:
-                            from app.api.routes.security import notify_admins_security
-                            await notify_admins_security(
-                                "Saro: NO PICK today",
-                                f"No stock pick for {today_key_visible}. Reason: {_reason} "
-                                f"(scanner ran; no candidate cleared the quality filters).")
-                        except Exception as _ae:
-                            logger.error(f"[ThetaScanner] no-pick admin alert failed: {_ae}")
+                        # No separate [Admin] copy: admins subscribe to the pick
+                        # emails, so they already receive the no-pick note —
+                        # the duplicate was doubling Ryan's inbox (2026-07-12).
+                        logger.warning(f"[ThetaScanner] NO PICK {today_key_visible}: {_reason}")
                 except Exception as _ne:
                     logger.error(f"[ThetaScanner] no-pick user note failed: {_ne}")
 
@@ -1335,7 +1336,7 @@ async def _check_and_run_theta_scanner():
         return
     _theta_last_scan_min = et_min
 
-    today = _date.today()
+    today = et.date()  # ET-anchored (must match the no-pick guard's key)
     today_key = today.isoformat()
 
     # Already-fired check (Redis-backed)

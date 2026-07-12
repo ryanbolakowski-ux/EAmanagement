@@ -109,7 +109,10 @@ async def run_daily_digest_loop():
             wait_s = _seconds_until_next_fire(datetime.now(ZoneInfo("UTC")))
             logger.info(f"[DailyDigest] Sleeping {wait_s:.0f}s until next fire.")
             await asyncio.sleep(wait_s)
-            await _send_digest_for_today()
+            if datetime.now(ET).weekday() >= 5:
+                logger.info("[digest] weekend — skipping daily summary (weekdays only)")
+            else:
+                await _send_digest_for_today()
         except asyncio.CancelledError:
             logger.info("[DailyDigest] Scheduler cancelled.")
             raise
