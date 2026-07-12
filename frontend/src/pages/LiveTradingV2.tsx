@@ -78,7 +78,7 @@ function PendingOrdersCard() {
       <div className="space-y-1.5">
         {data.orders.map((o: any) => (
           <div key={o.id} className="bg-white dark:bg-slate-900 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
               <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${o.side === 'sell' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>{o.side}</span>
               <span className="font-bold text-slate-900 dark:text-slate-100">{o.symbol}</span>
               <span className="text-slate-500 dark:text-slate-400">{o.quantity} sh</span>
@@ -151,7 +151,7 @@ function OpenPositionsCard() {
           {closedToday.map((c: any, i: number) => {
             const cls = c.realized_pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'
             return (
-              <div key={i} className="bg-white/5 rounded-lg px-3 py-2.5 flex items-center justify-between gap-3 text-xs">
+              <div key={i} className="bg-white/5 rounded-lg px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
                 <div className="font-extrabold text-base">{c.ticker}</div>
                 <div className="opacity-70">{c.qty} sh</div>
                 <div className="opacity-70">entry ${c.entry_price.toFixed(2)} → exit ${c.exit_price.toFixed(2)}</div>
@@ -169,7 +169,7 @@ function OpenPositionsCard() {
   const pnlClass = pnl > 0 ? 'text-emerald-300' : pnl < 0 ? 'text-rose-300' : 'text-slate-200'
   return (
     <div className="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 text-white p-5 shadow-xl">
-      <div className="flex items-start justify-between mb-4 gap-3">
+      <div className="flex flex-wrap items-start justify-between mb-4 gap-3">
         <div>
           <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70">Open Saro positions</div>
           <div className="text-xs opacity-60 mt-0.5">{data.count} position{data.count === 1 ? '' : 's'} · 3% trailing stop active</div>
@@ -198,7 +198,7 @@ function OpenPositionsCard() {
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-3 mb-4">
+      <div className="grid grid-cols-1 min-[420px]:grid-cols-3 gap-3 mb-4">
         <div><div className="text-[10px] uppercase opacity-60">Cost basis</div><div className="text-lg font-bold tabular-nums">${data.total_cost.toLocaleString(undefined,{maximumFractionDigits:2})}</div></div>
         <div><div className="text-[10px] uppercase opacity-60">Market value</div><div className="text-lg font-bold tabular-nums">${data.total_value.toLocaleString(undefined,{maximumFractionDigits:2})}</div></div>
         <div><div className="text-[10px] uppercase opacity-60">Open P&L</div><div className={`text-xl font-extrabold tabular-nums ${pnlClass}`}>{pnl >= 0 ? '+' : ''}${Math.abs(pnl).toLocaleString(undefined,{maximumFractionDigits:2})} ({data.total_unrealized_pct >= 0 ? '+' : ''}{data.total_unrealized_pct.toFixed(1)}%)</div></div>
@@ -207,7 +207,7 @@ function OpenPositionsCard() {
         {data.positions.map((p: any) => {
           const c = p.unrealized_pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'
           return (
-            <div key={p.id} className="bg-white/5 rounded-lg px-3 py-2.5 flex items-center justify-between gap-3 text-xs">
+            <div key={p.id} className="bg-white/5 rounded-lg px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
               <div className="font-extrabold text-base">{p.ticker}</div>
               <div className="opacity-70">{p.qty} sh · entry ${p.entry_price.toFixed(2)}</div>
               <div className="opacity-70">live ${p.live_price ? p.live_price.toFixed(2) : '--'}</div>
@@ -954,8 +954,8 @@ function PortfolioHeader({ data }: { data: any }) {
                   <div className="uppercase tracking-wider text-slate-500 font-bold mb-1">Per-account</div>
                   <div className="space-y-1">
                     {recon.per_account_debug.map((pa: any) => (
-                      <div key={pa.id} className="grid grid-cols-5 gap-2 text-[10px] tabular-nums">
-                        <div className="text-slate-400 truncate" title={pa.account_name}>{pa.broker}: {pa.account_name}</div>
+                      <div key={pa.id} className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-[10px] tabular-nums">
+                        <div className="text-slate-400 truncate col-span-2 sm:col-span-1" title={pa.account_name}>{pa.broker}: {pa.account_name}</div>
                         <div>start {pa.starting_equity != null ? fmtUsd(pa.starting_equity, 0) : '—'}</div>
                         <div>equity {fmtUsd(pa.equity ?? 0, 0)}</div>
                         <div>cash {fmtUsd(pa.cash ?? 0, 0)}</div>
@@ -1384,6 +1384,7 @@ export default function LiveTradingV2() {
                   {closeAllOpenTrades.isPending ? 'Closing...' : `Close all ${openPositions.length}`}
                 </button>
               </div>
+              <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-bold">
                   <tr>
@@ -1421,6 +1422,7 @@ export default function LiveTradingV2() {
                   })}
                 </tbody>
               </table>
+              </div>
               </>
             )
           ) : (
