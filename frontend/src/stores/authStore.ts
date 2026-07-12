@@ -19,6 +19,20 @@ const TIER_ORDER: Record<SubscriptionTier, number> = {
   tier_5: 5,
 }
 
+// iOS-APP BRIDGE (2026-07-12): the native app injects window.thetaNative.
+// Handing it the token unlocks the native pick card, device registration for
+// push, and the home-screen widget. No-ops in normal browsers.
+const _syncNativeBridge = (token: string | null, justLoggedIn = false) => {
+  try {
+    const native = (window as any).thetaNative
+    if (!native || !token) return
+    native.setAuthToken?.(token)
+    if (justLoggedIn) native.requestPush?.()
+  } catch { /* never let the bridge break web auth */ }
+}
+// Boot-time sync: an already-signed-in session on first app launch.
+_syncNativeBridge(localStorage.getItem('access_token'))
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   token: localStorage.getItem('access_token'),
@@ -26,6 +40,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   setAuth: (user, token) => {
     localStorage.setItem('access_token', token)
+    _syncNativeBridge(token, true)
     set({ user, token, isAuthenticated: true })
   },
 

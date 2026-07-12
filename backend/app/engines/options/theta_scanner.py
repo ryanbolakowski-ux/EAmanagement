@@ -732,6 +732,17 @@ def _pick_qty_for_allocation(allocation, basis_price, legacy_usd: float = 1000.0
     return max(1, int(legacy_usd / basis)), "legacy"
 
 
+
+# Retain fire-and-forget push tasks: the event loop holds only a weak ref to
+# tasks, so an unretained one can be garbage-collected mid-flight.
+_PUSH_TASKS: set = set()
+
+
+def _retain_push_task(task):
+    _PUSH_TASKS.add(task)
+    task.add_done_callback(_PUSH_TASKS.discard)
+    return task
+
 async def emit_theta_pick(db, user, pick: dict) -> bool:
     from app.services.email import _send, _send_tracked
     qty = max(1, int(1000 / pick["price"]))
@@ -844,12 +855,12 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 f"Entry ${pick['entry']:.2f} \u00b7 Stop ${pick['stop']:.2f} \u00b7 "
                 f"Target ${pick['target']:.2f} (+{float(pick.get('projected_move_pct') or 0):.0f}%)"
             )
-            _aio_push.create_task(_send_pick_push(
+            _retain_push_task(_aio_push.create_task(_send_pick_push(
                 [user.id], _push_title, _push_body,
                 {"kind": "theta_pick", "ticker": pick["ticker"],
                  "entry": pick["entry"], "stop": pick["stop"],
                  "target": pick["target"], "watch_only": _watch},
-            ))
+            )))
     except Exception as _push_e:
         logger.warning(f"[ThetaScanner] pick push skipped: {type(_push_e).__name__}: {_push_e}")
 
