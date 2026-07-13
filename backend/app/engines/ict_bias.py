@@ -316,10 +316,16 @@ def compute_ict_bias(rows: list[tuple], instrument: str) -> dict:
     if asian:
         asian_high, asian_low, _ = asian
 
-    # Current session
-    now_et = df_et.index[-1]
-    et_hour = now_et.hour + now_et.minute / 60.0
-    session = _session_label(et_hour)
+    # Current session — from the WALL CLOCK, never the last bar: a lagging or
+    # delayed feed put the label a session behind (2026-07-13: 9:31 ET showed
+    # "london" because the newest bar predated the 9:30 boundary).
+    from datetime import datetime as _dt_wall
+    from zoneinfo import ZoneInfo as _ZI
+    _now_wall = _dt_wall.now(_ZI("America/New_York"))
+    if _now_wall.weekday() >= 5 and not (_now_wall.weekday() == 6 and _now_wall.hour >= 18):
+        session = "overnight"  # weekend (Sunday reopens 18:00 ET as asian)
+    else:
+        session = _session_label(_now_wall.hour + _now_wall.minute / 60.0)
     last_close = float(df_et["close"].iloc[-1])
 
     # Opening type
