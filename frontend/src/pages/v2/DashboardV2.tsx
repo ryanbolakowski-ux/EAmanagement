@@ -41,7 +41,7 @@ import {
 } from '../../api/endpoints'
 import type { DashboardSummary, Strategy, Trade } from '../../types'
 import {
-  EmptyState, EngineField, ErrorBoundary, LiveNumber, SectionHeader, Skeleton, Sparkline, StatCard,
+  BiasLock, EmptyState, EngineField, ErrorBoundary, LiveNumber, SectionHeader, Skeleton, Sparkline, StatCard,
 } from '../../components/v2'
 import { fmtEntryTime, fmtHold } from '../../components/TradeMetrics'
 import { useEventStream } from '../../hooks/useEventStream'
@@ -800,6 +800,10 @@ export default function DashboardV2() {
 
   const openPositions = openPositionsQ.data ?? []
   const latestPick = pickQ.data?.picks?.[0] ?? null
+  // Directional-bias panel focus: NQ (the desk's primary futures instrument),
+  // falling back to whatever instrument the bias endpoint returned first.
+  const biasFocus = biasQ.data?.biases?.find(b => b.instrument === 'NQ')
+    ?? biasQ.data?.biases?.[0] ?? null
   const recentTrades = tradesQ.data ?? []
   const strategies = strategiesQ.data ?? []
 
@@ -936,10 +940,19 @@ export default function DashboardV2() {
           </div>
         </div>
 
-        {/* 7. Engine — live system activity field */}
-        <ErrorBoundary title="Engine">
-          <EnginePanel activity={engineActivity} live={streamLive} />
-        </ErrorBoundary>
+        {/* 7 + 8. Engine / Directional bias lock */}
+        <div className="grid gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-2 min-w-0">
+            <ErrorBoundary title="Engine">
+              <EnginePanel activity={engineActivity} live={streamLive} />
+            </ErrorBoundary>
+          </div>
+          <div className="min-w-0">
+            <ErrorBoundary title="Directional bias">
+              <BiasLock data={biasFocus} />
+            </ErrorBoundary>
+          </div>
+        </div>
 
       </div>
     </div>

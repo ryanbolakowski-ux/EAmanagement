@@ -1189,3 +1189,150 @@ html:not(.dark) .v2-root .v2-lp-nav { background: rgba(242, 245, 249, 0.88); }
   overflow: hidden;
   background: linear-gradient(to bottom, rgba(36, 29, 61, 0.03), rgba(91, 63, 174, 0.07));
 }
+
+/* ── 24. BiasLock (DashboardV2 "Directional bias" panel) ─────────────── */
+/* Locking sequence: factor lines from the REAL daily-bias payload
+   materialize one by one under a scanline sweep, then the BIAS LOCKED
+   stamp lands in the direction color (see components/v2/BiasLock.tsx).
+   CSS keyframes/transitions only — no canvas. The component skips the
+   sequence entirely under prefers-reduced-motion and section 18 freezes
+   these keyframes as a second guard. */
+.v2-root .v2-biaslock {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.v2-root .v2-biaslock__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--v2-sp-1);
+  margin-bottom: var(--v2-sp-1);
+}
+.v2-root .v2-biaslock__title {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--v2-text-3);
+}
+.v2-root .v2-biaslock--locking .v2-biaslock__title {
+  color: var(--v2-accent);
+  animation: v2-biaslock-blink 1.1s steps(2, start) infinite;
+}
+.v2-root .v2-biaslock__inst {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--v2-text-2);
+}
+.v2-root .v2-biaslock__body {
+  position: relative;
+  flex: 1;
+  min-height: 150px;
+}
+
+/* Dim scanline sweeping the card while the sequence runs */
+.v2-root .v2-biaslock__scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 34px;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(76, 141, 255, 0.06) 42%,
+    rgba(76, 141, 255, 0.15) 50%,
+    rgba(76, 141, 255, 0.06) 58%,
+    transparent
+  );
+  animation: v2-biaslock-scan 1.6s linear infinite;
+}
+@keyframes v2-biaslock-scan {
+  from { transform: translateY(-34px); }
+  to   { transform: translateY(190px); }
+}
+
+/* Factor lines — monospace numerics, subtle glow as each materializes */
+.v2-root .v2-biaslock__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 20px;
+  color: var(--v2-text-2);
+}
+.v2-root .v2-biaslock__line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-root .v2-biaslock__line--in {
+  animation: v2-biaslock-line-in 480ms var(--v2-ease) both;
+}
+@keyframes v2-biaslock-line-in {
+  0%   { opacity: 0; transform: translateX(-4px); color: var(--v2-text-1); text-shadow: 0 0 12px rgba(76, 141, 255, 0.85); }
+  55%  { opacity: 1; transform: translateX(0);    text-shadow: 0 0 8px rgba(76, 141, 255, 0.5); }
+  100% { opacity: 1; transform: translateX(0);    text-shadow: none; }
+}
+.v2-root .v2-biaslock__tick {
+  margin-right: 6px;
+  color: var(--v2-text-3);
+}
+.v2-root .v2-biaslock__cursor {
+  display: inline-block;
+  width: 7px;
+  height: 12px;
+  vertical-align: -1px;
+  background: var(--v2-accent);
+  animation: v2-biaslock-blink 0.9s steps(2, start) infinite;
+}
+@keyframes v2-biaslock-blink { 50% { opacity: 0; } }
+
+/* Final stamp — direction-colored, lands with a compressing scale-in */
+.v2-root .v2-biaslock__stamp {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--v2-sp-1);
+  margin-top: var(--v2-sp-1);
+  padding: 6px 10px;
+  border: 1px solid;
+  border-radius: var(--v2-radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  animation: v2-biaslock-stamp 360ms var(--v2-ease) both;
+}
+@keyframes v2-biaslock-stamp {
+  from { opacity: 0; transform: scale(1.06); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.v2-root .v2-biaslock__stamp--bull { color: var(--v2-up);     border-color: rgba(14, 203, 129, 0.4); background: var(--v2-up-bg); }
+.v2-root .v2-biaslock__stamp--bear { color: var(--v2-down);   border-color: rgba(246, 70, 93, 0.4);  background: var(--v2-down-bg); }
+.v2-root .v2-biaslock__stamp--flat { color: var(--v2-text-2); border-color: var(--v2-border-strong); background: var(--v2-surface-3); }
+.v2-root .v2-biaslock__stamp-time {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+/* Engine-narrative caption under the locked stamp + no-data idle state */
+.v2-root .v2-biaslock__narrative {
+  margin: var(--v2-sp-1) 0 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--v2-text-3);
+}
+.v2-root .v2-biaslock__idle {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--v2-text-3);
+}

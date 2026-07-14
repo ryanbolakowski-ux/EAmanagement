@@ -37,3 +37,6 @@ export type { TickerTapeProps, TickerQuote } from './TickerTape'
 
 export { default as EngineField } from './EngineField'
 export type { EngineFieldProps } from './EngineField'
+
+export { default as BiasLock } from './BiasLock'
+export type { BiasLockProps } from './BiasLock'
