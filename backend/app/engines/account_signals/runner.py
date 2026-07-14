@@ -31,6 +31,42 @@ from app.api.routes.account_signals import send_signal_email
 _active: dict[str, asyncio.Task] = {}
 YAHOO_SYMBOLS = {"ES": "ES=F", "NQ": "NQ=F", "RTY": "RTY=F", "YM": "YM=F"}
 
+# ── SIGNAL-PRICE-TRUTH-V2 (owner rule, 2026-07-13): emitted futures signal
+# prices must be REAL candle_cache prices, never the QQQ/SPY ETF-proxy scale.
+# Minimum tick per instrument root (micros tick like their parent).
+FUTURES_TICK = {"ES": 0.25, "NQ": 0.25, "YM": 1.0, "RTY": 0.10,
+                "MES": 0.25, "MNQ": 0.25, "MYM": 1.0, "M2K": 0.10}
+
+
+def snap_to_tick(price: float, instrument: str) -> float:
+    """Snap `price` to the instrument's minimum tick (default 0.25).
+
+    Pure function. The round(..., 10) kills float noise from the division so
+    e.g. snap_to_tick(29568.13, "NQ") == 29568.25 exactly."""
+    tick = FUTURES_TICK.get((instrument or "").upper(), 0.25)
+    return round(round(float(price) / tick) * tick, 10)
+
+
+def rebase_signal_prices(entry: float, stop: float, tp: float, real_now: float,
+                         instrument: str, proxy_now: float | None = None):
+    """Translate proxy-priced entry/stop/tp onto the REAL futures price level,
+    preserving the strategy's intended POINT OFFSETS (stop-entry, tp-entry).
+
+    Translation base (DOCUMENTED CHOICE): the strategy's entry can be a
+    past-bar level (an FVG CE tap), not the current price, so the correct base
+    is the PROXY SERIES' CURRENT CLOSE (`proxy_now`) when the caller knows it:
+    offset = real_now - proxy_now, applied to all three prices. When proxy_now
+    is unknown we fall back to base = entry, i.e. rebase entry to real_now
+    directly — exact for market-entry signals (inversion-trigger entries ARE
+    the proxy's current close, e.g. the 2026-07-13 Judas NQ short).
+
+    Pure function; returns (entry, stop, tp) tick-snapped."""
+    base = float(proxy_now) if proxy_now else float(entry)
+    offset = float(real_now) - base
+    return (snap_to_tick(float(entry) + offset, instrument),
+            snap_to_tick(float(stop) + offset, instrument),
+            snap_to_tick(float(tp) + offset, instrument))
+
 
 async def start_watcher(watcher_id: str, strategy_id: str, user_id: str,
                         instruments: list[str], account_label: str, channels: list[str], session_filter: str = "all"):
@@ -864,6 +900,55 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         logger.info(
             f"[signal-source] {instrument}->{_sym_map} provider=candle_cache "
             f"entry={entry} real_now={_real_now:.2f} drift={_drift*100:.2f}%")
+        # ── SIGNAL-PRICE-TRUTH-V2 (owner rule): emitted futures prices must
+        # be REAL candle_cache prices, never the ETF-proxy scale.
+        # (1) HARD SUPPRESS: drift beyond the hard limit means the proxy
+        #     series itself is untrustworthy — no rebase can save the setup.
+        #     Same log+return pattern as the bias/lunch suppressions above.
+        _hard_drift = float(_os.environ.get("SIGNAL_HARD_SUPPRESS_DRIFT_PCT", "1.0")) / 100.0
+        if _drift > _hard_drift:
+            logger.warning(
+                f"[Signals] SUPPRESSED by price-truth: {instrument} {direction} proxy series "
+                f"untrustworthy entry={entry} vs real {_real_now:.2f} drift "
+                f"{_drift*100:.2f}% > {_hard_drift*100:.2f}% watcher={watcher_id} — NOT sent/routed")
+            return
+        # (2) REBASE onto the real price, preserving the strategy's point
+        #     offsets. Base = the proxy series' current close when the
+        #     strategy shipped it (metadata chart_candles[-1]["c"] — the last
+        #     primary bar it priced from); else base = entry (see
+        #     rebase_signal_prices docstring). Done BEFORE the idempotency
+        #     key, DB insert, email, push and routing, so every downstream
+        #     consumer sees the rebased prices.
+        if instrument.upper() in FUTURES_TICK:
+            _proxy_now = None
+            try:
+                _cc = _meta.get("chart_candles") or []
+                if _cc and _cc[-1].get("c") is not None:
+                    _proxy_now = float(_cc[-1]["c"])
+            except Exception:
+                _proxy_now = None
+            _tick = FUTURES_TICK.get(instrument.upper(), 0.25)
+            _new_entry, _new_stop, _new_tp = rebase_signal_prices(
+                entry, stop, tp, _real_now, instrument, proxy_now=_proxy_now)
+            if (_new_entry, _new_stop, _new_tp) != (entry, stop, tp):
+                logger.info(
+                    f"[signal-rebase] {instrument} entry {entry}->{_new_entry} "
+                    f"stop {stop}->{_new_stop} tp {tp}->{_new_tp} "
+                    f"(proxy->real, offsets preserved, tick {_tick}, "
+                    f"base={('proxy_now %.2f' % _proxy_now) if _proxy_now else 'entry'})")
+                entry, stop, tp = _new_entry, _new_stop, _new_tp
+                # Mutate the signal object too — push notifications and
+                # route_emitted_signal read signal.entry_price/stop_loss/
+                # take_profit directly, not the locals.
+                signal.entry_price = entry
+                signal.stop_loss = stop
+                signal.take_profit = tp
+                # Recompute drift on the REBASED entry so the stale-entry
+                # guard below judges the corrected price (residual drift is
+                # now just the level's genuine distance from the market).
+                _drift = abs(entry - _real_now) / _real_now
+                _price_basis = (f"{_price_basis}; REBASED proxy->real "
+                                f"(tick {_tick}, residual drift {_drift*100:.2f}%)")
         if _drift > _max_entry_drift:
             async with async_session_factory() as _db:
                 await _db.execute(text("""
