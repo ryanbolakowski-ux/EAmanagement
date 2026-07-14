@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Edit2, Check, X as XIcon, StopCircle, Trash2 } from 'lucide-react'
 import { paperTradingApi } from '../api/endpoints'
 import { MetricsGrid, EquityCurve, TradeTable, type Metrics, type TradeRow } from '../components/TradeMetrics'
+import AllocationEditor, { AllocationNote } from '../components/AllocationEditor'
 import RefreshButton from '../components/RefreshButton'
 
 type Detail = {
@@ -19,6 +20,8 @@ type Detail = {
     wins: number
     losses: number
     net_pnl: number
+    mode?: string
+    starting_balance?: number | null
   }
   metrics: Metrics
   trades: TradeRow[]
@@ -119,6 +122,19 @@ export default function PaperSessionDetail() {
           </button>
         </div>
       </div>
+
+      {/* ALLOC-EVERYWHERE: allocation editable from the detail page too
+          (same PATCH /sessions/{id}/allocation as the list cards). The
+          detail endpoint serves any of the user's sessions, so gate on
+          mode: 'paper' → editor; 'options_paper' → read-only note. */}
+      {(s.mode ?? 'paper') === 'paper' && (
+        <div className="max-w-sm rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 pb-3 mb-6 -mt-1">
+          <AllocationEditor session={s} extraInvalidateKeys={[['paper-session-detail', id]]} />
+        </div>
+      )}
+      {s.mode === 'options_paper' && (
+        <div className="mb-6 -mt-2"><AllocationNote/></div>
+      )}
 
       <div className="space-y-5">
         <MetricsGrid m={data.metrics}/>

@@ -330,6 +330,7 @@ async def set_session_label(
         started_at=session.started_at.isoformat(),
         instrument=session.instrument, label=session.label,
         total_trades=session.total_trades, wins=0, losses=0, net_pnl=session.net_pnl,
+        starting_balance=float(session.starting_balance) if session.starting_balance is not None else None,
     )
 
 
@@ -463,6 +464,7 @@ async def get_paper_session_detail(
             instrument=session.instrument, label=session.label,
             total_trades=closed_count, wins=win_count, losses=loss_count,
             net_pnl=metrics.net_pnl,
+            starting_balance=float(session.starting_balance) if session.starting_balance is not None else None,
         ),
         metrics=metrics,
         trades=[
