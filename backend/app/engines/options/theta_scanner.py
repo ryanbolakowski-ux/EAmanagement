@@ -915,6 +915,9 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 logger.info(f"[ThetaScanner] {user.email}: qty={qty} sized_from={_sized_from} "
                             f"(alloc={_alloc}, basis=${_basis:.2f})")
         if trade_mode == "live" and broker_account_id:
+            from zoneinfo import ZoneInfo as _ZI
+            _queued_at_et = datetime.now(timezone.utc).astimezone(
+                _ZI("America/New_York")).strftime("%H:%M")
             entry_payload = {
                 "user_id": str(user.id),
                 "user_email": user.email,
@@ -927,6 +930,9 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
                 "pick_date": _date.today().isoformat(),
                 "score": pick.get("score"),
                 "gap_pct": pick.get("gap_pct"),
+                # MOO-LATE-CUTOFF (2026-07-14): honest queue timestamp so the
+                # expiry log/email can say when the entry was queued.
+                "queued_at_et": _queued_at_et,
             }
             try:
                 import redis.asyncio as _ra

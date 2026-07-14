@@ -769,6 +769,9 @@ async def _run_scan_cycle(*, is_premarket: bool):
         block = await is_blackout_active(buffer_min=BLACKOUT_BUFFER_MIN)
         if block:
             logger.info(f"[Scanner] blackout active: {block['event_name']} @ {block['event_time']} — skip intraday tick")
+            # BLACKOUT VISIBILITY (2026-07-14): if a queued stock entry is
+            # waiting behind this blackout, say so (once per 5 min).
+            await _log_pending_entry_blackout_deferral(block)
             return
     else:
         block = await is_blackout_active(buffer_min=BLACKOUT_BUFFER_MIN)
@@ -1842,6 +1845,73 @@ _PENDING_STOCK_ENTRY_PREFIX = "theta:pending_entry:"
 _pick_executed_today: set = set()
 
 
+# ── MOO LATE CUTOFF (2026-07-14 AMDL incident) ──────────────────────────────
+# AMDL was queued at 9:34 ET, the CPI + Fed-testimony blackouts paused the
+# intraday tick, and the pending entry sat silently in Redis for ~2h until the
+# key was manually deleted at 11:20. A late fire is the SPRC failure mode:
+# after 10:30 ET the MOO window is closed and an unfired queued entry must be
+# CANCELLED, never fired.
+_MOO_LATE_CUTOFF_MIN = 10 * 60 + 30  # 10:30 ET, minutes since midnight
+
+
+def _pending_entry_expired(now_et_min: int, queued_et_min: Optional[int] = None) -> bool:
+    """Pure cutoff rule: a queued stock entry that has NOT fired by the time
+    `now_et_min` is past 10:30 ET is expired. `queued_et_min` is accepted for
+    log/context symmetry; the rule intentionally does not depend on it —
+    blackout deferral and a late queue are both covered by the same cutoff."""
+    return now_et_min > _MOO_LATE_CUTOFF_MIN
+
+
+# ── Blackout-deferral visibility (2026-07-14) ───────────────────────────────
+# When the intraday tick is skipped for a news blackout while a queued stock
+# entry is pending, say so in the log — the AMDL entry sat invisibly for ~2h.
+# Debounced module-level: once per 5 min max (monotonic clock).
+_BLACKOUT_DEFER_LOG_INTERVAL_SEC = 300.0
+_blackout_defer_last_log: float = float("-inf")
+
+
+def _should_log_blackout_deferral(now_monotonic: Optional[float] = None) -> bool:
+    """Monotonic debounce for the blackout-deferral log line. Returns True
+    (and arms the debounce) at most once per 5 minutes."""
+    global _blackout_defer_last_log
+    import time as _time
+    now = _time.monotonic() if now_monotonic is None else now_monotonic
+    if now - _blackout_defer_last_log >= _BLACKOUT_DEFER_LOG_INTERVAL_SEC:
+        _blackout_defer_last_log = now
+        return True
+    return False
+
+
+async def _log_pending_entry_blackout_deferral(block: dict) -> None:
+    """If any pending stock entry exists for today, log that it is being
+    deferred by the active blackout and when the window clears. Never raises;
+    debounced to once per 5 min."""
+    try:
+        et_now = datetime.now(timezone.utc).astimezone(ET)
+        pick_date = et_now.date().isoformat()
+        import redis.asyncio as _ra
+        _redis = _ra.from_url(os.environ.get("REDIS_URL", "redis://edge_redis:6379"), decode_responses=True)
+        cursor, pending_keys = 0, []
+        while True:
+            cursor, keys = await _redis.scan(
+                cursor=cursor, match=f"{_PENDING_STOCK_ENTRY_PREFIX}{pick_date}:*", count=100)
+            pending_keys.extend(keys)
+            if cursor == 0:
+                break
+        if not pending_keys:
+            return
+        if not _should_log_blackout_deferral():
+            return
+        clear_utc = await next_clear_time(buffer_min=BLACKOUT_BUFFER_MIN)
+        clear_et = clear_utc.astimezone(ET).strftime("%H:%M ET")
+        logger.info(
+            f"[stock-entry] pending entry deferred by blackout {block.get('event_name')} "
+            f"until {clear_et} ({len(pending_keys)} pending)"
+        )
+    except Exception as e:
+        logger.warning(f"[stock-entry] blackout-deferral visibility failed: {e}")
+
+
 def _polygon_key() -> str:
     return os.environ.get("POLYGON_API_KEY", "")
 
@@ -2207,6 +2277,13 @@ async def _execute_stock_pick_with_timing_gate(pending_entry: dict) -> bool:
     now_et_min = now_et.hour * 60 + now_et.minute
     today_et_str = now_et.date().isoformat()
 
+    # MOO LATE CUTOFF (2026-07-14): past 10:30 ET an unfired queued entry is
+    # cancelled, never fired late. Without this, AMDL (queued 9:34, deferred by
+    # the CPI/Fed-testimony blackouts) would have fired hours after the open —
+    # the SPRC failure mode.
+    if await _maybe_expire_pending_entry(pending_entry, now_et):
+        return False
+
     # Window classification
     if now_et_min < (8 * 60 + 30):
         window = "too-early"
@@ -2388,6 +2465,86 @@ async def _clear_pending_entry(pick_date: str, user_id: str):
         logger.warning(f"[stock-entry] failed to clear pending entry: {e}")
 
 
+async def _acquire_entry_skip_email_latch(pick_date: str, user_id: str) -> bool:
+    """Redis SETNX latch — at most ONE 'entry skipped' email per (user, day).
+    Fail-open on Redis errors (pending entries live in Redis too, so if Redis
+    is down this path is unreachable anyway)."""
+    try:
+        import redis.asyncio as _ra
+        _redis = _ra.from_url(os.environ.get("REDIS_URL", "redis://edge_redis:6379"), decode_responses=True)
+        ok = await _redis.set(
+            f"theta:entry_skip_mail:{pick_date}:{user_id}", "1", nx=True, ex=48 * 3600)
+        return bool(ok)
+    except Exception as e:
+        logger.warning(f"[stock-entry] skip-email latch failed (fail-open): {e}")
+        return True
+
+
+async def _send_entry_skipped_email(pending_entry: dict, queued_hhmm: str, now_hhmm: str) -> None:
+    """Short 'Saro: entry skipped' note to the pick's user when their queued
+    entry expired unfired (MOO LATE CUTOFF). Subject carries 'Saro' so the
+    EMAIL_KILL_SWITCH whitelist passes it (same pattern as the no-pick email).
+    Redis-latched to once per (user, day)."""
+    user_email = pending_entry.get("user_email") or ""
+    ticker = pending_entry.get("ticker", "?")
+    pick_date = pending_entry.get("pick_date", "?")
+    user_id = str(pending_entry.get("user_id", "?"))
+    if "@" not in user_email:
+        return
+    if not await _acquire_entry_skip_email_latch(pick_date, user_id):
+        return
+    from app.services.email import _send_tracked
+    subject = f"\U0001f3af Saro: entry skipped — {ticker} ({pick_date})"
+    reason = (
+        f"Your {ticker} entry was queued at {queued_hhmm} ET but had not fired by "
+        f"{now_hhmm} ET — past the 10:30 ET market-on-open cutoff. This happens when "
+        "a news blackout (e.g. CPI or Fed testimony) defers execution, or when the "
+        "pick was queued too late. A market entry this long after the open loses the "
+        "opening-range edge the pick was based on, so the entry was cancelled rather "
+        "than fired late."
+    )
+    html = (
+        "<div style=\"font-family:system-ui,Arial,sans-serif;max-width:520px;margin:0 auto;padding:18px;\">"
+        "<h2 style=\"color:#7c3aed;margin:0 0 10px;\">\U0001f3af Saro \u2014 entry skipped</h2>"
+        f"<p style=\"font-size:14px;color:#334155;\">Today's pick <b>{ticker}</b> was NOT entered.</p>"
+        f"<div style=\"background:#f1f5f9;border-radius:8px;padding:10px 12px;font-size:13px;color:#475569;\"><b>Why:</b> {reason}</div>"
+        "<p style=\"font-size:12px;color:#94a3b8;margin-top:14px;\">No position was opened and no order was placed. "
+        "You will get the next qualifying pick automatically.</p>"
+        "</div>"
+    )
+    try:
+        _send_tracked(user_email, subject, html)
+        logger.info(f"[stock-entry] skip-email sent to {user_email} for {ticker}")
+    except Exception as _e:
+        logger.error(f"[stock-entry] skip-email to {user_email} failed: {_e}")
+
+
+async def _maybe_expire_pending_entry(pending_entry: dict, now_et) -> bool:
+    """MOO LATE CUTOFF: if the MOO window is closed (past 10:30 ET) and this
+    queued entry has not fired, CANCEL it — delete the Redis pending key, log
+    EXPIRED, and email the user once (Redis latch per user/day). Returns True
+    when the entry was expired (caller must not place any order)."""
+    now_et_min = now_et.hour * 60 + now_et.minute
+    if not _pending_entry_expired(now_et_min):
+        return False
+    ticker = pending_entry.get("ticker", "?")
+    queued_hhmm = pending_entry.get("queued_at_et") or "unknown"
+    now_hhmm = now_et.strftime("%H:%M")
+    logger.info(
+        f"[stock-entry] EXPIRED ticker={ticker} — MOO window closed "
+        f"(queued {queued_hhmm}, now {now_hhmm})"
+    )
+    try:
+        await _clear_pending_entry(pending_entry.get("pick_date"), pending_entry.get("user_id"))
+    except Exception as _e:
+        logger.warning(f"[stock-entry] expiry clear failed for {ticker}: {_e}")
+    try:
+        await _send_entry_skipped_email(pending_entry, queued_hhmm, now_hhmm)
+    except Exception as _e:
+        logger.error(f"[stock-entry] expiry email failed for {ticker}: {_e}")
+    return True
+
+
 async def _check_pending_stock_entries():
     """Scheduler-tick: iterate Redis pending entries and run the timing
     gate on each. Called every 5-min cycle by start_premarket_scheduler.
@@ -2401,7 +2558,13 @@ async def _check_pending_stock_entries():
     except Exception:
         return
     et_min = et.hour * 60 + et.minute
-    if et_min < (8 * 60 + 0) or et_min > (10 * 60 + 30):
+    # Upper bound extended 10:30 -> 16:00 ET (2026-07-14): the tick must keep
+    # sweeping AFTER the MOO cutoff so a blackout-deferred / late entry gets
+    # EXPIRED and cleaned up (log + skip-email) instead of sitting silently in
+    # Redis all day (today's AMDL incident: queued 9:34, manually deleted
+    # 11:20). Past 10:30 the gate can only cancel — never fire — and the sweep
+    # is a cheap Redis SCAN with no market-data calls when nothing is queued.
+    if et_min < (8 * 60 + 0) or et_min > (16 * 60):
         return  # outside any relevant window — no point polling
 
     pick_date = et.date().isoformat()
