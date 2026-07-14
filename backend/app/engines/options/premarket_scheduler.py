@@ -946,6 +946,21 @@ async def start_premarket_scheduler():
             except Exception as _tse:
                 logger.warning(f"[ThetaScanner] check failed: {_tse}")
 
+            # ── Saro Premarket Watch (2026-07-14, owner approved) — once per
+            # trading day inside 08:45-09:25 ET: catalyst-ranked premarket
+            # gapper watchlist email (explicitly NOT a signal — the confirmed
+            # pick still fires after 9:33) + the Track B ignition pre-lock
+            # (theta:ignition:candidates:{ET-date}). Own Redis SETNX latch
+            # (theta:premarket_watch:{ET-date}) + try/except — same isolation
+            # pattern as the shadow hooks below: can never touch the scan loop.
+            try:
+                from app.engines.options.premarket_watch import (
+                    _check_and_run_premarket_watch,
+                )
+                await _check_and_run_premarket_watch()
+            except Exception as _pwe:
+                logger.warning(f"[premarket-watch] check failed: {_pwe}")
+
             # ── Daily SHADOW multi-strategy scan (P2) — persist-only, no emit/
             # trade. Starts forward-test stats for watch-only templates. Fully
             # isolated: own once/day Redis latch + try/except, cannot touch the
