@@ -19,7 +19,14 @@ shipping a picture that contradicts the numbers.
 from __future__ import annotations
 
 import io
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+try:  # zoneinfo ships with 3.9+; guarded so an exotic env can't kill the import
+    from zoneinfo import ZoneInfo
+    _ET_TZ = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover
+    _ET_TZ = None
 
 import matplotlib
 matplotlib.use("Agg")  # headless — must be set before pyplot import
@@ -38,6 +45,44 @@ _TARGET_C = "#16a34a"  # green dashed
 _RISK_FILL = "#dc2626"
 _REWARD_FILL = "#16a34a"
 _LEVEL_C = "#7c3aed"   # violet for key levels
+
+
+# ── Pure window / label helpers (CHART-TRUTH-V1) ────────────────────────
+# Extracted as pure functions so tests can pin the window math and the ET
+# label format with no rendering (backend/tests/test_trade_chart_window.py).
+# Why: the 2026-07-13 NQ short email chart plotted delayed proxy bars whose
+# x axis (raw UTC, no fire marker) appeared to END before the signal fired.
+
+def _as_utc(dt: datetime) -> datetime:
+    """Naive datetimes are treated as UTC; aware ones are converted to UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def compute_signal_window(fire_time: datetime, now: Optional[datetime] = None,
+                          before_min: int = 45, after_min: int = 45):
+    """Bar window for a signal chart: [fire-45m, fire+45m], clipped to `now`
+    (at send time no post-entry bars exist yet). Always returns a tz-aware
+    UTC (start, end) pair, and end is never before fire_time so a skewed
+    clock cannot produce a chart that stops before the entry."""
+    fire_utc = _as_utc(fire_time)
+    now_utc = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    start = fire_utc - timedelta(minutes=before_min)
+    end = min(fire_utc + timedelta(minutes=after_min), now_utc)
+    if end < fire_utc:
+        end = fire_utc
+    return start, end
+
+
+def format_et_label(ts: datetime) -> str:
+    """X-axis tick label: Eastern wall-clock with an explicit 'ET' suffix,
+    e.g. 2026-07-13 14:45 UTC (an EDT day) -> '10:45 ET'. Naive input is
+    treated as UTC."""
+    ts_et = _as_utc(ts)
+    if _ET_TZ is not None:
+        ts_et = ts_et.astimezone(_ET_TZ)
+    return ts_et.strftime("%H:%M") + " ET"
 
 
 def _validate_geometry(direction: str, entry: float, stop: float, target: float) -> bool:
@@ -101,6 +146,7 @@ def generate_trade_chart(
     key_levels: Optional[dict] = None,
     stop_reason: Optional[str] = None,
     target_reason: Optional[str] = None,
+    fire_time: Optional[datetime] = None,
 ) -> Optional[bytes]:
     """Render a TradingView-style annotated trade chart to PNG bytes.
 
@@ -165,6 +211,28 @@ def generate_trade_chart(
             # No bars — still draw the position tool over a neutral x range so
             # the email shows the levels (better than nothing). 0..1 x range.
             x_min, x_max = 0.0, 1.0
+
+        # ── 2b. Fire-time marker (CHART-TRUTH-V1). ──
+        # Vertical line AT the moment the signal fired so "entry happened
+        # HERE" is unambiguous. Drawn only when the caller passes fire_time
+        # and the x axis is real timestamps (the futures signal email path);
+        # the equity/Saro pick path passes nothing and renders as before.
+        if fire_time is not None and x_is_time:
+            try:
+                _fire_utc = _as_utc(fire_time)
+                fire_x = mdates.date2num(_fire_utc)
+                if fire_x > x_max - step:
+                    x_max = fire_x + step  # keep the marker inside the frame
+                ax.axvline(fire_x, color="#f59e0b", linewidth=1.6,
+                           linestyle="-.", zorder=6)
+                import matplotlib.transforms as _mtransforms
+                _btrans = _mtransforms.blended_transform_factory(
+                    ax.transData, ax.transAxes)
+                ax.text(fire_x, 0.02, f" entry {format_et_label(_fire_utc)}",
+                        transform=_btrans, va="bottom", ha="left", fontsize=8,
+                        color="#b45309", fontweight="bold", zorder=7)
+            except Exception:
+                pass
 
         # ── 3. Shaded risk/reward zones (TradingView position tool). ──
         # Risk: entry ↔ stop, red @ 0.12. Reward: entry ↔ target, green @ 0.12.
@@ -272,8 +340,17 @@ def generate_trade_chart(
         ax.tick_params(labelsize=8, colors="#475569")
         if x_is_time:
             try:
-                ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                fig.autofmt_xdate(rotation=0, ha="center")
+                if fire_time is not None:
+                    # Futures signal chart: ticks in Eastern wall-clock with
+                    # an explicit 'ET' suffix (the old bare %H:%M printed the
+                    # raw UTC index and read ~4-5h in the past).
+                    from matplotlib.ticker import FuncFormatter
+                    ax.xaxis.set_major_formatter(FuncFormatter(
+                        lambda x, _pos: format_et_label(mdates.num2date(x))))
+                    fig.autofmt_xdate(rotation=30, ha="right")
+                else:
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                    fig.autofmt_xdate(rotation=0, ha="center")
             except Exception:
                 pass
         else:
@@ -286,7 +363,9 @@ def generate_trade_chart(
         png = buf.getvalue()
         logger.info(
             f"[trade-chart] rendered sym={symbol} tf={timeframe} dir={side_word} "
-            f"rr=1:{rr:g} bytes={len(png)} stop_reason={stop_reason or '-'} "
+            f"rr=1:{rr:g} bytes={len(png)} "
+            f"fire={format_et_label(fire_time) if fire_time is not None else '-'} "
+            f"stop_reason={stop_reason or '-'} "
             f"target_reason={target_reason or '-'}"
         )
         return png

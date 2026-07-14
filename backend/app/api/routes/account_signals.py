@@ -348,6 +348,67 @@ async def stop_watcher(
 
 # ─── Email rendering ─────────────────────────────────────────────────
 
+# CHART-TRUTH-V1 — real-futures 1m bars for the signal email chart.
+# The chart used to plot whatever _fetch_bars_sync returned (Alpaca/Polygon
+# QQQ->NQ scaled ETF proxy first; 5m x 50 bars = a ~4h window ending wherever
+# the delayed proxy feed ended, labelled in raw UTC with no fire marker). On
+# 2026-07-13 that rendered an NQ short whose x axis appeared to stop BEFORE
+# the 10:45 ET fire. This helper reads the SAME candle_cache 1m rows that
+# resolver V3 (fetch_from_cache) scores outcomes against, over an explicit
+# [fire-45m, min(fire+45m, now)] window, so plotted candles sit on the same
+# price basis + clock as the emitted signal. Sync on purpose:
+# send_signal_email runs inside asyncio.to_thread (no event loop available).
+_CHART_ETF_PRICE_FLOOR = {"ES": 1000.0, "NQ": 5000.0, "RTY": 500.0, "YM": 10000.0,
+                          "MES": 1000.0, "MNQ": 5000.0, "M2K": 500.0, "MYM": 10000.0}
+
+
+def _candle_cache_window_df(instrument: str, win_start, win_end):
+    """1m OHLC DataFrame (tz-aware UTC index) from candle_cache over
+    [win_start, win_end], or None so the caller falls back to the legacy
+    proxy path. Rows that look ETF-proxy priced (e.g. NQ close < 5000) are
+    rejected — a chart on the wrong price basis is worse than no chart."""
+    import pandas as _pd
+    import psycopg2
+    try:
+        url = os.environ.get("DATABASE_URL", "").replace(
+            "postgresql+asyncpg://", "postgresql://")
+        cn = None
+        try:
+            cn = psycopg2.connect(url, connect_timeout=5)
+            with cn.cursor() as cur:
+                cur.execute(
+                    "SELECT timestamp, open, high, low, close FROM candle_cache "
+                    "WHERE instrument = %s AND timestamp >= %s AND timestamp <= %s "
+                    "ORDER BY timestamp ASC",
+                    (instrument.upper(), win_start, win_end),
+                )
+                rows = cur.fetchall()
+        finally:
+            if cn is not None:
+                try:
+                    cn.close()
+                except Exception:
+                    pass
+        if not rows:
+            return None
+        df = _pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close"])
+        df["timestamp"] = _pd.to_datetime(df["timestamp"], utc=True)
+        df = df.set_index("timestamp").astype(float)
+        floor = _CHART_ETF_PRICE_FLOOR.get(instrument.upper())
+        if floor and float(df["close"].iloc[-1]) < floor:
+            logger.warning(
+                f"[signal-email] chart bars look ETF-proxy priced for {instrument} "
+                f"(close {float(df['close'].iloc[-1]):.2f} < {floor:g}) — "
+                f"skipping candle_cache window")
+            return None
+        return df
+    except Exception as e:
+        logger.warning(
+            f"[signal-email] candle_cache chart window failed {instrument}: "
+            f"{type(e).__name__}: {e}")
+        return None
+
+
 def send_signal_email(
     to: str, username: str, account_label: str,
     strategy_name: str, instrument: str, direction: str,
@@ -452,9 +513,9 @@ def send_signal_email(
             f"-- proceeding with send (fail-open)"
         )
     # ── Annotated trade-chart PNG (best-effort) ──────────────────────────
-    # Pull recent bars via the SAME data path the watcher uses
-    # (_fetch_bars_sync → Polygon ETF proxy for futures → candle_cache →
-    # yfinance), render the TradingView-style position chart, attach it inline
+    # CHART-TRUTH-V1: futures bars come from the REAL candle_cache 1m window
+    # around the fire time (equities keep the legacy _fetch_bars_sync path);
+    # render the TradingView-style position chart, attach it inline
     # (<img src="cid:tradechart">) and stash base64 for the Email Signals page.
     # Any failure (no bars, bad geometry, matplotlib hiccup) degrades to a
     # no-chart email — a chart must NEVER block the signal.
@@ -497,19 +558,35 @@ def send_signal_email(
     _chart_b64 = None
     _chart_img_html = ""
     try:
-        from app.engines.account_signals.runner import _fetch_bars_sync
-        from app.services.trade_chart import generate_trade_chart
+        from app.services.trade_chart import generate_trade_chart, compute_signal_window
         import pandas as _pd_ch
+        from app.engines.pnl_marks import is_futures_symbol as _is_fut_chart
         _tf = "5m"
-        _bars = _fetch_bars_sync(instrument, _tf, 50) or []
         _bars_df = None
-        if _bars:
-            _bars_df = _pd_ch.DataFrame(_bars)
+        _fire_for_chart = None
+        if _is_fut_chart(instrument):
+            # CHART-TRUTH-V1: futures charts plot REAL candle_cache 1m bars
+            # (the resolver-V3 source) over [fire-45m, min(fire+45m, now)],
+            # with ET axis labels + a vertical marker at the fire time. See
+            # _candle_cache_window_df above for the full why.
+            _tf = "1m"
+            _fire_for_chart = entry_detected_at
+            _win_s, _win_e = compute_signal_window(_fire_for_chart, now=_now_utc)
+            _bars_df = _candle_cache_window_df(instrument, _win_s, _win_e)
+        if _bars_df is None or getattr(_bars_df, "empty", True):
+            # Legacy fallback (and the unchanged equity path): recent bars via
+            # the watcher's fetch cascade. Futures keep the fire marker + ET
+            # axis even on fallback (_fire_for_chart stays set).
+            from app.engines.account_signals.runner import _fetch_bars_sync
+            _tf = "5m"
+            _bars = _fetch_bars_sync(instrument, _tf, 50) or []
+            _bars_df = _pd_ch.DataFrame(_bars) if _bars else None
         _chart_png = generate_trade_chart(
             symbol=instrument, timeframe=_tf, bars_df=_bars_df,
             entry=entry, stop=stop, target=target, direction=direction,
             key_levels=None,
             stop_reason=stop_reason, target_reason=target_reason,
+            fire_time=_fire_for_chart,
         )
     except Exception as _ch_e:
         _lg.warning(f"[signal-email] chart gen errored sym={instrument}: {type(_ch_e).__name__}: {_ch_e}")
