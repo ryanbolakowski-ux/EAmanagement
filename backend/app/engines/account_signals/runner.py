@@ -432,6 +432,55 @@ def _latest_real_close(sym: str):
         return None
 
 
+def _fresh_real_close(sym: str, max_age_s: float = 900.0):
+    """PRICE-TRUTH-V2.1: latest REAL candle_cache close ONLY when the bar is
+    fresh. A stale anchor must never drive a rebase or a hard-suppress —
+    measured 2026-07-13: NQ anchor was 4h11m old during open Globex; rebasing
+    onto it would place prices ~0.6% off the actual market while labeling
+    them 'real'. Returns float or None (missing OR stale)."""
+    import psycopg2, os as _os2
+    from datetime import datetime as _dtf, timezone as _tzf
+    try:
+        psy_url = _os2.environ.get("DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
+        cn = psycopg2.connect(psy_url, connect_timeout=5)
+        try:
+            with cn.cursor() as cur:
+                cur.execute("SELECT close, timestamp FROM candle_cache WHERE symbol = %s "
+                            "ORDER BY timestamp DESC LIMIT 1", ((sym or "").upper(),))
+                r = cur.fetchone()
+        finally:
+            cn.close()
+        if not r or r[0] is None:
+            return None
+        ts = r[1]
+        if ts is not None:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tzf.utc)
+            age = (_dtf.now(_tzf.utc) - ts).total_seconds()
+            if age > max_age_s:
+                logger.warning(
+                    f"[signal-rebase] {sym}: candle_cache anchor STALE "
+                    f"(age {age:.0f}s > {max_age_s:.0f}s) — prices remain "
+                    f"strategy-scale this signal (no rebase, no price-truth gate)")
+                return None
+        return float(r[0])
+    except Exception:
+        return None
+
+
+def _strip_scale_prices(reason):
+    """When a rebase changed the numbers, level labels composed on the
+    strategy scale ('NY_AM sweep high 29,820.37') would contradict the
+    emitted prices. Remove price-like tokens (4+ digit or comma/decimal
+    numbers); keep timeframe tokens like '1m'/'15m' intact."""
+    if not reason:
+        return reason
+    import re as _re
+    out = _re.sub(r"\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?|\s?\d{4,}(?:\.\d+)?|\s?\d+\.\d{2,}",
+                  "", str(reason))
+    return _re.sub(r"\s{2,}", " ", out).strip(" -–—:,") or str(reason)
+
+
 def _fetch_bars_uncached(instrument: str, timeframe: str, count: int = 50):
     """Bug #27 fix: read from candle_cache (populated nightly by our own
     Polygon/Databento fetchers) instead of relying on yfinance bulk pulls
@@ -885,7 +934,7 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     # to_thread: _latest_real_close is a sync psycopg2 connect+query (up to 5s
     # connect timeout) — run it off the event loop so a slow DB can't stall
     # every other watcher/runner coroutine. Return value unchanged.
-    _real_now = await asyncio.to_thread(_latest_real_close, instrument)
+    _real_now = await asyncio.to_thread(_fresh_real_close, instrument)
     _max_entry_drift = float(_os.environ.get("SIGNAL_MAX_ENTRY_DRIFT_PCT", "0.5")) / 100.0
     _sym_map = YAHOO_SYMBOLS.get(instrument.upper(), (instrument or "") + "=F")
     # PRICE-BASIS-V1: what actually served the bars this signal priced from,
@@ -907,6 +956,23 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         #     Same log+return pattern as the bias/lunch suppressions above.
         _hard_drift = float(_os.environ.get("SIGNAL_HARD_SUPPRESS_DRIFT_PCT", "1.0")) / 100.0
         if _drift > _hard_drift:
+            try:
+                async with async_session_factory() as _db:
+                    await _db.execute(text("""
+                        INSERT INTO account_signals
+                            (id, watcher_id, user_id, strategy_id, instrument, direction,
+                             entry_price, stop_loss, take_profit, bias, fired_at, status,
+                             detected_at, duplicate_suppressed_count, outcome_reason)
+                        VALUES (:id, :wid, :uid, :sid, :inst, :dir, :entry, :sl, :tp, :bias,
+                                :now, 'suppressed', :detected, 0, :reason)
+                    """), {"id": str(uuid.uuid4()), "wid": watcher_id, "uid": user_id,
+                           "sid": strategy_id, "inst": instrument, "dir": direction,
+                           "entry": entry, "sl": stop, "tp": tp, "bias": bias,
+                           "now": now, "detected": detected_at,
+                           "reason": f"price_truth_drift {_drift*100:.2f}% vs real {_real_now:.2f}"})
+                    await _db.commit()
+            except Exception as _pt_db_e:
+                logger.warning(f"[Signals] price-truth audit row failed: {_pt_db_e}")
             logger.warning(
                 f"[Signals] SUPPRESSED by price-truth: {instrument} {direction} proxy series "
                 f"untrustworthy entry={entry} vs real {_real_now:.2f} drift "
@@ -919,6 +985,10 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
         #     rebase_signal_prices docstring). Done BEFORE the idempotency
         #     key, DB insert, email, push and routing, so every downstream
         #     consumer sees the rebased prices.
+        # Idempotency banding must stay on the strategy-stable (pre-rebase)
+        # prices: the real-vs-proxy offset jitters bar to bar, which would
+        # mint a new dedup key for the same setup on every re-detection.
+        _pre_rebase_prices = (entry, stop, tp)
         if instrument.upper() in FUTURES_TICK:
             _proxy_now = None
             try:
@@ -943,6 +1013,11 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
                 signal.entry_price = entry
                 signal.stop_loss = stop
                 signal.take_profit = tp
+                # Level labels carry strategy-scale prices that now contradict
+                # the rebased numbers — strip the numerals, keep the structure
+                # words (doctrine: labels must be truthful).
+                strat_stop_reason = _strip_scale_prices(strat_stop_reason)
+                strat_target_reason = _strip_scale_prices(strat_target_reason)
                 # Recompute drift on the REBASED entry so the stale-entry
                 # guard below judges the corrected price (residual drift is
                 # now just the level's genuine distance from the market).
@@ -975,7 +1050,8 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
     # tick-banded entry/stop/tp). Two consecutive bars on the same setup
     # produce the SAME key, so the cooldown query below catches the duplicate.
     # The bar_ts is still passed for logging compatibility.
-    idem = make_idempotency_key(watcher_id, strategy_id, instrument, direction, bar_ts, entry, stop, tp)
+    _idem_e, _idem_s, _idem_t = locals().get("_pre_rebase_prices") or (entry, stop, tp)
+    idem = make_idempotency_key(watcher_id, strategy_id, instrument, direction, bar_ts, _idem_e, _idem_s, _idem_t)
     cooldown_min = int(_os.environ.get("SIGNAL_DUP_COOLDOWN_MIN", "15"))
 
     async with async_session_factory() as db:

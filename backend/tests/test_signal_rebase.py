@@ -158,7 +158,7 @@ def test_rebased_prices_flow_downstream(monkeypatch):
     _patch_gates(monkeypatch)
     log = []
     monkeypatch.setattr(rn, "async_session_factory", _fake_session_factory(log))
-    monkeypatch.setattr(rn, "_latest_real_close", lambda inst: 29698.75)
+    monkeypatch.setattr(rn, "_fresh_real_close", lambda inst: 29698.75)
     sig = _judas_signal()
 
     asyncio.run(_emit(sig))
@@ -174,17 +174,25 @@ def test_rebased_prices_flow_downstream(monkeypatch):
 
 
 def test_over_one_percent_drift_hard_suppresses(monkeypatch):
-    """Proxy series untrustworthy (>1% off real): nothing persisted, sent,
-    or routed."""
+    """Proxy series untrustworthy (>1% off real): signal is NOT sent or
+    routed, prices are NOT mutated, and exactly ONE audit row
+    (status=suppressed, outcome_reason=price_truth_drift...) is written so
+    the suppression is visible in the DB, not just container logs."""
     _patch_gates(monkeypatch)
-    monkeypatch.setattr(rn, "async_session_factory", _forbidden_session_factory())
+    log = []
+    monkeypatch.setattr(rn, "async_session_factory", _fake_session_factory(log))
     # real 29200 vs entry 29770.37 -> drift 1.95%
-    monkeypatch.setattr(rn, "_latest_real_close", lambda inst: 29200.00)
+    monkeypatch.setattr(rn, "_fresh_real_close", lambda inst: 29200.00)
     sig = _judas_signal()
 
-    asyncio.run(_emit(sig))  # returns without touching the forbidden factory
+    asyncio.run(_emit(sig))
 
-    # untouched — suppressed before any rebase/mutation
+    inserts = [(q, p) for q, p in log if "INSERT INTO account_signals" in q]
+    assert len(inserts) == 1, "hard-suppress must write exactly one audit row"
+    _q, params = inserts[0]
+    assert "suppressed" in _q
+    assert str(params.get("reason", "")).startswith("price_truth_drift")
+    # prices untouched — suppressed before any rebase/mutation
     assert sig.entry_price == 29770.37
 
 
@@ -193,7 +201,7 @@ def test_no_real_price_unchanged_passthrough(monkeypatch):
     _patch_gates(monkeypatch)
     log = []
     monkeypatch.setattr(rn, "async_session_factory", _fake_session_factory(log))
-    monkeypatch.setattr(rn, "_latest_real_close", lambda inst: None)
+    monkeypatch.setattr(rn, "_fresh_real_close", lambda inst: None)
     sig = _judas_signal()
 
     asyncio.run(_emit(sig))
@@ -212,7 +220,7 @@ def test_proxy_now_from_chart_candles_used_as_base(monkeypatch):
     _patch_gates(monkeypatch)
     log = []
     monkeypatch.setattr(rn, "async_session_factory", _fake_session_factory(log))
-    monkeypatch.setattr(rn, "_latest_real_close", lambda inst: 29700.00)
+    monkeypatch.setattr(rn, "_fresh_real_close", lambda inst: 29700.00)
     # proxy current close 29760.00 -> offset -60.00
     meta = {"chart_candles": [{"t": "2026-07-13T14:45:00+00:00",
                                "o": 29765.0, "h": 29775.0, "l": 29755.0,
