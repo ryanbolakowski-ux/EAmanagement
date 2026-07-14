@@ -859,6 +859,19 @@ async def _fast_theta_loop():
             return
         except Exception as _e:
             logger.warning(f"[ThetaScanner-fast] check failed: {_e}")
+        # ── IGNITION SHADOW (2026-07-14, owner approved — SHADOW ONLY) ──
+        # Hooked into THIS fast loop (60s cadence) because the main scheduler
+        # loop can stretch ~90 min and would miss the 09:30:20-09:36 ET
+        # window. maybe_spawn_ignition_shadow() is a cheap sync check that
+        # spawns the daily run on its OWN asyncio task (env gate
+        # IGNITION_SHADOW_ENABLED, redis latch theta:ignition:done:{date}),
+        # so it can never delay the morning Theta pick below. No emails, no
+        # orders, no routing — shadow rows in email_signals_history only.
+        try:
+            from app.engines.options.ignition_shadow import maybe_spawn_ignition_shadow
+            maybe_spawn_ignition_shadow()
+        except Exception as _ige:
+            logger.warning(f"[ignition-shadow] spawn check failed: {_ige}")
         await _aio.sleep(60)
 
 
