@@ -82,6 +82,17 @@ function buildFactors(d: Partial<DailyBias>): string[] {
   return lines
 }
 
+const etFromIso = (iso: string): string | null => {
+  try {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return null
+    return d.toLocaleTimeString('en-US', {
+      hour12: false, hour: '2-digit', minute: '2-digit',
+      timeZone: 'America/New_York',
+    }) + ' ET'
+  } catch { return null }
+}
+
 const etNow = (): string =>
   new Date().toLocaleTimeString('en-US', {
     timeZone: 'America/New_York', hour12: false,
@@ -101,6 +112,10 @@ export default function BiasLock({ data, className = '' }: BiasLockProps) {
   const lastLockedRef = useRef<DailyBias['bias'] | null>(null)
   const timersRef = useRef<number[]>([])
 
+  // The engine's own timestamp — the honest "as of" for the lock stamp
+  // (the client render clock would imply the ENGINE decided at page load).
+  const lockStamp = () => (data?.as_of ? etFromIso(data.as_of) : null)
+
   useEffect(() => {
     if (!bias) return
     if (lastLockedRef.current === bias) return // same value → no replay
@@ -112,7 +127,7 @@ export default function BiasLock({ data, className = '' }: BiasLockProps) {
 
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       setPhase('locked')
-      setLockedAt(etNow())
+      setLockedAt(lockStamp())
       return
     }
 
@@ -126,15 +141,21 @@ export default function BiasLock({ data, className = '' }: BiasLockProps) {
     }
     timersRef.current.push(window.setTimeout(() => {
       setPhase('locked')
-      setLockedAt(etNow())
+      setLockedAt(lockStamp())
     }, SEQ_LEAD_MS + n * LINE_STEP_MS + STAMP_LAG_MS)) // 6 factors ≈ 2.5s
+    // Cleanup belongs to THIS effect (StrictMode dev double-invoke runs
+    // mount→cleanup→mount: a separate unmount-only cleanup cancelled the
+    // timers while the ref guard blocked rescheduling — animation deadlock).
+    // Resetting the ref lets the re-run schedule a fresh sequence.
+    return () => {
+      timersRef.current.forEach(t => window.clearTimeout(t))
+      timersRef.current = []
+      lastLockedRef.current = null
+    }
     // Re-run only on a bias flip — factor levels updating under the same
     // bias must NOT replay the sequence.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bias])
-
-  // Unmount: drop pending timers.
-  useEffect(() => () => { timersRef.current.forEach(t => window.clearTimeout(t)) }, [])
 
   if (!data || !bias) {
     return (
