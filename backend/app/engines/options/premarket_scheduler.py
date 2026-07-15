@@ -856,6 +856,19 @@ async def _fast_theta_loop():
     logger.info("[ThetaScanner-fast] dedicated pick loop started")
     while True:
         try:
+            # Premarket Watch rides the 60s fast loop — the main loop can
+            # stretch past the 08:45-09:25 window (verify round 2026-07-15).
+            try:
+                await _check_and_run_premarket_watch()
+            except Exception as _pw_e:
+                logger.warning(f"[premarket-watch] hook error: {_pw_e}")
+            # Pending-entry gate ALSO rides the fast loop: the main loop starved
+            # BABA's queued entry for >1h on 2026-07-15 (tick never ran before the
+            # 10:30 MOO close). Entries are time-critical; 60s cadence or bust.
+            try:
+                await _check_pending_stock_entries()
+            except Exception as _pe_e:
+                logger.warning(f"[stock-entry] fast-loop tick error: {_pe_e}")
             await _check_and_run_theta_scanner()
         except _aio.CancelledError:
             logger.info("[ThetaScanner-fast] loop cancelled")
@@ -971,7 +984,6 @@ async def start_premarket_scheduler():
             # pattern as the shadow hooks below: can never touch the scan loop.
             try:
                 from app.engines.options.premarket_watch import (
-                    _check_and_run_premarket_watch,
                 )
                 await _check_and_run_premarket_watch()
             except Exception as _pwe:
@@ -1854,6 +1866,13 @@ _pick_executed_today: set = set()
 _MOO_LATE_CUTOFF_MIN = 10 * 60 + 30  # 10:30 ET, minutes since midnight
 
 
+def _entry_expiry_enabled() -> bool:
+    """ENTRY-EXPIRY kill switch (default ON). The 10:30 MOO expiry + skip
+    email change live entry-path behavior; this is the rollback lever."""
+    import os as _os_ee
+    return _os_ee.environ.get("ENTRY_EXPIRY_ENABLED", "1") == "1"
+
+
 def _pending_entry_expired(now_et_min: int, queued_et_min: Optional[int] = None) -> bool:
     """Pure cutoff rule: a queued stock entry that has NOT fired by the time
     `now_et_min` is past 10:30 ET is expired. `queued_et_min` is accepted for
@@ -2281,7 +2300,8 @@ async def _execute_stock_pick_with_timing_gate(pending_entry: dict) -> bool:
     # cancelled, never fired late. Without this, AMDL (queued 9:34, deferred by
     # the CPI/Fed-testimony blackouts) would have fired hours after the open —
     # the SPRC failure mode.
-    if await _maybe_expire_pending_entry(pending_entry, now_et):
+    if _entry_expiry_enabled():
+        if await _maybe_expire_pending_entry(pending_entry, now_et):
         return False
 
     # Window classification
@@ -2549,7 +2569,7 @@ async def _check_pending_stock_entries():
     """Scheduler-tick: iterate Redis pending entries and run the timing
     gate on each. Called every 5-min cycle by start_premarket_scheduler.
 
-    Time-window guard: outside 08:30-10:00 ET we skip the scan — the gate
+    Time-window guard: the sweep runs 08:00-16:00 ET (post-10:30 passes only expire stale entries — see ENTRY_EXPIRY) — the gate
     can't do anything useful and we don't want unnecessary Polygon calls."""
     from datetime import datetime as _dt, timezone as _tz
     try:

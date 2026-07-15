@@ -42,6 +42,8 @@ API budget per morning: 1 news + 3 movers + <=60 quote-short
 """
 from __future__ import annotations
 
+import html
+
 import asyncio
 import json
 import os
@@ -99,12 +101,12 @@ def _get_redis():
                                  decode_responses=True)
 
 
-def _send_email(to: str, subject: str, html: str) -> bool:
+async def _send_email(to: str, subject: str, html: str) -> bool:
     """One tracked send. Subject contains 'Saro' -> passes the kill-switch
     whitelist. Tests MUST monkeypatch this (no real emails, ever)."""
     from app.services.email import _send_tracked
     try:
-        return bool((_send_tracked(to, subject, html) or {}).get("sent"))
+        return bool((await asyncio.to_thread(_send_tracked, to, subject, html) or {}).get("sent"))
     except Exception as e:
         logger.error(f"[premarket-watch] send to {to} failed ({type(e).__name__}: {e})")
         return False
@@ -392,7 +394,7 @@ def _build_email_html(date_str: str, rows: list) -> str:
         f"<td style='padding:8px;text-align:right;font-weight:700;"
         f"color:{'#16a34a' if float(c['gap_pct']) >= 0 else '#dc2626'};'>{c['gap_pct']:+.1f}%</td>"
         f"<td style='padding:8px;text-align:right;color:#64748b;'>${c['prev_close']:.2f}</td>"
-        f"<td style='padding:8px;color:#475569;font-size:12px;'>{c['catalyst']}</td>"
+        f"<td style='padding:8px;color:#475569;font-size:12px;'>{html.escape(str(c['catalyst']))}</td>"
         "</tr>"
         for c in rows)
     return f"""<div style="font-family:-apple-system,sans-serif;max-width:640px;margin:0 auto;padding:24px;color:#0f172a;">
@@ -432,7 +434,7 @@ async def run_premarket_watch(today_et: str) -> int:
     sent = 0
     for email in await _subscriber_emails():
         try:
-            if _send_email(email, subject, html):
+            if await _send_email(email, subject, html):
                 sent += 1
         except Exception as e:
             logger.error(f"[premarket-watch] emit to {email} failed "
