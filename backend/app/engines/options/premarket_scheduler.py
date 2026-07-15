@@ -859,6 +859,7 @@ async def _fast_theta_loop():
             # Premarket Watch rides the 60s fast loop — the main loop can
             # stretch past the 08:45-09:25 window (verify round 2026-07-15).
             try:
+                from app.engines.options.premarket_watch import _check_and_run_premarket_watch
                 await _check_and_run_premarket_watch()
             except Exception as _pw_e:
                 logger.warning(f"[premarket-watch] hook error: {_pw_e}")
@@ -982,12 +983,7 @@ async def start_premarket_scheduler():
             # (theta:ignition:candidates:{ET-date}). Own Redis SETNX latch
             # (theta:premarket_watch:{ET-date}) + try/except — same isolation
             # pattern as the shadow hooks below: can never touch the scan loop.
-            try:
-                from app.engines.options.premarket_watch import (
-                )
-                await _check_and_run_premarket_watch()
-            except Exception as _pwe:
-                logger.warning(f"[premarket-watch] check failed: {_pwe}")
+            # (Premarket Watch hook moved to the 60s fast loop — 2026-07-15.)
 
             # ── Daily SHADOW multi-strategy scan (P2) — persist-only, no emit/
             # trade. Starts forward-test stats for watch-only templates. Fully
@@ -2302,7 +2298,7 @@ async def _execute_stock_pick_with_timing_gate(pending_entry: dict) -> bool:
     # the SPRC failure mode.
     if _entry_expiry_enabled():
         if await _maybe_expire_pending_entry(pending_entry, now_et):
-        return False
+            return False
 
     # Window classification
     if now_et_min < (8 * 60 + 30):
