@@ -262,8 +262,10 @@ def _wire_run(monkeypatch, *, quotes, prev_map, edgar=None, news=None,
     monkeypatch.setattr(pw, "_pace", fake_pace)
     monkeypatch.setattr(pw, "_subscriber_emails", fake_subs)
     monkeypatch.setattr(pw, "_get_redis", lambda: r)
-    monkeypatch.setattr(pw, "_send_email",
-                        lambda to, subject, html: sent.append((to, subject, html)) or True)
+    async def _fake_send(to, subject, html):
+        sent.append((to, subject, html))
+        return True
+    monkeypatch.setattr(pw, "_send_email", _fake_send)
     return r, sent
 
 
