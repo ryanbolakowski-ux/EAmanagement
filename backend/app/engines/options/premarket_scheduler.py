@@ -696,7 +696,7 @@ async def _emit_premarket_batch(strategy, user, hits: list, expires_in: int):
     # Bug #21 fix: schedule per-strategy delayed auto-execute using
     # this strategy's own auto_execute_delay_min, not the global default.
     _delay_min = int(getattr(strategy, "auto_execute_delay_min", 15) or 15)
-    asyncio.create_task(_delayed_auto_execute_for_strategy(str(strategy.id), _delay_min * 60))
+    _retain(asyncio.create_task(_delayed_auto_execute_for_strategy(str(strategy.id), _delay_min * 60)))
 
 
 # ── Scan dispatch ───────────────────────────────────────────────────────────
@@ -846,6 +846,43 @@ async def _run_auto_execute_pass():
 
 # ── Main scheduler ──────────────────────────────────────────────────────────
 
+# GC-PROOF TASK RETENTION (2026-07-16): asyncio only weak-refs tasks; every
+# fire-and-forget create_task in this module retains through this set.
+_RETAINED_TASKS: set = set()
+
+
+def _retain(task):
+    _RETAINED_TASKS.add(task)
+    task.add_done_callback(_RETAINED_TASKS.discard)
+    return task
+
+
+def _spawn_fast_theta_loop():
+    """Spawn the fast loop GC-proof + self-resurrecting: if it ever ends for
+    any reason other than cancellation, log LOUDLY and respawn in 5s. The
+    2026-07-16 no-pick morning traced to this task being silently
+    garbage-collected the previous afternoon."""
+    import asyncio as _aio
+
+    task = _aio.create_task(_fast_theta_loop())
+
+    def _on_done(t):
+        _RETAINED_TASKS.discard(t)
+        if t.cancelled():
+            logger.info("[ThetaScanner-fast] loop cancelled — not respawning")
+            return
+        exc = t.exception()
+        logger.error(f"[ThetaScanner-fast] LOOP DIED ({exc!r}) — respawning in 5s")
+        try:
+            _aio.get_event_loop().call_later(5, _spawn_fast_theta_loop)
+        except Exception as _re:
+            logger.error(f"[ThetaScanner-fast] respawn scheduling failed: {_re}")
+
+    _RETAINED_TASKS.add(task)
+    task.add_done_callback(_on_done)
+    return task
+
+
 async def _fast_theta_loop():
     """CADENCE-FIX-2026-06-30: dedicated tight-cadence loop for the time-critical
     morning Theta pick, decoupled from the heavy per-user _run_scan_cycle + shadow
@@ -917,7 +954,7 @@ async def start_premarket_scheduler():
     # CADENCE-FIX-2026-06-30: run the morning pick on its own fast task so it is
     # NOT gated behind the ~90-min shadow scan + per-user _run_scan_cycle below.
     # (The in-loop _check_and_run_theta_scanner call is kept as an idempotent backstop.)
-    asyncio.create_task(_fast_theta_loop())
+    _spawn_fast_theta_loop()
 
     while True:
         try:
@@ -964,7 +1001,7 @@ async def start_premarket_scheduler():
                 await _run_scan_cycle(is_premarket=True)
                 premarket_fired_today.add(premarket_key)
                 # Auto-execute pass at 08:30 + auto_execute_delay_min (default 15)
-                asyncio.create_task(_delayed_auto_execute(int(getattr(__import__("app.config", fromlist=["settings"]).settings, "PREMARKET_AUTO_EXECUTE_DELAY_SEC", 15 * 60))))
+                _retain(asyncio.create_task(_delayed_auto_execute(int(getattr(__import__("app.config", fromlist=["settings"]).settings, "PREMARKET_AUTO_EXECUTE_DELAY_SEC", 15 * 60)))))
 
             # Theta Scanner morning pick (tiered threshold 6:00-9:50 ET).
             # This was previously ONLY invoked from the except block — bug.
@@ -1147,7 +1184,7 @@ async def _start_theta_pick_paper_session(db, user_id, strategy_id, ticker, pick
         await db.refresh(sess)
         from app.engines.options.options_paper_runner import start_options_paper_session as _start
         import asyncio
-        asyncio.create_task(_start(str(sess.id), str(strategy_id), str(user_id), ticker))
+        _retain(asyncio.create_task(_start(str(sess.id), str(strategy_id), str(user_id), ticker)))
         logger.info(f"[OptionsPaper-Theta] auto-started session={sess.id} user={user_id} "
                     f"ticker={ticker} score={pick.get('score')} entry={pick.get('entry')}")
         return True
