@@ -39,6 +39,16 @@ type Props = {
 }
 
 // ── colors (TradingView defaults) ────────────────────────────────────────────
+// Per-instrument price steps — RTY ticks 0.10, YM 1.00; a wrong minMove makes
+// lightweight-charts quantize every axis/crosshair/price-line label onto the
+// wrong grid (e.g. RTY 2245.10 rendered as 2245.00).
+const PRICE_FORMAT: Record<string, { precision: number; minMove: number }> = {
+  ES: { precision: 2, minMove: 0.25 },
+  NQ: { precision: 2, minMove: 0.25 },
+  YM: { precision: 0, minMove: 1 },
+  RTY: { precision: 1, minMove: 0.1 },
+}
+
 const UP = '#26a69a'
 const DOWN = '#ef5350'
 const VOL_UP = 'rgba(38, 166, 154, 0.45)'
@@ -143,7 +153,7 @@ export default function TVReplayChart({
   const priceLinesRef = useRef<IPriceLine[]>([])
   // What is currently rendered: series identity + bucket count, so reveals go
   // through series.update() and only hard resets call setData().
-  const renderedRef = useRef<{ key: string; count: number }>({ key: '', count: 0 })
+  const renderedRef = useRef<{ key: string; count: number; vol: boolean }>({ key: '', count: 0, vol: false })
   const lastCandleRef = useRef<CandlestickData<UTCTimestamp> | null>(null)
   const isDarkRef = useRef(document.documentElement.classList.contains('dark'))
   // Mount-scope closures (crosshair handler, theme observer) read live props
@@ -225,7 +235,7 @@ export default function TVReplayChart({
     const candle = chart.addCandlestickSeries({
       upColor: UP, downColor: DOWN, wickUpColor: UP, wickDownColor: DOWN,
       borderVisible: false,
-      priceFormat: { type: 'price', precision: 2, minMove: 0.25 },
+      priceFormat: { type: 'price', ...(PRICE_FORMAT[instrument] ?? { precision: 2, minMove: 0.25 }) },
     })
     // Keep candles clear of the volume pane at the bottom.
     chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.22 } })
@@ -241,7 +251,7 @@ export default function TVReplayChart({
     chartRef.current = chart
     candleRef.current = candle
     volumeRef.current = volume
-    renderedRef.current = { key: '', count: 0 }
+    renderedRef.current = { key: '', count: 0, vol: false }
 
     // OHLC legend: hovered candle, falling back to the latest bar.
     const onCrosshair = (param: MouseEventParams) => {
@@ -282,7 +292,7 @@ export default function TVReplayChart({
       volumeRef.current = null
       priceLinesRef.current = []
       lastCandleRef.current = null
-      renderedRef.current = { key: '', count: 0 }
+      renderedRef.current = { key: '', count: 0, vol: false }
     }
   }, [])
 
@@ -293,6 +303,9 @@ export default function TVReplayChart({
     chart.applyOptions({
       watermark: watermarkOptionsRef.current(isDarkRef.current),
       localization: { timeFormatter: (time: Time) => fmtShifted(time, liveRef.current.showDate) },
+    })
+    candleRef.current?.applyOptions({
+      priceFormat: { type: 'price', ...(PRICE_FORMAT[instrument] ?? { precision: 2, minMove: 0.25 }) },
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instrument, displayTf, showDate])
@@ -308,14 +321,18 @@ export default function TVReplayChart({
       if (renderedRef.current.key !== key || renderedRef.current.count > 0) {
         candle.setData([])
         volume.setData([])
-        renderedRef.current = { key, count: 0 }
+        renderedRef.current = { key, count: 0, vol: false }
         lastCandleRef.current = null
         setLegend(null)
       }
       return
     }
     const { candles, vols } = resample(bars, displayTf)
-    const hasVolume = bars.some((b) => (b.volume ?? 0) > 0)
+    // Prod candle_cache volume is sparse on some days (4-24% of 1m bars have
+    // any) — a few isolated spikes over a blank band reads as broken, so only
+    // show the pane when a meaningful share of revealed bars carry volume.
+    const nonzero = bars.reduce((n, b) => n + ((b.volume ?? 0) > 0 ? 1 : 0), 0)
+    const hasVolume = bars.length > 0 && nonzero / bars.length >= 0.3
     const prev = renderedRef.current
     if (prev.key !== key || candles.length < prev.count) {
       // New day / TF switch / rewind: full redraw, then snap to the right edge.
@@ -325,12 +342,13 @@ export default function TVReplayChart({
     } else {
       // Reveal path: update the in-progress bucket + append completed ones.
       // Same-time update replaces the forming candle — TradingView tick behavior.
+      if (hasVolume !== prev.vol) volume.setData(hasVolume ? vols : []) // threshold crossed: backfill/clear in one shot
       for (let i = Math.max(0, prev.count - 1); i < candles.length; i++) {
         candle.update(candles[i])
-        if (hasVolume) volume.update(vols[i])
+        if (hasVolume && prev.vol) volume.update(vols[i])
       }
     }
-    renderedRef.current = { key, count: candles.length }
+    renderedRef.current = { key, count: candles.length, vol: hasVolume }
     lastCandleRef.current = candles[candles.length - 1] ?? null
     setLegend(lastCandleRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
