@@ -583,7 +583,9 @@ export type ReplayMeta = {
 export type ReplayDay = {
   instrument: string
   date: string  // YYYY-MM-DD
-  candles: { time: number; open: number; high: number; low: number; close: number }[]
+  // volume is optional: the wire bars carry v and the TradingView replay chart
+  // shows a volume pane when it's present.
+  candles: { time: number; open: number; high: number; low: number; close: number; volume?: number }[]
   pdh?: number | null
   pdl?: number | null
 }
@@ -594,7 +596,7 @@ export type ReplayDay = {
 const adaptReplayDay = (d: any): ReplayDay => ({
   instrument: d?.instrument,
   date: d?.date,
-  candles: (d?.bars ?? []).map((b: any) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c })),
+  candles: (d?.bars ?? []).map((b: any) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v })),
   pdh: d?.levels?.pdh ?? null,
   pdl: d?.levels?.pdl ?? null,
 })

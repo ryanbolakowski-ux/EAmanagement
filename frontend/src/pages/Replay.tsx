@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Play, Pause, StepForward, Shuffle, Rewind, Download,
+  Play, Pause, StepForward, FastForward, Shuffle, Rewind, Download,
   TrendingUp, TrendingDown, X, AlertTriangle, CalendarOff, Loader2, EyeOff,
 } from 'lucide-react'
 import { replayApi, type ReplayDay, type ReplayMeta } from '../api/endpoints'
-import CandlestickChart from '../components/CandlestickChart'
+import TVReplayChart from '../components/TVReplayChart'
 import {
-  POINT_VALUES, aggregateBars, checkExit, closePosition, openPosition,
+  POINT_VALUES, checkExit, closePosition, openPosition,
   sessionStats, unrealized,
   type ClosedTrade, type Direction, type OpenPosition, type SimBar,
 } from '../lib/replaySim'
 
 const INSTRUMENTS = ['ES', 'NQ', 'YM', 'RTY']
-const SPEEDS = [1, 2, 5, 10, 30]
+// Playback speed in bars per second (FX-Replay style).
+const SPEEDS = [1, 2, 4, 10]
+// Chart-only display timeframes; the sim ALWAYS steps raw 1m bars.
+const TIMEFRAMES = [1, 5, 15, 60] as const
+const tfLabel = (t: number) => (t === 60 ? '1h' : `${t}m`)
 const LOG_KEY = 'theta_replay_log'
 // How many bars are pre-revealed when a day loads, so the trader has context
 // instead of a single candle.
@@ -99,7 +103,7 @@ export default function Replay() {
   const [revealed, setRevealed] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
-  const [tf, setTf] = useState<1 | 5 | 15>(1)
+  const [tf, setTf] = useState<1 | 5 | 15 | 60>(1)
   const [done, setDone] = useState(false)
 
   // Order ticket
@@ -225,38 +229,43 @@ export default function Replay() {
     setDone(true)
   }
 
-  const step = () => {
+  // Advance n 1m bars in one shot. A single function (vs calling step() n
+  // times) because synchronous repeat calls would all read the same stale
+  // `revealed`/`pos` state from this render.
+  const advance = (n = 1) => {
     if (!day || done) return
     if (revealed >= bars.length) {
       endSession()
       return
     }
-    const bar = bars[revealed] // the bar about to be revealed
     let curPos = pos // local mirror — state won't update mid-function
-    if (curPos) {
+    const stop = Math.min(bars.length, revealed + Math.max(1, n))
+    for (let i = revealed; i < stop; i++) {
+      const bar = bars[i] // the bar being revealed
+      if (!curPos) continue
       const ex = checkExit(curPos, bar) // stop checked before target (conservative)
       if (ex) {
         recordTrade(closePosition(curPos, ex.price, bar.time, ex.reason, pointValue))
-        setPos(null)
         curPos = null
       }
     }
-    const next = revealed + 1
-    setRevealed(next)
-    if (next >= bars.length) {
+    setPos(curPos)
+    setRevealed(stop)
+    if (stop >= bars.length) {
       // Day is fully revealed: close out and show the summary.
       setPlaying(false)
       setDone(true)
       if (curPos) {
-        recordTrade(closePosition(curPos, bar.close, bar.time, 'session_end', pointValue))
+        const last = bars[bars.length - 1]
+        recordTrade(closePosition(curPos, last.close, last.time, 'session_end', pointValue))
         setPos(null)
       }
     }
   }
-  // The interval must always call the LATEST step (fresh state), so route it
-  // through a ref that's reassigned every render.
-  const stepRef = useRef(step)
-  stepRef.current = step
+  // The interval must always call the LATEST advance (fresh state), so route
+  // it through a ref that's reassigned every render.
+  const stepRef = useRef(advance)
+  stepRef.current = advance
 
   useEffect(() => {
     if (!playing) return
@@ -283,73 +292,8 @@ export default function Replay() {
     setPos(null)
   }
 
-  // ── overlays: PDH/PDL, London range, NY open (revealed bars only) ─────────
-
-  const etMinutes = useMemo(() => {
-    return bars.map((c) => {
-      const [h, m] = ET_TIME_FMT.format(new Date(c.time * 1000)).split(':').map(Number)
-      return ((h % 24) * 60) + m
-    })
-  }, [bars])
-
-  const london = useMemo(() => {
-    // London session range, 03:00–08:30 ET, built from revealed bars only so
-    // the band grows as the session plays out.
-    let hi = -Infinity, lo = Infinity
-    for (let i = 0; i < revealed && i < etMinutes.length; i++) {
-      const m = etMinutes[i]
-      if (m >= 180 && m < 510) {
-        if (bars[i].high > hi) hi = bars[i].high
-        if (bars[i].low < lo) lo = bars[i].low
-      }
-    }
-    return hi > -Infinity ? { hi, lo } : null
-  }, [bars, etMinutes, revealed])
-
-  const nyOpenTime = useMemo(() => {
-    for (let i = 0; i < revealed && i < etMinutes.length; i++) {
-      if (etMinutes[i] >= 570) return bars[i].time // first bar at/after 09:30 ET
-    }
-    return null
-  }, [bars, etMinutes, revealed])
-
-  const hlines = useMemo(() => {
-    const out: { price: number; label?: string; color?: string; dash?: number[] }[] = []
-    if (day?.pdh != null) out.push({ price: day.pdh, label: 'PDH', color: '#f59e0b', dash: [6, 4] })
-    if (day?.pdl != null) out.push({ price: day.pdl, label: 'PDL', color: '#38bdf8', dash: [6, 4] })
-    if (pos) {
-      out.push({ price: pos.stopPrice, label: 'SL', color: '#ef4444', dash: [3, 3] })
-      out.push({ price: pos.targetPrice, label: 'TP', color: '#22c55e', dash: [3, 3] })
-    }
-    return out
-  }, [day, pos])
-
-  const bands = useMemo(
-    () => (london ? [{ from: london.lo, to: london.hi, color: 'rgba(139,92,246,0.10)' }] : []),
-    [london],
-  )
-  const vlines = useMemo(
-    () => (nyOpenTime != null ? [{ time: nyOpenTime, label: 'NY open', color: '#a78bfa' }] : []),
-    [nyOpenTime],
-  )
-
-  // View timeframe: client-side aggregation of REVEALED bars only.
-  const viewBars = useMemo(() => aggregateBars(revealedBars, tf), [revealedBars, tf])
-
-  const markers = useMemo(() => {
-    const out: { time: number; type: 'entry' | 'exit'; direction: string; price: number; is_winner: boolean }[] = []
-    for (const t of closed) {
-      out.push({ time: t.entryTime, type: 'entry', direction: t.direction, price: t.entryPrice, is_winner: t.dollars > 0 })
-      out.push({ time: t.exitTime, type: 'exit', direction: t.direction, price: t.exitPrice, is_winner: t.dollars > 0 })
-    }
-    if (pos && lastBar) {
-      out.push({
-        time: pos.entryTime, type: 'entry', direction: pos.direction, price: pos.entryPrice,
-        is_winner: unrealized(pos, lastBar.close, pointValue).dollars >= 0,
-      })
-    }
-    return out
-  }, [closed, pos, lastBar, pointValue])
+  // Chart overlays (PDH/PDL, entry/SL/TP price lines, trade markers) are all
+  // rendered inside TVReplayChart from day/pos/closed props.
 
   const stats = sessionStats(closed)
   const uPnl = pos && lastBar ? unrealized(pos, lastBar.close, pointValue) : null
@@ -386,7 +330,7 @@ export default function Replay() {
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-4 sm:p-8 max-w-6xl">
+    <div className="p-4 sm:p-8 max-w-screen-2xl">
       {/* HERO */}
       <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950 dark:from-slate-950 dark:via-slate-950 dark:to-violet-950 text-white p-6 md:p-8 shadow-xl mb-6">
         <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -427,45 +371,6 @@ export default function Replay() {
               <EyeOff size={12}/> Blind mode — date revealed at session end
             </span>
           )}
-          <div className="flex items-end gap-2">
-            <button onClick={() => setPlaying((p) => !p)} disabled={!day || done}
-              className="inline-flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-sm font-bold transition-colors">
-              {playing ? <Pause size={14}/> : <Play size={14}/>}
-              {playing ? 'Pause' : 'Play'}
-            </button>
-            <button onClick={() => stepRef.current()} disabled={!day || done || playing}
-              className="inline-flex items-center gap-1.5 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors">
-              <StepForward size={14}/> Step
-            </button>
-          </div>
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">Speed</span>
-            <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}
-              className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm px-2 py-1.5">
-              {SPEEDS.map((s) => <option key={s} value={s}>{s}x</option>)}
-            </select>
-          </label>
-          <div className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">View</span>
-            <div className="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700">
-              {([1, 5, 15] as const).map((t) => (
-                <button key={t} onClick={() => setTf(t)}
-                  className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${tf === t ? 'bg-white dark:bg-slate-700 text-violet-700 dark:text-violet-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'}`}>
-                  {t}m
-                </button>
-              ))}
-            </div>
-          </div>
-          {lastBar && (
-            <div className="ml-auto text-right">
-              <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">
-                {dateHidden ? 'Hidden day' : date} · {etClock(lastBar.time)}
-              </div>
-              <div className="text-sm font-extrabold text-slate-800 dark:text-slate-100">
-                {lastBar.close.toFixed(2)} <span className="text-[10px] font-semibold text-slate-400">({progressPct}% of day)</span>
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
@@ -497,23 +402,66 @@ export default function Replay() {
         </div>
       )}
       {day && (
-        <div className="mb-4">
-          <CandlestickChart
-            candles={viewBars}
-            markers={markers}
-            hlines={hlines}
-            vlines={vlines}
-            bands={bands}
-            windowMode="tail"
-            maxBars={tf === 1 ? 180 : 200}
-            height={420}
-          />
-        </div>
-      )}
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4 mb-4 items-start">
+          {/* CHART CARD — FX-Replay style: TradingView chart + attached replay toolbar */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-white dark:bg-[#131722]">
+            <div className="flex flex-wrap items-center gap-2 px-2.5 py-2 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900">
+              {/* timeframe chips (chart-only; sim still steps 1m) */}
+              <div className="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700">
+                {TIMEFRAMES.map((t) => (
+                  <button key={t} onClick={() => setTf(t)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${tf === t ? 'bg-white dark:bg-slate-700 text-violet-700 dark:text-violet-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'}`}>
+                    {tfLabel(t)}
+                  </button>
+                ))}
+              </div>
+              <div className="h-5 w-px bg-slate-200 dark:bg-slate-700"/>
+              <button onClick={() => setPlaying((p) => !p)} disabled={done}
+                className="inline-flex items-center gap-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                {playing ? <Pause size={13}/> : <Play size={13}/>}
+                {playing ? 'Pause' : 'Play'}
+              </button>
+              <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))} title="Bars per second"
+                className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-bold px-1.5 py-1.5">
+                {SPEEDS.map((s) => <option key={s} value={s}>{s}x</option>)}
+              </select>
+              <button onClick={() => stepRef.current(1)} disabled={done || playing} title="Step 1 bar"
+                className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                <StepForward size={13}/> +1
+              </button>
+              <button onClick={() => stepRef.current(10)} disabled={done || playing} title="Step 10 bars"
+                className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                <FastForward size={13}/> +10
+              </button>
+              {lastBar && (
+                <div className="ml-auto text-right leading-tight">
+                  <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">
+                    {dateHidden ? 'Hidden day' : date} · {etClock(lastBar.time)}
+                  </div>
+                  <div className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                    {lastBar.close.toFixed(2)} <span className="text-[10px] font-semibold text-slate-400">({progressPct}% of day)</span>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="h-[380px] md:h-[62vh] md:max-h-[620px]">
+              <TVReplayChart
+                instrument={activeInstrument}
+                bars={revealedBars}
+                displayTf={tf}
+                resetKey={sessionIdRef.current}
+                showDate={!dateHidden}
+                pdh={day.pdh}
+                pdl={day.pdl}
+                position={pos}
+                trades={closed}
+              />
+            </div>
+          </div>
 
-      {/* ORDER TICKET + POSITION */}
-      {day && !done && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+          {/* TRADE PANEL — right column on xl, stacked below the chart otherwise */}
+          <div className="flex flex-col gap-4 min-w-0">
+            {!done && (
           <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700">
             <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500 mb-3">Order ticket · fills at current close</div>
             <div className="flex flex-wrap items-end gap-3">
@@ -554,7 +502,9 @@ export default function Replay() {
               {activeInstrument} point value ${pointValue}/contract · one position at a time
             </div>
           </div>
+            )}
 
+            {!done && (
           <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700">
             <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500 mb-3">Open position</div>
             {pos && uPnl ? (
@@ -578,18 +528,18 @@ export default function Replay() {
               <div className="text-xs text-slate-400 dark:text-slate-500">Flat — place an order to open a position.</div>
             )}
           </div>
-        </div>
-      )}
+            )}
 
-      {/* SESSION STATS */}
-      {day && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+            {/* SESSION STATS */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-2 gap-3">
           <Stat label="Trades" value={String(stats.trades)} tone={stats.trades === 0 ? 'muted' : undefined}/>
           <Stat label="W / L" value={stats.trades === 0 ? '—' : `${stats.wins} / ${stats.losses}`} tone={stats.trades === 0 ? 'muted' : undefined}/>
           <Stat label="Win rate" value={stats.winRate == null ? '—' : `${stats.winRate.toFixed(0)}%`} tone={stats.winRate == null ? 'muted' : stats.winRate >= 50 ? 'pos' : undefined}/>
           <Stat label="Total R" value={stats.trades === 0 ? '—' : fmtR(stats.totalR)} tone={stats.trades === 0 ? 'muted' : stats.totalR >= 0 ? 'pos' : 'neg'}/>
           <Stat label="Total $" value={stats.trades === 0 ? '—' : fmtUsd(stats.totalDollars)} tone={stats.trades === 0 ? 'muted' : stats.totalDollars >= 0 ? 'pos' : 'neg'}/>
           <Stat label="Avg R" value={stats.avgR == null ? '—' : fmtR(stats.avgR)} tone={stats.avgR == null ? 'muted' : stats.avgR >= 0 ? 'pos' : 'neg'}/>
+            </div>
+          </div>
         </div>
       )}
 
