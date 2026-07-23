@@ -588,6 +588,17 @@ export type ReplayDay = {
   candles: { time: number; open: number; high: number; low: number; close: number; volume?: number }[]
   pdh?: number | null
   pdl?: number | null
+  // Additional ICT levels carried straight from the backend `levels` payload
+  // (all present even with include_overnight=0 — the server computes asia/london
+  // from the full overnight window before slicing bars to RTH). ny_open_ts is
+  // epoch SECONDS of the first bar >= 09:30 ET; the page uses it to advance the
+  // ETH reveal to the NY open.
+  pdc?: number | null
+  asia_high?: number | null
+  asia_low?: number | null
+  london_high?: number | null
+  london_low?: number | null
+  ny_open_ts?: number | null
 }
 
 // The backend speaks per-instrument /meta {first_date,last_date,...} and day
@@ -599,6 +610,12 @@ const adaptReplayDay = (d: any): ReplayDay => ({
   candles: (d?.bars ?? []).map((b: any) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v })),
   pdh: d?.levels?.pdh ?? null,
   pdl: d?.levels?.pdl ?? null,
+  pdc: d?.levels?.pdc ?? null,
+  asia_high: d?.levels?.asia_high ?? null,
+  asia_low: d?.levels?.asia_low ?? null,
+  london_high: d?.levels?.london_high ?? null,
+  london_low: d?.levels?.london_low ?? null,
+  ny_open_ts: d?.levels?.ny_open_ts ?? null,
 })
 
 export const replayApi = {
@@ -608,12 +625,14 @@ export const replayApi = {
     const data: ReplayMeta = { instruments: ['ES', 'NQ', 'YM', 'RTY'], min_date: d.first_date, max_date: d.last_date }
     return { ...res, data }
   },
-  day: async (instrument: string, date: string) => {
-    const res = await api.get<any>('/api/v1/replay/day', { params: { instrument, date, include_overnight: 0 } })
+  // eth=true requests include_overnight=1 (bars 18:00 ET prior day -> 16:00 ET);
+  // default RTH-only (09:30-16:00) behavior is unchanged.
+  day: async (instrument: string, date: string, eth = false) => {
+    const res = await api.get<any>('/api/v1/replay/day', { params: { instrument, date, include_overnight: eth ? 1 : 0 } })
     return { ...res, data: adaptReplayDay(res.data) }
   },
-  random: async (instrument: string) => {
-    const res = await api.get<any>('/api/v1/replay/random', { params: { instrument, include_overnight: 0 } })
+  random: async (instrument: string, eth = false) => {
+    const res = await api.get<any>('/api/v1/replay/random', { params: { instrument, include_overnight: eth ? 1 : 0 } })
     return { ...res, data: adaptReplayDay(res.data) }
   },
 }
