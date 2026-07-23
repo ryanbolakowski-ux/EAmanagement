@@ -565,3 +565,31 @@ export const scannerApi = {
   history: (days: number = 30, assetType: 'options' | 'futures' | 'stocks' | 'all' = 'all') =>
     api.get<ScannerHistory>('/api/v1/scanner/history', { params: { days, asset_type: assetType } }),
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Replay — FX-Replay-style practice trading on historical 1m bars
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/v1/replay/meta — available instruments + the date range with data.
+export type ReplayMeta = {
+  instruments: string[]
+  min_date: string  // YYYY-MM-DD
+  max_date: string  // YYYY-MM-DD
+}
+
+// GET /api/v1/replay/day — one trading day of 1m candles. 404 on holidays /
+// days with no data. pdh/pdl (prior day high/low) are optional: the chart
+// overlays them only when the backend supplies them.
+export type ReplayDay = {
+  instrument: string
+  date: string  // YYYY-MM-DD
+  candles: { time: number; open: number; high: number; low: number; close: number }[]
+  pdh?: number | null
+  pdl?: number | null
+}
+
+export const replayApi = {
+  meta: () => api.get<ReplayMeta>('/api/v1/replay/meta'),
+  day: (instrument: string, date: string) =>
+    api.get<ReplayDay>('/api/v1/replay/day', { params: { instrument, date } }),
+}

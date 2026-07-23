@@ -53,6 +53,7 @@ const OptionsSessionDetail = lazy(() => import('./pages/OptionsSessionDetail'))
 const PendingTrades = lazy(() => import('./pages/PendingTrades'))
 const PendingTradeConfirm = lazy(() => import('./pages/PendingTradeConfirm'))
 const Options = lazy(() => import('./pages/Options'))
+const Replay = lazy(() => import('./pages/Replay'))
 
 // V2 redesign pages are lazy so their chunk (and only theirs) loads on the
 // /v2 routes — V1 users never download it. See pages/v2/ for the screens.
@@ -152,6 +153,7 @@ const _TITLES: Record<string, string> = {
   "/app/backtests": "Backtests - Theta Algos",
   "/app/optimization": "Optimization - Theta Algos",
   "/app/paper": "Paper Trading - Theta Algos",
+  "/app/replay": "Replay - Theta Algos",
   "/app/live": "Live Trading - Theta Algos",
   "/app/email-signals": "Email Signals - Theta Algos",
   "/app/account-signals": "Email Signals - Theta Algos",
@@ -254,6 +256,7 @@ export default function App() {
         <Route path="optimization"  element={<Optimization />} />
         <Route path="paper"             element={<PaperTrading />} />
         <Route path="paper/:id"         element={<PaperSessionDetail />} />
+        <Route path="replay"            element={<Replay />} />
         <Route path="admin"             element={<Admin />} />
         <Route path="live"              element={<LiveTradingV2 />} />
         <Route path="live/classic"      element={<LiveTrading />} />

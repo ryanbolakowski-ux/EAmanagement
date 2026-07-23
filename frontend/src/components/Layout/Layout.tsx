@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Outlet, NavLink, Link, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, TrendingUp, FlaskConical, Sliders,
-  PlayCircle, Zap, LogOut, Shield, BarChart2, BookOpen, Menu, X, Building2, Bell, LineChart, Globe, Sparkles, HelpCircle,
+  PlayCircle, Zap, LogOut, Shield, BarChart2, BookOpen, Menu, X, Building2, Bell, LineChart, Globe, Sparkles, HelpCircle, Rewind,
 } from 'lucide-react'
 import ThetaLogo from '../ThetaLogo'
 import { useAuthStore } from '../../stores/authStore'
@@ -21,7 +21,10 @@ const traderNav: { to: string; icon: any; label: string }[] = [
   { to: '/app/optimization',icon: Sliders,         label: 'Optimization'  },
   { to: '/app/paper',       icon: PlayCircle,      label: 'Paper Trading' },
   { to: '/app/live',        icon: Zap,             label: 'Live Trading'  },
-  { to: '/app/email-signals', icon: Bell, label: 'Email Signals' },]
+  { to: '/app/email-signals', icon: Bell, label: 'Email Signals' },
+  // NOTE: appended at the END on purpose — mobileBottomNav below picks
+  // traderNav by index ([0,1,6,8]), so inserting mid-list would break it.
+  { to: '/app/replay',      icon: Rewind,          label: 'Replay'        },]
 const adminNav: { to: string; icon: any; label: string }[] = [
   { to: '/app/admin',       icon: Shield,          label: 'Admin Dashboard'  },
 ]

@@ -3,13 +3,31 @@ import { useEffect, useRef, useState } from 'react'
 type Candle = { time: number; open: number; high: number; low: number; close: number }
 type Marker = { time: number; type: 'entry' | 'exit'; direction: string; price: number; is_winner: boolean }
 
+// ── Optional overlay types (Replay page) ────────────────────────────────────
+// All default-undefined so existing callers (TradeChartModal, PaperTrading)
+// render byte-identically without passing them.
+export type HLine = { price: number; label?: string; color?: string; dash?: number[] }
+export type VLine = { time: number; label?: string; color?: string }
+export type Band  = { from: number; to: number; color?: string }
+
 interface Props {
   candles: Candle[]
   markers: Marker[]
   height?: number
+  // Horizontal price lines (e.g. PDH/PDL), vertical time lines (e.g. NY open),
+  // shaded horizontal price bands (e.g. London range).
+  hlines?: HLine[]
+  vlines?: VLine[]
+  bands?: Band[]
+  // 'auto' (default): existing behavior — window around trade markers, else
+  // last 200. 'tail': always pin to the most recent `maxBars` candles —
+  // required by Replay where the playhead reveals bars one at a time and
+  // marker-centered windowing would yank the view around.
+  windowMode?: 'auto' | 'tail'
+  maxBars?: number
 }
 
-export default function CandlestickChart({ candles, markers, height = 400 }: Props) {
+export default function CandlestickChart({ candles, markers, height = 400, hlines, vlines, bands, windowMode = 'auto', maxBars }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -52,7 +70,10 @@ export default function CandlestickChart({ candles, markers, height = 400 }: Pro
 
     // Determine visible range: show candles that contain trades with padding
     let startIdx = 0, endIdx = candles.length - 1
-    if (markerIndices.length > 0) {
+    if (windowMode === 'tail') {
+      // Replay mode: always show the most recent maxBars candles.
+      startIdx = Math.max(0, candles.length - (maxBars ?? 200))
+    } else if (markerIndices.length > 0) {
       const minMarker = Math.min(...markerIndices)
       const maxMarker = Math.max(...markerIndices)
       const tradeSpan = maxMarker - minMarker
@@ -92,6 +113,20 @@ export default function CandlestickChart({ candles, markers, height = 400 }: Pro
       if (m.price < minP) minP = m.price
       if (m.price > maxP) maxP = m.price
     }
+    // Include overlay levels in range, but only when they're near the data —
+    // a PDH far above an inside day must not squash the candles flat.
+    const dataRange = (maxP - minP) || 1
+    const nearLo = minP - dataRange * 0.3
+    const nearHi = maxP + dataRange * 0.3
+    const overlayPrices: number[] = []
+    if (hlines) for (const l of hlines) overlayPrices.push(l.price)
+    if (bands) for (const b of bands) { overlayPrices.push(b.from); overlayPrices.push(b.to) }
+    for (const p of overlayPrices) {
+      if (p >= nearLo && p <= nearHi) {
+        if (p < minP) minP = p
+        if (p > maxP) maxP = p
+      }
+    }
     const range = maxP - minP || 1
     minP -= range * 0.05
     maxP += range * 0.05
@@ -104,6 +139,19 @@ export default function CandlestickChart({ candles, markers, height = 400 }: Pro
     // Background
     ctx.fillStyle = '#0f172a'
     ctx.fillRect(0, 0, w, h)
+
+    // Shaded price bands (behind grid + candles), e.g. London range
+    if (bands) {
+      for (const b of bands) {
+        const yTop = toY(Math.max(b.from, b.to))
+        const yBot = toY(Math.min(b.from, b.to))
+        const clampedTop = Math.max(pad.top, Math.min(yTop, h - pad.bottom))
+        const clampedBot = Math.max(pad.top, Math.min(yBot, h - pad.bottom))
+        if (clampedBot - clampedTop < 1) continue
+        ctx.fillStyle = b.color || 'rgba(59,130,246,0.10)'
+        ctx.fillRect(pad.left, clampedTop, chartW, clampedBot - clampedTop)
+      }
+    }
 
     // Grid lines
     ctx.strokeStyle = '#1e293b'
@@ -143,6 +191,55 @@ export default function CandlestickChart({ candles, markers, height = 400 }: Pro
       const bodyH = Math.max(1, bodyBot - bodyTop)
       ctx.fillStyle = color
       ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH)
+    }
+
+    // Vertical time lines (e.g. NY open) — snapped to the closest visible bar
+    if (vlines && data.length > 0) {
+      for (const vl of vlines) {
+        if (vl.time < data[0].time || vl.time > data[data.length - 1].time) continue
+        let closest = 0, minDiff = Infinity
+        for (let i = 0; i < data.length; i++) {
+          const diff = Math.abs(data[i].time - vl.time)
+          if (diff < minDiff) { minDiff = diff; closest = i }
+        }
+        const x = toX(closest)
+        ctx.strokeStyle = vl.color || 'rgba(148,163,184,0.55)'
+        ctx.lineWidth = 1
+        ctx.setLineDash([2, 4])
+        ctx.beginPath()
+        ctx.moveTo(x, pad.top)
+        ctx.lineTo(x, h - pad.bottom)
+        ctx.stroke()
+        ctx.setLineDash([])
+        if (vl.label) {
+          ctx.fillStyle = vl.color || '#94a3b8'
+          ctx.font = '9px sans-serif'
+          ctx.textAlign = 'left'
+          ctx.fillText(vl.label, x + 3, pad.top + 9)
+        }
+      }
+    }
+
+    // Horizontal price lines (e.g. PDH/PDL)
+    if (hlines) {
+      for (const hl of hlines) {
+        if (hl.price < minP || hl.price > maxP) continue
+        const y = toY(hl.price)
+        ctx.strokeStyle = hl.color || '#94a3b8'
+        ctx.lineWidth = 1
+        ctx.setLineDash(hl.dash ?? [6, 4])
+        ctx.beginPath()
+        ctx.moveTo(pad.left, y)
+        ctx.lineTo(w - pad.right, y)
+        ctx.stroke()
+        ctx.setLineDash([])
+        if (hl.label) {
+          ctx.fillStyle = hl.color || '#94a3b8'
+          ctx.font = '9px sans-serif'
+          ctx.textAlign = 'right'
+          ctx.fillText(hl.label, w - pad.right - 2, y - 3)
+        }
+      }
     }
 
     // Draw trade markers — pair entries with exits
@@ -234,7 +331,7 @@ export default function CandlestickChart({ candles, markers, height = 400 }: Pro
       ctx.setLineDash([])
     }
 
-  }, [candles, markers, height])
+  }, [candles, markers, height, hlines, vlines, bands, windowMode, maxBars])
 
   if (candles.length === 0) {
     return <div className="flex items-center justify-center h-64 bg-slate-900 rounded-lg text-slate-500 text-sm">No chart data available</div>
