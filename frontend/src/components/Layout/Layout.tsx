@@ -17,7 +17,9 @@ const traderNav: { to: string; icon: any; label: string }[] = [
   { to: '/app/strategies',  icon: TrendingUp,      label: 'Strategies'    },
   { to: '/app/plain-english', icon: Sparkles, label: 'Build in Plain English' },
   { to: '/app/how-to-trade',icon: BookOpen,        label: 'How To Trade'  },
-  { to: '/app/backtests',   icon: FlaskConical,    label: 'Backtests'     },
+  // Points at the new Backtest Lab page; the classic run-list page stays
+  // reachable at /app/backtests (linked from the Lab's "All past runs").
+  { to: '/app/backtest-lab', icon: FlaskConical,   label: 'Backtest'      },
   { to: '/app/optimization',icon: Sliders,         label: 'Optimization'  },
   { to: '/app/paper',       icon: PlayCircle,      label: 'Paper Trading' },
   { to: '/app/live',        icon: Zap,             label: 'Live Trading'  },
