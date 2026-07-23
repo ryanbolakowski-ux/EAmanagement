@@ -436,6 +436,11 @@ app.include_router(devices_routes.router, prefix="/api/v1/devices", tags=["devic
 from app.api.routes import stream as stream_routes
 app.include_router(stream_routes.router, prefix="/api/v1/stream", tags=["stream"])
 
+# Replay trainer: read-only historical session playback from candle_cache
+# (1m bars). Additive + SELECT-only; auth-gated like the dashboard API.
+from app.api.routes import replay as replay_routes
+app.include_router(replay_routes.router, prefix="/api/v1/replay", tags=["replay"])
+
 # Public landing-page tape: NO auth (the marketing page is unauthenticated).
 # Fixed server-side symbol list + 60s TTL cache; can never 500 by design.
 from app.api.routes import public_tape
