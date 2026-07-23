@@ -269,7 +269,8 @@ async def replay_meta(
     return {
         "instrument": inst,
         "first_date": max(MIN_DATE, first_ts.astimezone(ET).date()).isoformat(),
-        "last_date": last_ts.astimezone(ET).date().isoformat(),
+        "last_date": min(last_ts.astimezone(ET).date(),
+                         datetime.now(ET).date() - timedelta(days=1)).isoformat(),
         "tick": tick,
         "point_label": label,
     }
@@ -299,13 +300,17 @@ async def replay_random(
 ):
     inst = validate_instrument(instrument)
     _, last_ts = await _data_range(db, inst)
-    last_date = last_ts.astimezone(ET).date()
+    # Cap at yesterday ET — today's session is partial while the market is
+    # open, and a blind random day must be complete. randint's upper bound is
+    # inclusive so the last full day stays reachable.
+    last_date = min(last_ts.astimezone(ET).date(),
+                    datetime.now(ET).date() - timedelta(days=1))
     span = (last_date - MIN_DATE).days
     if span < 1:
         raise HTTPException(status_code=404, detail="Not enough history yet.")
 
     for _ in range(RANDOM_MAX_ATTEMPTS):
-        day = MIN_DATE + timedelta(days=random.randint(0, span - 1))
+        day = MIN_DATE + timedelta(days=random.randint(0, span))
         if day.weekday() >= 5:
             continue
         # Cheap COUNT probe first so a holiday costs one query, not a full fetch.

@@ -77,11 +77,19 @@ const allStart = (end: string) => {
   return threeYr > DATA_START ? threeYr : DATA_START
 }
 
+// 1Y uses a fixed 364-day lookback (not calendar months) so the span can
+// never exceed the free-trial 365-day backend cap across a leap Feb 29.
+const daysBack = (endIso: string, n: number) => {
+  const d = new Date(endIso + 'T12:00:00Z')
+  d.setUTCDate(d.getUTCDate() - n)
+  return iso(d)
+}
+
 const PRESETS: { label: string; start: (end: string) => string }[] = [
   { label: '1M', start: (e) => clampStart(monthsBack(e, 1), e) },
   { label: '3M', start: (e) => clampStart(monthsBack(e, 3), e) },
   { label: '6M', start: (e) => clampStart(monthsBack(e, 6), e) },
-  { label: '1Y', start: (e) => clampStart(monthsBack(e, 12), e) },
+  { label: '1Y', start: (e) => clampStart(daysBack(e, 364), e) },
   { label: 'All', start: (e) => allStart(e) },
 ]
 
@@ -167,6 +175,11 @@ export default function BacktestLab() {
   const [copied, setCopied] = useState(false)
   const [log, setLog] = useState<LogEntry[]>(() => readLog())
   const loggedRef = useRef<Set<string>>(new Set())
+  // Poll-miss tracking: if our run id stops appearing in the list (deleted via
+  // the classic page, or lost to a backend restart) we stop polling and say so
+  // instead of spinning on "Queued…" forever.
+  const missesRef = useRef(0)
+  const [runLost, setRunLost] = useState(false)
 
   const { data: strategies = [] } = useQuery({
     queryKey: ['strategies'],
@@ -176,19 +189,33 @@ export default function BacktestLab() {
   // Poll the runs list while our run is active (redis progress is merged in).
   const { data: runs = [] } = useQuery({
     queryKey: ['backtest-lab-runs'],
-    queryFn: () => backtestsApi.list().then(r => r.data as BacktestRun[]),
+    queryFn: () => backtestsApi.list().then(r => {
+      const rows = r.data as BacktestRun[]
+      if (runId && !rows.some(x => x.id === runId)) {
+        missesRef.current += 1
+        if (missesRef.current >= 5) setRunLost(true)
+      } else {
+        missesRef.current = 0
+      }
+      return rows
+    }),
     enabled: !!runId,
     refetchInterval: (q: any) => {
       const rows: BacktestRun[] = (q?.state?.data as BacktestRun[]) || []
       const mine = rows.find(r => r.id === runId)
-      // Keep polling until our run reaches a terminal state (or first appears).
-      return !mine || isActive(mine.status) ? 2000 : false
+      // Row gone for 5+ consecutive polls → give up (deleted or lost).
+      if (!mine) return missesRef.current >= 5 ? false : 2000
+      // Hard cap: active past 35min means the BackgroundTask likely died in a
+      // restart (its state is process-local) — stop hammering the endpoint.
+      if (isActive(mine.status) && startedAt != null && Date.now() - startedAt > 35 * 60_000) return false
+      return isActive(mine.status) ? 2000 : false
     },
   })
 
   const run = runs.find(r => r.id === runId)
   const runStatus = (run?.status || (runId ? 'queued' : '')).toLowerCase()
-  const running = !!runId && (runStatus === '' || isActive(runStatus))
+  const stalled = !!runId && (runStatus === '' || isActive(runStatus)) && startedAt != null && elapsed > 35 * 60
+  const running = !!runId && !runLost && !stalled && (runStatus === '' || isActive(runStatus))
   const failed = runStatus === 'failed' || runStatus === 'cancelled'
   const completed = runStatus === 'completed'
 
@@ -202,7 +229,7 @@ export default function BacktestLab() {
     retryDelay: 1500,
   })
 
-  const { data: trades = [] }: any = useQuery({
+  const { data: trades = [], isPending: tradesPending }: any = useQuery({
     queryKey: ['backtest-lab-trades', runId],
     queryFn: () => backtestsApi.getTrades(runId!).then(r => r.data),
     enabled: !!runId && completed && !!metrics,
@@ -241,6 +268,12 @@ export default function BacktestLab() {
 
   async function start() {
     if (!strategyId || starting) return
+    if (startDate > endDate) {
+      setStartError('Start date must be on or before the end date.')
+      return
+    }
+    missesRef.current = 0
+    setRunLost(false)
     setStarting(true); setStartError(null); setCopied(false)
     try {
       const res = await backtestsApi.run({
@@ -291,6 +324,8 @@ export default function BacktestLab() {
   }
 
   function viewLogEntry(e: LogEntry) {
+    missesRef.current = 0
+    setRunLost(false)
     setRunId(e.run_id)
     setStartedAt(null)
     setStartError(null)
@@ -417,6 +452,24 @@ export default function BacktestLab() {
         </div>
       )}
 
+      {/* LOST / STALLED RUN */}
+      {(runLost || stalled) && !failed && !completed && (
+        <div className="rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-5 mb-4">
+          <div className="font-bold text-amber-800 dark:text-amber-200 mb-1">
+            {runLost ? 'Run not found' : 'Run stalled'}
+          </div>
+          <div className="text-xs text-amber-700 dark:text-amber-300 mb-3">
+            {runLost
+              ? 'This run no longer appears in your runs list — it may have been deleted from All past runs.'
+              : 'No progress for 35 minutes — the backend may have restarted mid-run. Check All past runs or start again.'}
+          </div>
+          <button onClick={start} disabled={!strategyId || starting}
+            className="bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5">
+            <RotateCcw size={12}/> Run again
+          </button>
+        </div>
+      )}
+
       {/* FAILED CARD */}
       {failed && (
         <div className="rounded-2xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-5 mb-4">
@@ -506,9 +559,13 @@ export default function BacktestLab() {
           {/* Trades table */}
           <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 sm:p-5 dark:bg-slate-900 dark:border-slate-700">
             <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3">
-              Trades <span className="text-slate-400 dark:text-slate-500 font-normal">({trades.length})</span>
+              Trades <span className="text-slate-400 dark:text-slate-500 font-normal">({tradesPending ? '…' : trades.length})</span>
             </div>
-            {trades.length === 0 ? (
+            {tradesPending ? (
+              <div className="text-center text-sm text-slate-400 dark:text-slate-500 py-8 border border-dashed rounded-xl border-slate-300 dark:border-slate-700">
+                Loading trades…
+              </div>
+            ) : trades.length === 0 ? (
               <div className="text-center text-sm text-slate-400 dark:text-slate-500 py-8 border border-dashed rounded-xl border-slate-300 dark:border-slate-700">
                 No trades in this window — the strategy's conditions never lined up.
               </div>

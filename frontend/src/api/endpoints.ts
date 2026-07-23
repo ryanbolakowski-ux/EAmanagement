@@ -588,8 +588,30 @@ export type ReplayDay = {
   pdl?: number | null
 }
 
+// The backend speaks per-instrument /meta {first_date,last_date,...} and day
+// payloads of {bars:[{t,o,h,l,c,v}], levels:{pdh,pdl,...}} — adapt those wire
+// shapes here so the Replay page only ever sees ReplayMeta/ReplayDay.
+const adaptReplayDay = (d: any): ReplayDay => ({
+  instrument: d?.instrument,
+  date: d?.date,
+  candles: (d?.bars ?? []).map((b: any) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c })),
+  pdh: d?.levels?.pdh ?? null,
+  pdl: d?.levels?.pdl ?? null,
+})
+
 export const replayApi = {
-  meta: () => api.get<ReplayMeta>('/api/v1/replay/meta'),
-  day: (instrument: string, date: string) =>
-    api.get<ReplayDay>('/api/v1/replay/day', { params: { instrument, date } }),
+  meta: async (instrument = 'NQ') => {
+    const res = await api.get<any>('/api/v1/replay/meta', { params: { instrument } })
+    const d = res.data ?? {}
+    const data: ReplayMeta = { instruments: ['ES', 'NQ', 'YM', 'RTY'], min_date: d.first_date, max_date: d.last_date }
+    return { ...res, data }
+  },
+  day: async (instrument: string, date: string) => {
+    const res = await api.get<any>('/api/v1/replay/day', { params: { instrument, date, include_overnight: 0 } })
+    return { ...res, data: adaptReplayDay(res.data) }
+  },
+  random: async (instrument: string) => {
+    const res = await api.get<any>('/api/v1/replay/random', { params: { instrument, include_overnight: 0 } })
+    return { ...res, data: adaptReplayDay(res.data) }
+  },
 }

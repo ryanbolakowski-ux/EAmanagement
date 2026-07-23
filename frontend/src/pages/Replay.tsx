@@ -166,25 +166,28 @@ export default function Replay() {
     }
   }
 
-  const randomWeekday = (): string => {
-    const minMs = new Date(`${meta?.min_date || '2024-01-02'}T12:00:00Z`).getTime()
-    const maxMs = new Date(`${meta?.max_date || new Date().toISOString().slice(0, 10)}T12:00:00Z`).getTime()
-    for (let i = 0; i < 50; i++) {
-      const d = new Date(minMs + Math.random() * Math.max(1, maxMs - minMs))
-      const dow = d.getUTCDay()
-      if (dow === 0 || dow === 6) continue
-      return d.toISOString().slice(0, 10)
-    }
-    return meta?.max_date || new Date().toISOString().slice(0, 10)
-  }
-
   const loadRandomDay = async () => {
-    // Blind mode: the trader shouldn't know which day it is until the session
-    // ends. Retry a few times to skip holidays (backend 404s those).
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const result = await loadDay(instrument, randomWeekday(), true)
-      if (result === 'ok') return
-      if (result === 'error') return // real error — don't spin
+    // Blind mode: the SERVER picks a hidden full weekday (/replay/random) so
+    // holidays are pre-filtered and the date can't be inferred client-side.
+    resetSession()
+    setBlind(true)
+    setLoadState('loading')
+    setLoadError('')
+    try {
+      const res = await replayApi.random(instrument)
+      const d = res.data
+      if (!d?.candles?.length) {
+        setLoadState('holiday')
+        return
+      }
+      setDay(d)
+      setDate(d.date)
+      setRevealed(Math.min(INITIAL_REVEAL, d.candles.length))
+      sessionIdRef.current = `${instrument}-${d.date}-${Date.now()}`
+      setLoadState('idle')
+    } catch (e: any) {
+      setLoadState('error')
+      setLoadError(e?.response?.data?.detail || e?.message || 'Failed to load a random day.')
     }
   }
 
@@ -354,9 +357,9 @@ export default function Replay() {
   // Recent sessions summary from the persisted log.
   const recentSessions = useMemo(() => {
     const entries = readLog()
-    const bySession = new Map<string, { instrument: string; date: string; trades: number; totalR: number; totalDollars: number; last: string }>()
+    const bySession = new Map<string, { sid: string; instrument: string; date: string; trades: number; totalR: number; totalDollars: number; last: string }>()
     for (const e of entries) {
-      const cur = bySession.get(e.session_id) || { instrument: e.instrument, date: e.date, trades: 0, totalR: 0, totalDollars: 0, last: e.logged_at }
+      const cur = bySession.get(e.session_id) || { sid: e.session_id, instrument: e.instrument, date: e.date, trades: 0, totalR: 0, totalDollars: 0, last: e.logged_at }
       cur.trades += 1
       cur.totalR += e.r
       cur.totalDollars += e.dollars
@@ -548,7 +551,7 @@ export default function Replay() {
               </div>
             </div>
             <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">
-              {instrument} point value ${pointValue}/contract · one position at a time
+              {activeInstrument} point value ${pointValue}/contract · one position at a time
             </div>
           </div>
 
@@ -597,7 +600,7 @@ export default function Replay() {
             <div>
               <div className="text-[10px] uppercase tracking-[0.2em] text-violet-500 dark:text-violet-300 font-bold mb-1">Session complete</div>
               <div className="text-lg font-extrabold text-slate-900 dark:text-slate-100">
-                {instrument} · {date}{blind && <span className="ml-2 text-xs font-bold text-violet-500 dark:text-violet-300">(blind day revealed)</span>}
+                {activeInstrument} · {date}{blind && <span className="ml-2 text-xs font-bold text-violet-500 dark:text-violet-300">(blind day revealed)</span>}
               </div>
               <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">
                 {stats.trades === 0
@@ -665,7 +668,7 @@ export default function Replay() {
           <ul className="divide-y divide-slate-200 dark:divide-slate-800">
             {recentSessions.map((s, i) => (
               <li key={i} className="py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-                <span className="font-bold text-slate-700 dark:text-slate-200">{s.instrument} · {s.date}</span>
+                <span className="font-bold text-slate-700 dark:text-slate-200">{s.instrument} · {dateHidden && s.sid === sessionIdRef.current ? 'blind day (hidden)' : s.date}</span>
                 <span className="text-slate-500 dark:text-slate-400">{s.trades} trade{s.trades === 1 ? '' : 's'}</span>
                 <span className={`font-semibold ${s.totalR >= 0 ? 'text-green-600' : 'text-red-500'}`}>{fmtR(s.totalR)}</span>
                 <span className={`font-semibold ${s.totalDollars >= 0 ? 'text-green-600' : 'text-red-500'}`}>{fmtUsd(s.totalDollars)}</span>
