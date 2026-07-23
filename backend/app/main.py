@@ -1,3 +1,20 @@
+# ── Fatal-signal diagnostics (MUST be first, before any heavy import). ──
+# Enabling faulthandler means the next fatal signal (SIGSEGV/SIGABRT/SIGFPE/
+# SIGBUS/SIGILL) dumps a C-level Python traceback for EVERY thread to stderr
+# just before the interpreter dies. We had a bare exit-139 (SIGSEGV) at the
+# market open with no traceback — the suspected cause is concurrent matplotlib
+# pyplot rendering across to_thread workers. With this enabled, a recurrence
+# leaves an actual multi-thread stack in the container logs.
+#
+# stderr (not stdout) is where faulthandler writes, and Docker captures both
+# stdout and stderr of PID 1 into the container log stream (docker logs), so
+# the dump is retained without any extra wiring. Set PYTHONFAULTHANDLER=1 in
+# the environment too (see backend/docs/SEGFAULT_DEPLOY.md) as a belt-and-
+# suspenders — that enables it from interpreter startup, even earlier than
+# this line, covering a crash during import of this very module.
+import faulthandler as _faulthandler
+_faulthandler.enable(all_threads=True)  # writes to sys.stderr -> docker logs
+
 # Loguru: skip DEBUG to massively speed up backtests (was logging every bar)
 import os as _os_log
 import sys as _sys_log
