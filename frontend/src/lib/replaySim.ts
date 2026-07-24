@@ -27,8 +27,14 @@ export type OpenPosition = {
   qty: number
   entryPrice: number
   entryTime: number
-  stopPrice: number
-  targetPrice: number
+  // GOAL G: SL/TP are optional — null when the trader hasn't set that level.
+  // These can be edited mid-trade (set/move/clear) from the trade panel or a
+  // place-on-chart click; riskPoints below stays fixed at its ENTRY value.
+  stopPrice: number | null
+  targetPrice: number | null
+  // Risk locked in at ENTRY time (|entry - initial stop|). 0 when the position
+  // opened with no stop — in that case r math is undefined (null) forever, even
+  // if a stop is added later.
   riskPoints: number
 }
 
@@ -40,42 +46,53 @@ export type ClosedTrade = {
   exitPrice: number
   exitTime: number
   exitReason: ExitReason
-  points: number   // per contract, signed
-  r: number        // points / riskPoints, signed
-  dollars: number  // points * pointValue * qty, signed
+  points: number         // per contract, signed
+  r: number | null       // points / riskPoints, signed; null when no stop at entry
+  dollars: number        // points * pointValue * qty, signed
 }
 
-// Open a market position at the current bar's close.
+// Open a market position at the current bar's close. GOAL G: both the stop and
+// the target are OPTIONAL — pass null/undefined (or a non-positive stop) to open
+// a bare market order, exactly like FX Replay. An 'r'-based target needs a stop
+// to size off; with no stop it simply yields no target.
 export function openPosition(
   direction: Direction,
   qty: number,
   entryBar: SimBar,
-  stopPoints: number,
-  target: TargetSpec,
+  stopPoints?: number | null,
+  target?: TargetSpec | null,
 ): OpenPosition {
   const dir = direction === 'long' ? 1 : -1
   const entryPrice = entryBar.close
-  const targetPoints = target.kind === 'r' ? stopPoints * target.value : target.value
+  const risk = stopPoints != null && stopPoints > 0 ? stopPoints : null
+  let targetPrice: number | null = null
+  if (target != null) {
+    const tp = target.kind === 'r'
+      ? (risk != null ? risk * target.value : null)
+      : target.value
+    if (tp != null && tp > 0) targetPrice = entryPrice + dir * tp
+  }
   return {
     direction,
     qty,
     entryPrice,
     entryTime: entryBar.time,
-    stopPrice: entryPrice - dir * stopPoints,
-    targetPrice: entryPrice + dir * targetPoints,
-    riskPoints: stopPoints,
+    stopPrice: risk != null ? entryPrice - dir * risk : null,
+    targetPrice,
+    riskPoints: risk ?? 0,
   }
 }
 
-// Check a newly revealed bar against the open position's levels.
+// Check a newly revealed bar against the open position's levels. An absent
+// level (null) is simply skipped, so a bare market order never exits on price.
 // Stop before target on the same bar (conservative, house convention).
 export function checkExit(pos: OpenPosition, bar: SimBar): { price: number; reason: 'stop' | 'target' } | null {
   if (pos.direction === 'long') {
-    if (bar.low <= pos.stopPrice) return { price: pos.stopPrice, reason: 'stop' }
-    if (bar.high >= pos.targetPrice) return { price: pos.targetPrice, reason: 'target' }
+    if (pos.stopPrice != null && bar.low <= pos.stopPrice) return { price: pos.stopPrice, reason: 'stop' }
+    if (pos.targetPrice != null && bar.high >= pos.targetPrice) return { price: pos.targetPrice, reason: 'target' }
   } else {
-    if (bar.high >= pos.stopPrice) return { price: pos.stopPrice, reason: 'stop' }
-    if (bar.low <= pos.targetPrice) return { price: pos.targetPrice, reason: 'target' }
+    if (pos.stopPrice != null && bar.high >= pos.stopPrice) return { price: pos.stopPrice, reason: 'stop' }
+    if (pos.targetPrice != null && bar.low <= pos.targetPrice) return { price: pos.targetPrice, reason: 'target' }
   }
   return null
 }
@@ -85,11 +102,11 @@ export function pnlPoints(pos: OpenPosition, price: number): number {
   return (price - pos.entryPrice) * (pos.direction === 'long' ? 1 : -1)
 }
 
-export function unrealized(pos: OpenPosition, price: number, pointValue: number): { points: number; r: number; dollars: number } {
+export function unrealized(pos: OpenPosition, price: number, pointValue: number): { points: number; r: number | null; dollars: number } {
   const points = pnlPoints(pos, price)
   return {
     points,
-    r: pos.riskPoints > 0 ? points / pos.riskPoints : 0,
+    r: pos.riskPoints > 0 ? points / pos.riskPoints : null,
     dollars: points * pointValue * pos.qty,
   }
 }
@@ -111,7 +128,7 @@ export function closePosition(
     exitTime,
     exitReason: reason,
     points,
-    r: pos.riskPoints > 0 ? points / pos.riskPoints : 0,
+    r: pos.riskPoints > 0 ? points / pos.riskPoints : null,
     dollars: points * pointValue * pos.qty,
   }
 }
@@ -145,16 +162,21 @@ export type SessionStats = {
   trades: number
   wins: number
   losses: number
-  winRate: number | null  // null when no trades
-  totalR: number
+  winRate: number | null  // null when no trades. GOAL D/G: win = dollars > 0.
+  totalR: number          // sums only trades that HAVE an r (initial stop)
+  rCount: number          // how many trades contributed to totalR / avgR
   totalDollars: number
-  avgR: number | null
+  avgR: number | null     // averaged over rCount, not over all trades
 }
 
 export function sessionStats(trades: ClosedTrade[]): SessionStats {
+  // GOAL G: a win is any trade that made money (works for every trade, incl.
+  // those opened without a stop, whose r is null). R totals only aggregate
+  // trades that carried an initial stop so an unmanaged runner can't skew them.
   const wins = trades.filter((t) => t.dollars > 0).length
   const losses = trades.filter((t) => t.dollars < 0).length
-  const totalR = trades.reduce((a, t) => a + t.r, 0)
+  const rTrades = trades.filter((t) => t.r != null) as (ClosedTrade & { r: number })[]
+  const totalR = rTrades.reduce((a, t) => a + t.r, 0)
   const totalDollars = trades.reduce((a, t) => a + t.dollars, 0)
   return {
     trades: trades.length,
@@ -162,7 +184,8 @@ export function sessionStats(trades: ClosedTrade[]): SessionStats {
     losses,
     winRate: trades.length > 0 ? (wins / trades.length) * 100 : null,
     totalR,
+    rCount: rTrades.length,
     totalDollars,
-    avgR: trades.length > 0 ? totalR / trades.length : null,
+    avgR: rTrades.length > 0 ? totalR / rTrades.length : null,
   }
 }
