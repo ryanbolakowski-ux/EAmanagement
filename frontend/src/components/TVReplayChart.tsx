@@ -22,6 +22,9 @@ import {
   type SeriesAttachedParameter, type SeriesMarker, type SeriesPrimitivePaneViewZOrder,
   type Time, type UTCTimestamp,
 } from 'lightweight-charts'
+import {
+  DrawingsPrimitive, type DrawingApi, type DrawingState,
+} from '../lib/replayDrawings'
 
 export type TVBar = { time: number; open: number; high: number; low: number; close: number; volume?: number }
 // r is null for trades opened without an initial stop (GOAL G): risk is undefined.
@@ -75,6 +78,11 @@ type Props = {
   // ── GOAL H: right-click context menu (page renders the menu UI) ──────────
   /** Fired on right-click over the chart surface with VIEWPORT coords (clientX, clientY). */
   onContextMenu?: (x: number, y: number) => void
+  // ── drawing layer (builder 1) ────────────────────────────────────────────
+  /** Handed the imperative drawing controller once on mount (null on unmount). */
+  onDrawingApi?: (api: DrawingApi | null) => void
+  /** Fired after every drawing-state change (active tool / selection / toggles). */
+  onDrawingState?: (state: DrawingState) => void
 }
 
 // ── colors (TradingView defaults) ────────────────────────────────────────────
@@ -406,6 +414,7 @@ export default function TVReplayChart({
   instrument, bars, displayTf, resetKey, showDate, pdh, pdl, position, trades = [],
   upColor, downColor, background, sessionsEnabled, sessionVisibility,
   timezone = 'America/New_York', hour12 = false, onChartClick, onContextMenu,
+  onDrawingApi, onDrawingState,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -415,6 +424,7 @@ export default function TVReplayChart({
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const priceLinesRef = useRef<IPriceLine[]>([])
   const sessionBandsRef = useRef<SessionBands | null>(null)
+  const drawingsRef = useRef<DrawingsPrimitive | null>(null)
   // What is currently rendered: series identity + bucket count, so reveals go
   // through series.update() and only hard resets call setData().
   const renderedRef = useRef<{ key: string; count: number; vol: boolean }>({ key: '', count: 0, vol: false })
@@ -441,6 +451,11 @@ export default function TVReplayChart({
   sessionsEnabledRef.current = sessionsEnabled ?? false
   const sessionVisibilityRef = useRef<Record<SessionKey, boolean>>(resolvedVisibility)
   sessionVisibilityRef.current = resolvedVisibility
+  // Drawing-layer callbacks read live so the mount-scope closures never go stale.
+  const onDrawingApiRef = useRef(onDrawingApi)
+  onDrawingApiRef.current = onDrawingApi
+  const onDrawingStateRef = useRef(onDrawingState)
+  onDrawingStateRef.current = onDrawingState
 
   const setLegend = (c: CandlestickData<UTCTimestamp> | null) => {
     const el = legendRef.current
@@ -538,10 +553,25 @@ export default function TVReplayChart({
     candle.attachPrimitive(sessionBands)
     sessionBands.setOptions(sessionsEnabledRef.current, sessionVisibilityRef.current, isDarkRef.current)
 
+    // Drawing layer (builder 1): custom primitive + interaction controller,
+    // drawn ON TOP of the candles (zOrder 'top').
+    const drawings = new DrawingsPrimitive(chart, candle, instrument)
+    candle.attachPrimitive(drawings)
+    const pf0 = PRICE_FORMAT[instrument] ?? { precision: 2, minMove: 0.25 }
+    drawings.setPriceFormat(pf0.precision, pf0.minMove)
+    drawings.setTf(displayTf)
+    drawings.setViewport(el.clientWidth, el.clientHeight)
+    drawings.setDark(isDarkRef.current)
+    drawings.setCursorSink((c) => { if (containerRef.current) containerRef.current.style.cursor = c })
+    const unsubDrawings = drawings.subscribe((s) => onDrawingStateRef.current?.(s))
+
     chartRef.current = chart
     candleRef.current = candle
     volumeRef.current = volume
     sessionBandsRef.current = sessionBands
+    drawingsRef.current = drawings
+    onDrawingApiRef.current?.(drawings.getApi())
+    onDrawingStateRef.current?.(drawings.getState())
     renderedRef.current = { key: '', count: 0, vol: false }
 
     // OHLC legend: hovered candle, falling back to the latest bar.
@@ -554,13 +584,56 @@ export default function TVReplayChart({
     chart.subscribeCrosshairMove(onCrosshair)
 
     // GOAL G: expose the clicked price so the page can arm place-on-chart SL/TP.
+    // When a drawing tool is active, or the drawing engine just handled this
+    // gesture (place / select / drag), swallow the click so it can't arm SL/TP.
     const onClick = (param: MouseEventParams) => {
+      const d = drawingsRef.current
+      if (d && (d.activeTool !== 'cursor' || d.takeSuppress())) return
       const h = liveRef.current.onChartClick
       if (!h || !param.point) return
       const price = candleRef.current?.coordinateToPrice(param.point.y)
       if (price != null) h(price)
     }
     chart.subscribeClick(onClick)
+
+    // Drawing-layer interaction: raw container pointer events → controller.
+    // Pan/scale is suppressed while placing or dragging so a handle drag never
+    // pans the chart; restored on mouse-up.
+    const onDrawDown = (e: MouseEvent) => {
+      if (e.button !== 0) return
+      const d = drawingsRef.current
+      if (!d) return
+      const r = d.pointerDown(e.offsetX, e.offsetY, { shift: e.shiftKey })
+      if (r.capture) chart.applyOptions({ handleScroll: false, handleScale: false })
+    }
+    const onDrawMove = (e: MouseEvent) => {
+      drawingsRef.current?.pointerMove(e.offsetX, e.offsetY)
+    }
+    const onDrawUp = (e: MouseEvent) => {
+      const d = drawingsRef.current
+      if (!d) return
+      d.pointerUp(e.offsetX, e.offsetY)
+      chart.applyOptions({ handleScroll: true, handleScale: true })
+    }
+    const onDrawDbl = (e: MouseEvent) => {
+      drawingsRef.current?.pointerDblClick(e.offsetX, e.offsetY)
+    }
+    const onDrawKey = (e: KeyboardEvent) => {
+      const d = drawingsRef.current
+      if (!d) return
+      const t = e.target as HTMLElement | null
+      const tag = t?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return
+      if (e.key === 'Escape') { d.cancel() }
+      else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (d.hasSelection()) { e.preventDefault(); d.deleteSelected() }
+      }
+    }
+    el.addEventListener('mousedown', onDrawDown)
+    el.addEventListener('mousemove', onDrawMove)
+    el.addEventListener('dblclick', onDrawDbl)
+    window.addEventListener('mouseup', onDrawUp)
+    window.addEventListener('keydown', onDrawKey)
 
     // GOAL H: right-click opens the page's context menu (only over the chart).
     const onCtx = (e: MouseEvent) => {
@@ -584,6 +657,7 @@ export default function TVReplayChart({
       if (containerRef.current) containerRef.current.style.background = eff
       if (rootRef.current) rootRef.current.style.background = eff
       sessionBandsRef.current?.setOptions(sessionsEnabledRef.current, sessionVisibilityRef.current, dark)
+      drawingsRef.current?.setDark(dark)
       setLegendRef.current(lastCandleRef.current)
     }
     applyThemeRef.current = applyTheme
@@ -593,7 +667,10 @@ export default function TVReplayChart({
 
     const ro = new ResizeObserver(() => {
       const c = containerRef.current
-      if (c) chart.resize(c.clientWidth, c.clientHeight)
+      if (c) {
+        chart.resize(c.clientWidth, c.clientHeight)
+        drawingsRef.current?.setViewport(c.clientWidth, c.clientHeight)
+      }
     })
     ro.observe(el)
 
@@ -601,13 +678,22 @@ export default function TVReplayChart({
       mo.disconnect()
       ro.disconnect()
       el.removeEventListener('contextmenu', onCtx)
+      el.removeEventListener('mousedown', onDrawDown)
+      el.removeEventListener('mousemove', onDrawMove)
+      el.removeEventListener('dblclick', onDrawDbl)
+      window.removeEventListener('mouseup', onDrawUp)
+      window.removeEventListener('keydown', onDrawKey)
       chart.unsubscribeCrosshairMove(onCrosshair)
       chart.unsubscribeClick(onClick)
-      chart.remove()
+      unsubDrawings()
+      drawingsRef.current?.destroy() // persists to localStorage before disposal
+      chart.remove()                 // disposes attached primitives with the chart
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
       sessionBandsRef.current = null
+      drawingsRef.current = null
+      onDrawingApiRef.current?.(null)
       applyThemeRef.current = null
       priceLinesRef.current = []
       lastCandleRef.current = null
@@ -633,9 +719,12 @@ export default function TVReplayChart({
           fmtZoned(time, liveRef.current.timezone, liveRef.current.hour12, false),
       },
     })
-    candleRef.current?.applyOptions({
-      priceFormat: { type: 'price', ...(PRICE_FORMAT[instrument] ?? { precision: 2, minMove: 0.25 }) },
-    })
+    const pf = PRICE_FORMAT[instrument] ?? { precision: 2, minMove: 0.25 }
+    candleRef.current?.applyOptions({ priceFormat: { type: 'price', ...pf } })
+    // Drawing layer swaps its per-instrument store + price formatting (no-op if
+    // the instrument is unchanged; drawings persist per instrument, never per date).
+    drawingsRef.current?.setInstrument(instrument)
+    drawingsRef.current?.setPriceFormat(pf.precision, pf.minMove)
     setLegendRef.current(lastCandleRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instrument, displayTf, showDate, timezone, hour12])
@@ -675,6 +764,8 @@ export default function TVReplayChart({
         candle.setData([])
         volume.setData([])
         sessionBandsRef.current?.setBands([])
+        drawingsRef.current?.setTf(displayTf)
+        drawingsRef.current?.setBars([])
         renderedRef.current = { key, count: 0, vol: false }
         lastCandleRef.current = null
         setLegend(null)
@@ -703,6 +794,12 @@ export default function TVReplayChart({
       }
     }
     sessionBandsRef.current?.setBands(computeBandRanges(candles))
+    // Feed the drawing layer the display-TF context so its (time,price) anchors
+    // reproject correctly across reveal / TF switch / reset (magnet + bar counts).
+    drawingsRef.current?.setTf(displayTf)
+    drawingsRef.current?.setBars(
+      candles.map((c) => ({ time: c.time as number, open: c.open, high: c.high, low: c.low, close: c.close })),
+    )
     renderedRef.current = { key, count: candles.length, vol: hasVolume }
     lastCandleRef.current = candles[candles.length - 1] ?? null
     setLegend(lastCandleRef.current)
