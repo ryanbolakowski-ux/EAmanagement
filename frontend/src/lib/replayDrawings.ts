@@ -822,6 +822,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
   }
   /** topmost drawing under (x,y), or null. */
   private _bodyHitTest(x: number, y: number): Drawing | null {
+    if (this.hidden) return null // hidden drawings are non-interactive
     for (let i = this.drawings.length - 1; i >= 0; i--) {
       if (this._hit(this.drawings[i], x, y)) return this.drawings[i]
     }
@@ -1000,6 +1001,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
 
   private _commit(tool: DrawKind, points: Anchor[], text?: string) {
     const d: Drawing = { id: uid(), tool, points, style: { ...this.defaults }, text }
+    if (this.hidden) this.hidden = false // a fresh draw un-hides so it is never an invisible commit
     this.drawings.push(d)
     this.preview = null
     this._mode = 'idle'

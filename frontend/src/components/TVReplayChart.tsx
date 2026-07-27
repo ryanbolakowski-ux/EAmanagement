@@ -873,7 +873,7 @@ export default function TVReplayChart({
       <div ref={containerRef} className="absolute inset-0"/>
       <div
         ref={legendRef}
-        className="absolute top-2 left-3 z-10 pointer-events-none select-none text-[11px] font-medium tracking-tight whitespace-nowrap"
+        className="absolute top-2 left-3 sm:left-14 z-10 pointer-events-none select-none text-[11px] font-medium tracking-tight whitespace-nowrap"
       />
     </div>
   )

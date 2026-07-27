@@ -207,7 +207,7 @@ export default function DrawingToolbar({ state, api, onSelectTool, onSetDefaults
       {/* mobile collapse toggle (hidden on sm+) */}
       <button type="button" onClick={() => setMobileOpen((o) => !o)}
         title={mobileOpen ? 'Hide drawing tools' : 'Drawing tools'}
-        className="sm:hidden pointer-events-auto absolute top-2 left-2 inline-flex items-center justify-center h-8 w-8 rounded-lg
+        className="sm:hidden pointer-events-auto absolute z-30 top-2 left-2 inline-flex items-center justify-center h-8 w-8 rounded-lg
           bg-white/90 dark:bg-slate-900/90 backdrop-blur border border-slate-200/80 dark:border-slate-700/80 shadow-lg
           text-slate-600 dark:text-slate-300">
         {mobileOpen ? <X size={16}/> : <Pencil size={15}/>}
