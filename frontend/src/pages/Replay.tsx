@@ -4,9 +4,15 @@ import {
   Play, Pause, StepForward, FastForward, Shuffle, Rewind, Download,
   TrendingUp, TrendingDown, X, AlertTriangle, CalendarOff, Loader2, EyeOff,
   Settings as SettingsIcon, Maximize2, Minimize2, Plus, Check, Clock, Crosshair, RotateCcw, Layers,
+  Trash2, Eraser,
 } from 'lucide-react'
 import { replayApi, type ReplayDay, type ReplayMeta } from '../api/endpoints'
 import TVReplayChart, { type SessionVisibility } from '../components/TVReplayChart'
+import DrawingToolbar from '../components/DrawingToolbar'
+import {
+  DEFAULT_DRAW_STYLE,
+  type DrawTool, type DrawStyle, type DrawingApi, type DrawingState,
+} from '../lib/replayDrawings'
 import {
   POINT_VALUES, checkExit, closePosition, openPosition,
   sessionStats, unrealized,
@@ -70,6 +76,28 @@ function loadSettings(): ReplaySettings {
 }
 function saveSettings(s: ReplaySettings) {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch { /* quota — ignore */ }
+}
+
+// ── drawing tool prefs (last-used default style + magnet) ────────────────────
+// Persisted so the palette re-opens with the trader's last colour/width/style.
+// NOT keyed by date — drawings themselves persist per-instrument inside the
+// engine; this is only the style the palette applies to NEW drawings.
+const DRAW_PREFS_KEY = 'theta_replay_draw_prefs'
+type DrawPrefs = { style: DrawStyle; magnet: boolean }
+const DEFAULT_DRAW_PREFS: DrawPrefs = { style: { ...DEFAULT_DRAW_STYLE }, magnet: false }
+
+function loadDrawPrefs(): DrawPrefs {
+  try {
+    const raw = localStorage.getItem(DRAW_PREFS_KEY)
+    if (!raw) return DEFAULT_DRAW_PREFS
+    const p = JSON.parse(raw) || {}
+    return { style: { ...DEFAULT_DRAW_STYLE, ...(p.style || {}) }, magnet: !!p.magnet }
+  } catch {
+    return DEFAULT_DRAW_PREFS
+  }
+}
+function saveDrawPrefs(p: DrawPrefs) {
+  try { localStorage.setItem(DRAW_PREFS_KEY, JSON.stringify(p)) } catch { /* quota — ignore */ }
 }
 
 const COLOR_PRESETS: { name: string; up: string; down: string }[] = [
@@ -290,6 +318,13 @@ export default function Replay() {
   const [fullscreen, setFullscreen] = useState(false)
   const fsRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+
+  // Drawing layer (builder 1 engine): imperative controller + reactive state.
+  // The api is handed once on chart mount (null on unmount); state pushes after
+  // every tool/selection/toggle change.
+  const drawApiRef = useRef<DrawingApi | null>(null)
+  const [drawState, setDrawState] = useState<DrawingState | null>(null)
+  const drawPrefsJsonRef = useRef('')
 
   const updateSettings = (patch: Partial<ReplaySettings>) => {
     setSettings((prev) => {
@@ -546,6 +581,45 @@ export default function Replay() {
   }
   const handleContextMenu = (x: number, y: number) => setCtxMenu({ x, y })
 
+  // ── drawing layer wiring ─────────────────────────────────────────────────────
+
+  // Handed the engine controller on chart mount; re-apply the trader's last-used
+  // default style + magnet so the palette opens where they left off.
+  const handleDrawingApi = (api: DrawingApi | null) => {
+    drawApiRef.current = api
+    if (api) {
+      const prefs = loadDrawPrefs()
+      drawPrefsJsonRef.current = JSON.stringify(prefs)
+      api.setDefaults(prefs.style)
+      api.setMagnet(prefs.magnet)
+    } else {
+      setDrawState(null)
+    }
+  }
+  // Reactive state → drive the palette; persist default style/magnet when they change.
+  const handleDrawingState = (s: DrawingState) => {
+    setDrawState(s)
+    const json = JSON.stringify({ style: s.defaults, magnet: s.magnet })
+    if (json !== drawPrefsJsonRef.current) {
+      drawPrefsJsonRef.current = json
+      saveDrawPrefs({ style: s.defaults, magnet: s.magnet })
+    }
+  }
+  // Arming a drawing tool and arming SL/TP are mutually exclusive over the same
+  // click surface: picking a drawing tool disarms SL/TP, and vice-versa.
+  const selectDrawTool = (tool: DrawTool) => {
+    drawApiRef.current?.setActiveTool(tool)
+    if (tool !== 'cursor') setArmed(null)
+  }
+  const setDrawDefaults = (patch: Partial<DrawStyle>) => { drawApiRef.current?.setDefaults(patch) }
+  const armLevel = (level: 'sl' | 'tp') => {
+    setArmed((prev) => {
+      const next = prev === level ? null : level
+      if (next) drawApiRef.current?.setActiveTool('cursor') // leave any drawing tool
+      return next
+    })
+  }
+
   // Esc disarms the place-on-chart mode.
   useEffect(() => {
     if (!armed) return
@@ -665,7 +739,7 @@ export default function Replay() {
   const tzShort = TZ_SHORT[settings.timezone] ?? ''
 
   // Context-menu position, clamped to the viewport.
-  const MENU_W = 210, MENU_H = 190
+  const MENU_W = 210, MENU_H = 260
   const mx = ctxMenu ? Math.max(6, Math.min(ctxMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 1200) - MENU_W)) : 0
   const my = ctxMenu ? Math.max(6, Math.min(ctxMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 800) - MENU_H)) : 0
 
@@ -858,7 +932,7 @@ export default function Replay() {
                 </div>
               )}
             </div>
-            <div className={fullscreen ? 'flex-1 min-h-0' : 'h-[380px] md:h-[62vh] md:max-h-[620px]'}>
+            <div className={`relative ${fullscreen ? 'flex-1 min-h-0' : 'h-[380px] md:h-[62vh] md:max-h-[620px]'}`}>
               <TVReplayChart
                 instrument={activeInstrument}
                 bars={revealedBars}
@@ -878,6 +952,16 @@ export default function Replay() {
                 hour12={settings.hour12}
                 onChartClick={handleChartClick}
                 onContextMenu={handleContextMenu}
+                onDrawingApi={handleDrawingApi}
+                onDrawingState={handleDrawingState}
+              />
+              {/* FX-Replay-style drawing palette + style bar (overlays the chart,
+                  visible in fullscreen; collapses to a top sheet on mobile). */}
+              <DrawingToolbar
+                state={drawState}
+                api={drawApiRef.current}
+                onSelectTool={selectDrawTool}
+                onSetDefaults={setDrawDefaults}
               />
             </div>
 
@@ -897,6 +981,16 @@ export default function Replay() {
                 <MenuItem icon={SettingsIcon} label="Settings…" autoFocus onClick={() => { openSettings('appearance'); setCtxMenu(null) }}/>
                 <MenuItem icon={Clock} label="Timezone & time…" onClick={() => { openSettings('time'); setCtxMenu(null) }}/>
                 <MenuItem icon={Check} label="12-hour clock" active={settings.hour12} onClick={() => { updateSettings({ hour12: !settings.hour12 }); setCtxMenu(null) }}/>
+                {(drawState?.selection || (drawState && drawState.count > 0)) && (
+                  <div className="my-1 h-px bg-slate-200 dark:bg-slate-700"/>
+                )}
+                {drawState?.selection && (
+                  <MenuItem icon={Trash2} label="Delete drawing" onClick={() => { drawApiRef.current?.deleteSelected(); setCtxMenu(null) }}/>
+                )}
+                {drawState && drawState.count > 0 && (
+                  <MenuItem icon={Eraser} label="Clear all drawings"
+                    onClick={() => { if (window.confirm(`Delete all ${drawState.count} drawing${drawState.count === 1 ? '' : 's'} on this chart?`)) drawApiRef.current?.clearAll(); setCtxMenu(null) }}/>
+                )}
                 <div className="my-1 h-px bg-slate-200 dark:bg-slate-700"/>
                 <MenuItem icon={RotateCcw} label="Reset chart view" onClick={() => { setChartNonce((n) => n + 1); setCtxMenu(null) }}/>
               </div>
@@ -1074,7 +1168,7 @@ export default function Replay() {
                         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                         onBlur={commitSl}
                         className="w-full min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm px-2 py-1.5"/>
-                      <button onClick={() => setArmed(armed === 'sl' ? null : 'sl')} title="Set SL by clicking the chart"
+                      <button onClick={() => armLevel('sl')} title="Set SL by clicking the chart"
                         className={`shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-lg transition-colors ${armed === 'sl' ? 'bg-violet-600 text-white' : 'bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300'}`}>
                         <Crosshair size={13}/>
                       </button>
@@ -1092,7 +1186,7 @@ export default function Replay() {
                         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                         onBlur={commitTp}
                         className="w-full min-w-0 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm px-2 py-1.5"/>
-                      <button onClick={() => setArmed(armed === 'tp' ? null : 'tp')} title="Set TP by clicking the chart"
+                      <button onClick={() => armLevel('tp')} title="Set TP by clicking the chart"
                         className={`shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-lg transition-colors ${armed === 'tp' ? 'bg-violet-600 text-white' : 'bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300'}`}>
                         <Crosshair size={13}/>
                       </button>
