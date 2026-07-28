@@ -325,3 +325,304 @@ async def replay_random(
         status_code=503,
         detail="Could not find a full trading day after "
                f"{RANDOM_MAX_ATTEMPTS} attempts — try again.")
+
+
+# ── continuous multi-day replay (ADDITIVE — /meta,/day,/random unchanged) ─
+#
+# The single-day endpoints above return exactly one session window. The
+# endpoints below assemble a CONTINUOUS 1m series spanning several trading
+# days so the chart trainer can look BACK through prior context and roll
+# playback straight into the NEXT day (FX-Replay style) instead of ending.
+#
+# GET /continuous?instrument&start_date&context_days&forward_days&eth
+#   -> one continuous bar series from ~context_days trading days BEFORE
+#      start_date through ~forward_days AFTER (clamped to data range), plus
+#      playhead_index = the bar index of start_date's RTH open (09:30 ET, DST
+#      correct). day_starts marks each day's RTH open; has_more_forward says
+#      whether /continuous/more would yield another day.
+# GET /continuous/random -> same, server-picks a hidden weekday start; blind.
+# GET /continuous/more?instrument&after_ts&days&eth -> the next chunk of
+#      forward bars strictly after after_ts (append-as-you-advance).
+#
+# Bars are 1m real ES/NQ/YM/RTY from candle_cache; weekends/holidays are
+# naturally absent (no rows). Everything is SELECT-only, bounded, and ET
+# wall-clock via zoneinfo (never UTC-date slicing).
+
+CONTEXT_DAYS_MAX = 10
+FORWARD_DAYS_MAX = 30
+DEFAULT_CONTEXT_DAYS = 5
+DEFAULT_FORWARD_DAYS = 20
+MORE_DAYS_MAX = 30
+DEFAULT_MORE_DAYS = 5
+# How many trading days ahead to probe when deciding has_more_forward. A run
+# of >7 consecutive market holidays never happens, so this always resolves.
+FORWARD_PROBE_DAYS = 7
+
+
+def _clamp(value: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, value))
+
+
+def _next_trading_day(day: date_cls) -> date_cls:
+    """Next weekday after `day` (skips Sat/Sun). Holidays are handled by the
+    DB simply having no bars, so this stays pure/tz-free."""
+    d = day + timedelta(days=1)
+    while d.weekday() >= 5:
+        d = d + timedelta(days=1)
+    return d
+
+
+def _prev_trading_day(day: date_cls) -> date_cls:
+    d = day - timedelta(days=1)
+    while d.weekday() >= 5:
+        d = d - timedelta(days=1)
+    return d
+
+
+def _walk_trading_days(day: date_cls, n: int) -> date_cls:
+    """Walk n weekday-trading days from `day` (n>0 forward, n<0 back, 0 = same).
+    Weekday walking is reversible: walk(-k) then walk(+k) returns the start."""
+    step = _next_trading_day if n >= 0 else _prev_trading_day
+    d = day
+    for _ in range(abs(n)):
+        d = step(d)
+    return d
+
+
+def _is_rth_bar(ts: datetime) -> bool:
+    """True if `ts` (tz-aware) falls in the RTH window [09:30, 16:00) ET.
+    Uses zoneinfo per-instant offset, so it is correct across DST."""
+    e = ts.astimezone(ET)
+    return (9, 30) <= (e.hour, e.minute) < (16, 0)
+
+
+def _slice_kind(bars: list[tuple], include_overnight: bool) -> list[tuple]:
+    """RTH mode keeps only [09:30,16:00) bars; ETH mode keeps everything."""
+    if include_overnight:
+        return list(bars)
+    return [b for b in bars if _is_rth_bar(b[0])]
+
+
+def _build_day_starts(bars: list[tuple]) -> list[dict]:
+    """One entry per ET trading date present in `bars`, index = the first
+    RTH-open bar for that date (first bar in [09:30,16:00) ET). Mode-agnostic:
+    overnight bars never open a day, so an ETH day's overnight context sits at
+    indices *before* that day's entry. Bars must be time-ascending."""
+    out: list[dict] = []
+    seen: set[date_cls] = set()
+    for i, b in enumerate(bars):
+        e = b[0].astimezone(ET)
+        if (9, 30) <= (e.hour, e.minute) < (16, 0):
+            d = e.date()
+            if d not in seen:
+                seen.add(d)
+                out.append({"date": d.isoformat(), "index": i})
+    return out
+
+
+def _last_complete_trading_day(data_max_et_date: date_cls,
+                               now_et: datetime) -> date_cls:
+    """Cap for continuous playback: the last COMPLETE trading day =
+    min(data max date, yesterday ET). Mirrors /meta and /random so a
+    still-forming current session is never served."""
+    return min(data_max_et_date, now_et.date() - timedelta(days=1))
+
+
+async def _has_more_forward_days(db: AsyncSession, instrument: str,
+                                 last_day: date_cls, cap_date: date_cls) -> bool:
+    """Is there another real RTH trading day after `last_day` within the cap?
+    Cheap COUNT probes (index-friendly), bounded to FORWARD_PROBE_DAYS so a
+    holiday cluster can't loop. This is exactly the notion of 'more forward'
+    the frontend needs: another day to roll into."""
+    d = last_day
+    for _ in range(FORWARD_PROBE_DAYS):
+        d = _next_trading_day(d)
+        if d > cap_date:
+            return False
+        if await _count_rth_bars(db, instrument, d) >= MIN_RTH_BARS:
+            return True
+    return False
+
+
+async def _assemble_continuous(db: AsyncSession, instrument: str,
+                               start_date: date_cls, context_days: int,
+                               forward_days: int, include_overnight: bool,
+                               first_data_day: date_cls,
+                               cap_date: date_cls) -> dict:
+    """Core window assembly for /continuous (shared with /continuous/random).
+
+    One SELECT over [context session open, forward 16:00 ET). RTH mode slices
+    to regular-hours bars; ETH mode keeps the overnight context. Raises 404 if
+    start_date itself has no RTH session (holiday/gap)."""
+    context_start = _walk_trading_days(start_date, -context_days)
+    if context_start < first_data_day:
+        context_start = first_data_day
+    forward_end = _walk_trading_days(start_date, forward_days)
+    if forward_end > cap_date:
+        forward_end = cap_date
+        while forward_end.weekday() >= 5:
+            forward_end = forward_end - timedelta(days=1)
+
+    window_start = session_bounds(context_start, include_overnight)[0]
+    window_end = _et(forward_end, 16, 0)
+    raw = await _fetch_bars(db, instrument, window_start, window_end)
+    out_bars = _slice_kind(raw, include_overnight)
+
+    day_starts = _build_day_starts(out_bars)
+    if not day_starts:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No sessions for {instrument} around "
+                   f"{start_date.isoformat()} — holiday cluster or data gap.")
+
+    sd = start_date.isoformat()
+    playhead_index = next(
+        (ds["index"] for ds in day_starts if ds["date"] == sd), None)
+    if playhead_index is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No RTH session for {instrument} on {sd} — likely a "
+                   "market holiday or a data gap. Pick another start date.")
+
+    last_day = date_cls.fromisoformat(day_starts[-1]["date"])
+    has_more = await _has_more_forward_days(db, instrument, last_day, cap_date)
+    return {
+        "instrument": instrument,
+        "start_date": sd,
+        "playhead_index": playhead_index,
+        "bars": _serialize_bars(out_bars),
+        "day_starts": day_starts,
+        "first_date": day_starts[0]["date"],
+        "last_date": day_starts[-1]["date"],
+        "has_more_forward": has_more,
+    }
+
+
+async def _assemble_more(db: AsyncSession, instrument: str, after_ts: int,
+                         days: int, include_overnight: bool,
+                         cap_date: date_cls) -> dict:
+    """Next forward chunk after `after_ts` for /continuous/more. The fetch
+    starts strictly after after_ts (candle minutes land on :00, so a +1s
+    lower bound drops the after-bar and keeps everything past it) — no gap,
+    no overlap — through 16:00 ET of `days` trading days later (clamped)."""
+    try:
+        after_dt = datetime.fromtimestamp(int(after_ts), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise HTTPException(status_code=422, detail="after_ts out of range")
+
+    base_day = after_dt.astimezone(ET).date()
+    forward_end = _walk_trading_days(base_day, days)
+    if forward_end > cap_date:
+        forward_end = cap_date
+        while forward_end.weekday() >= 5:
+            forward_end = forward_end - timedelta(days=1)
+
+    window_end = _et(forward_end, 16, 0)
+    fetch_start = after_dt + timedelta(seconds=1)
+    if window_end <= fetch_start:
+        return {"instrument": instrument, "bars": [], "day_starts": [],
+                "has_more_forward": False}
+
+    raw = await _fetch_bars(db, instrument, fetch_start, window_end)
+    out_bars = _slice_kind(raw, include_overnight)
+    day_starts = _build_day_starts(out_bars)
+
+    if day_starts:
+        last_day = date_cls.fromisoformat(day_starts[-1]["date"])
+    elif out_bars:
+        last_day = out_bars[-1][0].astimezone(ET).date()
+    else:
+        last_day = base_day
+    has_more = await _has_more_forward_days(db, instrument, last_day, cap_date)
+    return {
+        "instrument": instrument,
+        "bars": _serialize_bars(out_bars),
+        "day_starts": day_starts,
+        "has_more_forward": has_more,
+    }
+
+
+@router.get("/continuous")
+async def replay_continuous(
+    instrument: str = Query("NQ"),
+    start_date: str = Query(..., description="YYYY-MM-DD (ET trading day)"),
+    context_days: int = Query(DEFAULT_CONTEXT_DAYS, ge=0, le=CONTEXT_DAYS_MAX),
+    forward_days: int = Query(DEFAULT_FORWARD_DAYS, ge=1, le=FORWARD_DAYS_MAX),
+    eth: int = Query(0, description="0=RTH 09:30-16:00, 1=include overnight"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    inst = validate_instrument(instrument)
+    first_ts, last_ts = await _data_range(db, inst)
+    first_data_day = max(MIN_DATE, first_ts.astimezone(ET).date())
+    cap_date = _last_complete_trading_day(
+        last_ts.astimezone(ET).date(), datetime.now(ET))
+    day = validate_replay_date(start_date, cap_date)
+    return await _assemble_continuous(
+        db, inst, day, _clamp(context_days, 0, CONTEXT_DAYS_MAX),
+        _clamp(forward_days, 1, FORWARD_DAYS_MAX), bool(eth),
+        first_data_day, cap_date)
+
+
+@router.get("/continuous/random")
+async def replay_continuous_random(
+    instrument: str = Query("NQ"),
+    context_days: int = Query(DEFAULT_CONTEXT_DAYS, ge=0, le=CONTEXT_DAYS_MAX),
+    forward_days: int = Query(DEFAULT_FORWARD_DAYS, ge=1, le=FORWARD_DAYS_MAX),
+    eth: int = Query(0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    inst = validate_instrument(instrument)
+    first_ts, last_ts = await _data_range(db, inst)
+    first_data_day = max(MIN_DATE, first_ts.astimezone(ET).date())
+    cap_date = _last_complete_trading_day(
+        last_ts.astimezone(ET).date(), datetime.now(ET))
+    context_days = _clamp(context_days, 0, CONTEXT_DAYS_MAX)
+    forward_days = _clamp(forward_days, 1, FORWARD_DAYS_MAX)
+
+    # Pick a hidden weekday start with room for the full forward window before
+    # the yesterday cap. context is clamped, so the earliest start is just the
+    # first data day; the latest start is forward_days back from the cap so a
+    # complete forward run exists.
+    earliest_start = max(MIN_DATE, first_data_day)
+    latest_start = _walk_trading_days(cap_date, -forward_days)
+    if latest_start < earliest_start:
+        raise HTTPException(
+            status_code=404,
+            detail="Not enough history for a continuous random start.")
+    span = (latest_start - earliest_start).days
+
+    for _ in range(RANDOM_MAX_ATTEMPTS):
+        cand = earliest_start + timedelta(days=random.randint(0, span))
+        if cand.weekday() >= 5 or cand > cap_date:
+            continue
+        if await _count_rth_bars(db, inst, cand) < MIN_RANDOM_RTH_BARS:
+            continue
+        payload = await _assemble_continuous(
+            db, inst, cand, context_days, forward_days, bool(eth),
+            first_data_day, cap_date)
+        payload["blind"] = True
+        return payload
+
+    raise HTTPException(
+        status_code=503,
+        detail="Could not find a continuous random start after "
+               f"{RANDOM_MAX_ATTEMPTS} attempts — try again.")
+
+
+@router.get("/continuous/more")
+async def replay_continuous_more(
+    instrument: str = Query("NQ"),
+    after_ts: int = Query(..., description="epoch seconds of the last shown bar"),
+    days: int = Query(DEFAULT_MORE_DAYS, ge=1, le=MORE_DAYS_MAX),
+    eth: int = Query(0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    inst = validate_instrument(instrument)
+    _, last_ts = await _data_range(db, inst)
+    cap_date = _last_complete_trading_day(
+        last_ts.astimezone(ET).date(), datetime.now(ET))
+    return await _assemble_more(
+        db, inst, after_ts, _clamp(days, 1, MORE_DAYS_MAX), bool(eth), cap_date)
