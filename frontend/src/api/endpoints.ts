@@ -618,6 +618,55 @@ const adaptReplayDay = (d: any): ReplayDay => ({
   ny_open_ts: d?.levels?.ny_open_ts ?? null,
 })
 
+// ── continuous multi-day replay (FX-Replay-style) ────────────────────────────
+// GET /api/v1/replay/continuous[/random] return a SINGLE continuous 1m series
+// spanning several trading days, plus a playhead_index (the start day's RTH
+// open). Unlike /day there is NO `levels` object — session bands are drawn from
+// bar times. day_starts[].date must NOT be rendered while blind.
+export type DayStart = { date: string; index: number }
+
+export type ContinuousReplay = {
+  instrument: string
+  startDate: string
+  playheadIndex: number
+  candles: { time: number; open: number; high: number; low: number; close: number; volume?: number }[]
+  dayStarts: DayStart[]
+  firstDate: string
+  lastDate: string
+  hasMoreForward: boolean
+  blind: boolean
+}
+
+// GET /api/v1/replay/continuous/more — the NEXT forward chunk after a timestamp.
+// day_starts[].index here is CHUNK-RELATIVE (0-based within this chunk's bars);
+// the caller offsets by the pre-append length when merging.
+export type ContinuousMore = {
+  instrument: string
+  candles: { time: number; open: number; high: number; low: number; close: number; volume?: number }[]
+  dayStarts: DayStart[]
+  hasMoreForward: boolean
+}
+
+const adaptBars = (arr: any): ContinuousReplay['candles'] =>
+  (arr ?? []).map((b: any) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v }))
+const adaptDayStarts = (arr: any): DayStart[] =>
+  (arr ?? []).map((x: any) => ({ date: x?.date, index: Number(x?.index) || 0 }))
+
+const adaptContinuous = (d: any): ContinuousReplay => ({
+  instrument: d?.instrument,
+  startDate: d?.start_date,
+  playheadIndex: Number.isFinite(d?.playhead_index) ? d.playhead_index : 0,
+  candles: adaptBars(d?.bars),
+  dayStarts: adaptDayStarts(d?.day_starts),
+  firstDate: d?.first_date,
+  lastDate: d?.last_date,
+  hasMoreForward: !!d?.has_more_forward,
+  blind: !!d?.blind,
+})
+
+export type ContinuousOpts = { context?: number; forward?: number; eth?: boolean }
+export type ContinuousMoreOpts = { days?: number; eth?: boolean }
+
 export const replayApi = {
   meta: async (instrument = 'NQ') => {
     const res = await api.get<any>('/api/v1/replay/meta', { params: { instrument } })
@@ -634,5 +683,38 @@ export const replayApi = {
   random: async (instrument: string, eth = false) => {
     const res = await api.get<any>('/api/v1/replay/random', { params: { instrument, include_overnight: eth ? 1 : 0 } })
     return { ...res, data: adaptReplayDay(res.data) }
+  },
+  // Continuous multi-day window starting at `start` (a trading weekday). Reveals
+  // roll straight into the next day; call `continuousMore` to extend forward.
+  continuous: async (instrument: string, start: string, opts: ContinuousOpts = {}) => {
+    const { context = 5, forward = 20, eth = false } = opts
+    const res = await api.get<any>('/api/v1/replay/continuous', {
+      params: { instrument, start_date: start, context_days: context, forward_days: forward, eth: eth ? 1 : 0 },
+    })
+    return { ...res, data: adaptContinuous(res.data) }
+  },
+  // Server-picked hidden weekday start (blind:true). Same shape as continuous.
+  continuousRandom: async (instrument: string, opts: ContinuousOpts = {}) => {
+    const { context = 5, forward = 20, eth = false } = opts
+    const res = await api.get<any>('/api/v1/replay/continuous/random', {
+      params: { instrument, context_days: context, forward_days: forward, eth: eth ? 1 : 0 },
+    })
+    return { ...res, data: adaptContinuous(res.data) }
+  },
+  // Next forward chunk strictly after `afterTs` (epoch SECONDS of the LAST bar
+  // currently HELD). `eth` MUST match the original continuous load's mode.
+  continuousMore: async (instrument: string, afterTs: number, opts: ContinuousMoreOpts = {}) => {
+    const { days = 5, eth = false } = opts
+    const res = await api.get<any>('/api/v1/replay/continuous/more', {
+      params: { instrument, after_ts: afterTs, days, eth: eth ? 1 : 0 },
+    })
+    const d = res.data ?? {}
+    const data: ContinuousMore = {
+      instrument: d?.instrument,
+      candles: adaptBars(d?.bars),
+      dayStarts: adaptDayStarts(d?.day_starts),
+      hasMoreForward: !!d?.has_more_forward,
+    }
+    return { ...res, data }
   },
 }

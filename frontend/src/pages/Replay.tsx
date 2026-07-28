@@ -4,7 +4,7 @@ import {
   Play, Pause, StepForward, FastForward, Shuffle, Rewind, Download,
   TrendingUp, TrendingDown, X, AlertTriangle, CalendarOff, Loader2, EyeOff,
   Settings as SettingsIcon, Maximize2, Minimize2, Plus, Check, Clock, Crosshair, RotateCcw, Layers,
-  Trash2, Eraser,
+  Trash2, Eraser, Flag,
 } from 'lucide-react'
 import { replayApi, type ReplayDay, type ReplayMeta } from '../api/endpoints'
 import TVReplayChart, { type SessionVisibility } from '../components/TVReplayChart'
@@ -27,9 +27,19 @@ const SPEEDS = [1, 2, 4, 10]
 const TF_CHIPS = [1, 2, 3, 5, 15, 30, 60, 240]
 const tfLabel = (t: number) => (t % 60 === 0 ? `${t / 60}h` : `${t}m`)
 const LOG_KEY = 'theta_replay_log'
-// How many bars are pre-revealed when an RTH day loads, so the trader has
-// context instead of a single candle. (ETH loads reveal up to the NY open.)
-const INITIAL_REVEAL = 60
+
+// ── continuous multi-day replay (FX-Replay-style) ────────────────────────────
+// A continuous load spans CONTEXT_DAYS of look-back before the start day through
+// FORWARD_DAYS after it. As playback nears the loaded end we pull the next
+// MORE_DAYS-day chunk (starting APPEND_BUFFER bars early so a fast run never
+// stalls) and append it, so the replay rolls on until real data ends.
+const CONTEXT_DAYS = 5
+const FORWARD_DAYS = 20
+const MORE_DAYS = 5
+const APPEND_BUFFER = 240
+// Flat-only rewind can scrub back through revealed history down to this floor
+// (kept above 0 so the chart never empties).
+const REWIND_FLOOR = 2
 
 // ── chart settings (GOAL A/B/I — persisted, passed live to TVReplayChart) ────
 
@@ -180,13 +190,12 @@ const ET_TIME_FMT = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit',
 })
 const etClock = (epochSecs: number) => ET_TIME_FMT.format(new Date(epochSecs * 1000)) + ' ET'
-// Minutes-since-midnight in ET for a UTC epoch (used to find the NY open bar).
-function etMinutesOf(epochSecs: number): number {
-  const parts = ET_TIME_FMT.formatToParts(new Date(epochSecs * 1000))
-  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0')
-  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? '0')
-  return (h % 24) * 60 + m
-}
+// The ET calendar date (YYYY-MM-DD) of a bar — used to label the "current" day
+// in a continuous multi-day window and to date multi-day trade-log entries.
+const ET_DATE_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+})
+const etDateOf = (epochSecs: number) => ET_DATE_FMT.format(new Date(epochSecs * 1000))
 
 // Timezone/format-aware clock for the toolbar readout (time-only, blind-safe).
 const _clockCache = new Map<string, Intl.DateTimeFormat>()
@@ -305,6 +314,13 @@ export default function Replay() {
   const sessionIdRef = useRef('')
   const [logVersion, setLogVersion] = useState(0)
 
+  // Continuous multi-day window bookkeeping. `day.candles` is the WHOLE window
+  // (context + forward days). hasMoreForward gates the append-as-you-advance
+  // fetch; fetchingMoreRef single-flights it. Session bands per day are drawn by
+  // the chart from bar ET times, so day boundaries need no extra state here.
+  const [hasMoreForward, setHasMoreForward] = useState(false)
+  const fetchingMoreRef = useRef(false)
+
   // Live SL/TP price editors + place-on-chart arming (GOAL G).
   const [slInput, setSlInput] = useState('')
   const [tpInput, setTpInput] = useState('')
@@ -356,37 +372,35 @@ export default function Replay() {
   const resetSession = () => {
     setDay(null); setRevealed(0); setPlaying(false); setDone(false)
     setPos(null); setClosed([]); setTf(1); setArmed(null)
+    setHasMoreForward(false)
+    fetchingMoreRef.current = false
     sessionIdRef.current = ''
   }
 
-  // Where to start the reveal. RTH: a small pre-roll. ETH: advance through the
-  // overnight so playback opens at the NY open with full context behind it.
-  const initialRevealFor = (d: ReplayDay, ethMode: boolean): number => {
-    const len = d.candles.length
-    if (!ethMode) return Math.min(INITIAL_REVEAL, len)
-    let idx = -1
-    if (d.ny_open_ts != null) idx = d.candles.findIndex((b) => b.time >= (d.ny_open_ts as number))
-    if (idx < 0) idx = d.candles.findIndex((b) => etMinutesOf(b.time) >= 570) // 09:30 ET
-    if (idx <= 0) return Math.min(INITIAL_REVEAL, len)
-    return Math.min(len, idx)
-  }
+  // Clamp the initial playhead to a valid reveal count.
+  const clampReveal = (idx: number, len: number) => Math.max(1, Math.min(idx || 0, len))
 
-  const loadDay = async (inst: string, dt: string, blindMode: boolean, ethMode = eth): Promise<'ok' | 'holiday' | 'error'> => {
+  // Continuous multi-day load. The window spans CONTEXT_DAYS before `start`
+  // through FORWARD_DAYS after; revealed starts at the start day's OPEN
+  // (playhead_index) so all look-back context sits behind the playhead. Reveals
+  // roll straight into the next day — there is no per-day "session over" wall.
+  const loadContinuous = async (inst: string, start: string, blindMode: boolean, ethMode = eth): Promise<'ok' | 'holiday' | 'error'> => {
     resetSession()
     setBlind(blindMode)
     setLoadState('loading')
     setLoadError('')
     try {
-      const res = await replayApi.day(inst, dt, ethMode)
-      const d = res.data
-      if (!d?.candles?.length) {
+      const res = await replayApi.continuous(inst, start, { context: CONTEXT_DAYS, forward: FORWARD_DAYS, eth: ethMode })
+      const c = res.data
+      if (!c?.candles?.length) {
         setLoadState('holiday')
         return 'holiday'
       }
-      setDay(d)
-      setDate(dt)
-      setRevealed(initialRevealFor(d, ethMode))
-      sessionIdRef.current = `${inst}-${dt}-${Date.now()}`
+      setDay({ instrument: c.instrument, date: c.startDate, candles: c.candles, pdh: null, pdl: null })
+      setDate(c.startDate)
+      setHasMoreForward(c.hasMoreForward)
+      setRevealed(clampReveal(c.playheadIndex, c.candles.length))
+      sessionIdRef.current = `${inst}-${c.startDate}-${Date.now()}`
       setLoadState('idle')
       return 'ok'
     } catch (e: any) {
@@ -401,23 +415,25 @@ export default function Replay() {
   }
 
   const loadRandomDay = async (ethMode = eth) => {
-    // Blind mode: the SERVER picks a hidden full weekday (/replay/random) so
-    // holidays are pre-filtered and the date can't be inferred client-side.
+    // Blind mode: the SERVER picks a hidden weekday start (/replay/continuous/
+    // random) so holidays are pre-filtered and the date can't be inferred
+    // client-side. day_starts dates ARE in the payload but stay hidden until end.
     resetSession()
     setBlind(true)
     setLoadState('loading')
     setLoadError('')
     try {
-      const res = await replayApi.random(instrument, ethMode)
-      const d = res.data
-      if (!d?.candles?.length) {
+      const res = await replayApi.continuousRandom(instrument, { context: CONTEXT_DAYS, forward: FORWARD_DAYS, eth: ethMode })
+      const c = res.data
+      if (!c?.candles?.length) {
         setLoadState('holiday')
         return
       }
-      setDay(d)
-      setDate(d.date)
-      setRevealed(initialRevealFor(d, ethMode))
-      sessionIdRef.current = `${instrument}-${d.date}-${Date.now()}`
+      setDay({ instrument: c.instrument, date: c.startDate, candles: c.candles, pdh: null, pdl: null })
+      setDate(c.startDate)
+      setHasMoreForward(c.hasMoreForward)
+      setRevealed(clampReveal(c.playheadIndex, c.candles.length))
+      sessionIdRef.current = `${instrument}-${c.startDate}-${Date.now()}`
       setLoadState('idle')
     } catch (e: any) {
       setLoadState('error')
@@ -425,14 +441,14 @@ export default function Replay() {
     }
   }
 
-  // ETH/RTH toggle: reload the SAME day with/without the overnight session.
-  // Blind stays blind — we reuse the known date internally (never shown while
-  // hidden). Sim semantics are unchanged; only the 1m bar set differs.
+  // ETH/RTH toggle: reload the SAME window with/without the overnight session.
+  // Blind stays blind — we reuse the known start date internally (never shown
+  // while hidden). Sim semantics are unchanged; only the 1m bar set differs.
   const toggleEth = () => {
     const next = !eth
     setEth(next)
     if (!day) return
-    if (date) loadDay(activeInstrument, date, blind, next)
+    if (date) loadContinuous(activeInstrument, date, blind, next)
     else loadRandomDay(next)
   }
 
@@ -443,7 +459,9 @@ export default function Replay() {
     appendLog({
       session_id: sessionIdRef.current,
       instrument: activeInstrument,
-      date: day?.date || date,
+      // Multi-day window: date the entry by the trade's own ET day, not the
+      // window's start date.
+      date: etDateOf(t.exitTime),
       direction: t.direction,
       qty: t.qty,
       entry_price: t.entryPrice,
@@ -470,17 +488,52 @@ export default function Replay() {
     setDone(true)
   }
 
+  // Pull the next forward chunk and APPEND it to the END of the window (never
+  // prepend — bars[0] is the chart's resample anchor and sessionIdRef must stay
+  // stable so the chart does a cheap incremental append, not a full redraw that
+  // loses zoom). Single-flighted; drops the result if the session changed.
+  const maybeFetchMore = () => {
+    if (fetchingMoreRef.current || !hasMoreForward || !day) return
+    const cur = day
+    if (!cur.candles.length) return
+    const afterTs = cur.candles[cur.candles.length - 1].time
+    const sid = sessionIdRef.current
+    fetchingMoreRef.current = true
+    replayApi.continuousMore(activeInstrument, afterTs, { days: MORE_DAYS, eth })
+      .then((res) => {
+        if (sessionIdRef.current !== sid) return // a new load happened — discard
+        const chunk = res.data
+        const add = (chunk.candles || []).filter((b) => b.time > afterTs) // defensive: no overlap
+        if (add.length) {
+          // Append ONLY to the end — bars[0] is the chart's resample anchor and
+          // sessionIdRef stays stable, so this is a cheap incremental chart
+          // append (no full redraw / zoom loss).
+          setDay((prev) => (prev ? { ...prev, candles: [...prev.candles, ...add] } : prev))
+        }
+        setHasMoreForward(!!chunk.hasMoreForward)
+      })
+      .catch(() => { if (sessionIdRef.current === sid) setHasMoreForward(false) }) // stop cleanly on error
+      .finally(() => { fetchingMoreRef.current = false })
+  }
+
   // Advance n 1m bars in one shot. A single function (vs calling step() n
   // times) because synchronous repeat calls would all read the same stale
-  // `revealed`/`pos` state from this render.
+  // `revealed`/`pos` state from this render. Reveals roll ACROSS day boundaries
+  // — the only true end is when the data is exhausted (no more forward) or the
+  // trader ends the session.
   const advance = (n = 1) => {
     if (!day || done) return
-    if (revealed >= bars.length) {
+    const total = bars.length
+    if (revealed >= total) {
+      // At the end of the loaded window. If more forward data exists, keep
+      // playing while the append lands (spin-wait auto-resumes); otherwise this
+      // is the real end of the data.
+      if (hasMoreForward) { maybeFetchMore(); return }
       endSession()
       return
     }
     let curPos = pos // local mirror — state won't update mid-function
-    const stop = Math.min(bars.length, revealed + Math.max(1, n))
+    const stop = Math.min(total, revealed + Math.max(1, n))
     for (let i = revealed; i < stop; i++) {
       const bar = bars[i] // the bar being revealed
       if (!curPos) continue
@@ -492,21 +545,38 @@ export default function Replay() {
     }
     setPos(curPos)
     setRevealed(stop)
-    if (stop >= bars.length) {
-      // Day is fully revealed: close out and show the summary.
+    // Prefetch the next chunk as we near the loaded end so a fast run rolls on
+    // without stalling at the boundary.
+    if (hasMoreForward && stop >= total - APPEND_BUFFER) maybeFetchMore()
+    // True end only when the data is exhausted AND fully revealed.
+    if (stop >= total && !hasMoreForward) {
       setPlaying(false)
       setDone(true)
       if (curPos) {
-        const last = bars[bars.length - 1]
+        const last = bars[total - 1]
         recordTrade(closePosition(curPos, last.close, last.time, 'session_end', pointValue))
         setPos(null)
       }
     }
   }
+
+  // Flat-only rewind: scrub the reveal cursor BACK through revealed history.
+  // Disabled while a position is open (re-advancing an open trade would
+  // double-count its exit). Clears `done` so you can rewind after the session
+  // ended, and pauses playback.
+  const rewind = (n = 1) => {
+    if (!day || pos) return
+    setDone(false)
+    setPlaying(false)
+    setRevealed((r) => Math.max(REWIND_FLOOR, Math.min(bars.length, r) - Math.max(1, n)))
+  }
+
   // The interval must always call the LATEST advance (fresh state), so route
   // it through a ref that's reassigned every render.
   const stepRef = useRef(advance)
   stepRef.current = advance
+  const rewindRef = useRef(rewind)
+  rewindRef.current = rewind
 
   useEffect(() => {
     if (!playing) return
@@ -784,7 +854,7 @@ export default function Replay() {
             <input type="date" value={dateHidden ? '' : date}
               min={meta?.min_date} max={meta?.max_date}
               disabled={dateHidden}
-              onChange={(e) => { if (e.target.value) loadDay(instrument, e.target.value, false) }}
+              onChange={(e) => { if (e.target.value) loadContinuous(instrument, e.target.value, false) }}
               className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm px-2 py-1.5 disabled:opacity-60"/>
           </label>
           {dateHidden && (
@@ -894,6 +964,17 @@ export default function Replay() {
                 className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-bold px-1.5 py-1.5">
                 {SPEEDS.map((s) => <option key={s} value={s}>{s}x</option>)}
               </select>
+              {/* flat-only rewind (look-back scrub) — disabled with a position open */}
+              <button onClick={() => rewindRef.current(10)} disabled={!!pos || playing || revealed <= REWIND_FLOOR}
+                title={pos ? 'Close the position to rewind' : 'Rewind 10 bars'}
+                className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                <Rewind size={13}/> -10
+              </button>
+              <button onClick={() => rewindRef.current(1)} disabled={!!pos || playing || revealed <= REWIND_FLOOR}
+                title={pos ? 'Close the position to rewind' : 'Rewind 1 bar'}
+                className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                <Rewind size={13}/> -1
+              </button>
               <button onClick={() => stepRef.current(1)} disabled={done || playing} title="Step 1 bar"
                 className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
                 <StepForward size={13}/> +1
@@ -921,13 +1002,17 @@ export default function Replay() {
               <button onClick={toggleFullscreen} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} className={iconBtn}>
                 {fullscreen ? <Minimize2 size={14}/> : <Maximize2 size={14}/>}
               </button>
+              {/* end the session on-demand (multi-day replay never auto-ends per day) */}
+              <button onClick={endSession} disabled={done} title="End session & show summary" className={iconBtn}>
+                <Flag size={14}/>
+              </button>
               {lastBar && (
                 <div className="ml-auto text-right leading-tight">
                   <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">
-                    {dateHidden ? 'Hidden day' : date} · {zonedClock(lastBar.time, settings.timezone, settings.hour12)} {tzShort}
+                    {dateHidden ? 'Hidden day' : etDateOf(lastBar.time)} · {zonedClock(lastBar.time, settings.timezone, settings.hour12)} {tzShort}
                   </div>
                   <div className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
-                    {lastBar.close.toFixed(2)} <span className="text-[10px] font-semibold text-slate-400">({progressPct}% of day)</span>
+                    {lastBar.close.toFixed(2)} <span className="text-[10px] font-semibold text-slate-400">({progressPct}% loaded{hasMoreForward ? '+' : ''})</span>
                   </div>
                 </div>
               )}
@@ -1224,14 +1309,16 @@ export default function Replay() {
         </div>
       )}
 
-      {/* DAY-END SUMMARY */}
+      {/* SESSION SUMMARY (on-demand or at the true end of the data — the
+          multi-day replay never auto-ends per day). Stats span every day traded. */}
       {done && day && (
         <div className="rounded-2xl border border-violet-200 dark:border-violet-900/50 bg-violet-50 dark:bg-violet-950/20 p-5 mb-4">
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div>
               <div className="text-[10px] uppercase tracking-[0.2em] text-violet-500 dark:text-violet-300 font-bold mb-1">Session complete</div>
               <div className="text-lg font-extrabold text-slate-900 dark:text-slate-100">
-                {activeInstrument} · {date}{blind && <span className="ml-2 text-xs font-bold text-violet-500 dark:text-violet-300">(blind day revealed)</span>}
+                {activeInstrument} · {date}{lastBar && etDateOf(lastBar.time) !== date ? ` → ${etDateOf(lastBar.time)}` : ''}
+                {blind && <span className="ml-2 text-xs font-bold text-violet-500 dark:text-violet-300">(blind window revealed)</span>}
               </div>
               <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">
                 {stats.trades === 0
@@ -1239,10 +1326,18 @@ export default function Replay() {
                   : `${stats.trades} trade${stats.trades === 1 ? '' : 's'} · ${stats.wins}W/${stats.losses}L · ${stats.rCount === 0 ? '—R' : fmtR(stats.totalR)} · ${fmtUsd(stats.totalDollars)}`}
               </div>
             </div>
-            <button onClick={() => loadRandomDay()}
-              className="inline-flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors">
-              <Shuffle size={15}/> Another random day
-            </button>
+            <div className="flex items-center gap-2">
+              {(revealed < bars.length || hasMoreForward) && (
+                <button onClick={() => setDone(false)}
+                  className="inline-flex items-center gap-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-100 px-4 py-2 rounded-xl text-sm font-bold transition-colors">
+                  <Play size={15}/> Resume replay
+                </button>
+              )}
+              <button onClick={() => loadRandomDay()}
+                className="inline-flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors">
+                <Shuffle size={15}/> Another random day
+              </button>
+            </div>
           </div>
         </div>
       )}
