@@ -42,13 +42,19 @@ type DrawTarget = Parameters<ISeriesPrimitivePaneRenderer['draw']>[0]
 
 // ── public types ─────────────────────────────────────────────────────────────
 
-/** All palette tools. 'cursor' = select/drag (no drawing). */
+/** All palette tools. 'cursor' = select/drag (no drawing).
+ *  'long' / 'short' are the TradingView-style risk/reward POSITION tools. */
 export type DrawTool =
   | 'cursor' | 'trendline' | 'ray' | 'extended' | 'hline' | 'hray'
-  | 'vline' | 'rect' | 'fib' | 'text' | 'measure'
+  | 'vline' | 'rect' | 'fib' | 'text' | 'measure' | 'long' | 'short'
 
 /** Tools that actually produce a persisted drawing (everything but the cursor). */
 export type DrawKind = Exclude<DrawTool, 'cursor'>
+
+/** True for the two risk/reward position tools (entry + stop zone + target zone). */
+export function isPositionTool(tool: DrawTool): tool is 'long' | 'short' {
+  return tool === 'long' || tool === 'short'
+}
 
 export type LineDash = 'solid' | 'dashed' | 'dotted'
 
@@ -66,14 +72,24 @@ export type DrawStyle = {
 /** One endpoint: ET-shifted epoch seconds + real price. Never rendered as text. */
 export type Anchor = { time: number; price: number }
 
+/** One fib retracement level. `value` is the ratio (0..1 and beyond, e.g. 1.272,
+ *  1.618). `visible` false hides it without discarding it (default visible).
+ *  `color` overrides the drawing's line color for that one level (default: the
+ *  drawing's style.color). Carried PER-drawing so each fib keeps its own levels. */
+export type FibLevel = { value: number; visible?: boolean; color?: string }
+
 export type Drawing = {
   id: string
   tool: DrawKind
-  /** 1 anchor for hline/hray/vline/text; 2 for everything else. */
+  /** hline/hray/vline/text: 1 anchor. long/short: 3 (entry / stop / target).
+   *  Everything else: 2. */
   points: Anchor[]
   style: DrawStyle
   /** only for the text tool. */
   text?: string
+  /** fib only: custom levels. Undefined ⇒ the default 7 (FIB_LEVELS). Editable
+   *  per drawing (add / remove / retype value / toggle / per-level color). */
+  levels?: FibLevel[]
 }
 
 /** A resampled display candle (what the engine needs for magnet + bar counts). */
@@ -85,10 +101,15 @@ export type SelectionInfo = {
   tool: DrawKind
   style: DrawStyle
   text?: string
-  /** rect / fib / measure expose a fill-opacity control. */
+  /** rect / fib / measure / long / short expose a fill-opacity control. */
   supportsFill: boolean
   /** the text tool exposes a font-size + edit-text control. */
   supportsText: boolean
+  /** the fib tool exposes an "Edit levels" affordance. */
+  supportsFibLevels: boolean
+  /** effective fib levels of the selection (custom, else the default 7); only
+   *  present when the selection is a fib — populate the "Edit levels" editor. */
+  fibLevels?: FibLevel[]
 }
 
 /** The full engine state pushed to the page after every mutation. */
@@ -102,6 +123,9 @@ export type DrawingState = {
   count: number
   selection: SelectionInfo | null
   defaults: DrawStyle
+  /** current DEFAULT fib levels applied to newly drawn fibs (resolved: the
+   *  default 7 until setFibDefaults changes them). */
+  fibDefaults: FibLevel[]
 }
 
 /** Imperative handle handed to the page (builder 2) via TVReplayChart.onDrawingApi. */
@@ -124,6 +148,20 @@ export type DrawingApi = {
   getState(): DrawingState
   /** subscribe to state changes; returns an unsubscribe fn. */
   subscribe(fn: (s: DrawingState) => void): () => void
+  // ── GOAL 4: editable fibonacci levels ──────────────────────────────────────
+  /** Replace the SELECTED fib's levels (no-op unless a fib is selected).
+   *  Pass a fresh array; the engine clones + persists it. */
+  setSelectedFibLevels(levels: FibLevel[]): void
+  /** Clear the selected fib back to the DEFAULT levels (no-op unless fib). */
+  resetSelectedFibLevels(): void
+  /** Effective levels of the selected fib (custom, else the default 7), or null
+   *  when the selection isn't a fib — use to seed the editor. */
+  getSelectedFibLevels(): FibLevel[] | null
+  /** Set the DEFAULT levels applied to newly drawn fibs (does not touch existing
+   *  drawings). Pass a copy of the default 7 to reset. */
+  setFibDefaults(levels: FibLevel[]): void
+  /** The current default fib levels for new fibs. */
+  getFibDefaults(): FibLevel[]
 }
 
 export const DEFAULT_DRAW_STYLE: DrawStyle = {
@@ -131,6 +169,94 @@ export const DEFAULT_DRAW_STYLE: DrawStyle = {
 }
 
 export const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]
+
+/** A fresh default fib-level list (all visible, no per-level color). */
+export function defaultFibLevels(): FibLevel[] {
+  return FIB_LEVELS.map((value) => ({ value, visible: true }))
+}
+
+/** Deep-copy a level list (arrays are handed across the api boundary). */
+function cloneFibLevels(levels: FibLevel[]): FibLevel[] {
+  return levels.map((l) => ({ value: l.value, visible: l.visible !== false, ...(l.color ? { color: l.color } : {}) }))
+}
+
+/** Coerce arbitrary parsed input into a clean FibLevel[] (tolerant loader).
+ *  Accepts the rich {value,visible,color} shape AND a legacy number[]. Returns
+ *  undefined when there is nothing usable, so the drawing falls back to default. */
+function normalizeFibLevels(v: unknown): FibLevel[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const out: FibLevel[] = []
+  for (const raw of v) {
+    if (typeof raw === 'number') {
+      if (Number.isFinite(raw)) out.push({ value: raw, visible: true })
+      continue
+    }
+    if (raw && typeof raw === 'object') {
+      const o = raw as Record<string, unknown>
+      const value = typeof o.value === 'number' ? o.value : Number(o.value)
+      if (!Number.isFinite(value)) continue
+      const level: FibLevel = { value, visible: o.visible !== false }
+      if (typeof o.color === 'string') level.color = o.color
+      out.push(level)
+    }
+  }
+  return out.length ? out : undefined
+}
+
+/** The levels a fib should render with: its own custom set, else the default 7. */
+function fibLevelsOf(d: Drawing): FibLevel[] {
+  return d.levels && d.levels.length ? d.levels : defaultFibLevels()
+}
+
+// ── position tool (long/short) geometry — pure helpers ────────────────────────
+// A position drawing stores THREE anchors: points[0] = (leftTime, entryPrice),
+// points[1] = (rightTime, stopPrice), points[2] = (rightTime, targetPrice). The
+// box spans [points[0].time, points[1].time]; the three prices are the levels.
+const POS_MIN_BARS = 10 // default box width (bars) when placed with ~zero width
+
+/** From an entry + a dragged "other" price, derive stop/target for a direction:
+ *  the drag distance becomes the risk; the reward defaults to 2R (TradingView's
+ *  Long/Short Position tool default). Stop always sits on the losing side. */
+function posLevels(tool: 'long' | 'short', entry: number, other: number): { entry: number; stop: number; target: number } {
+  const raw = Math.abs(other - entry)
+  const dist = raw > 0 ? raw : (entry !== 0 ? Math.abs(entry) * 0.002 : 1)
+  const sign = tool === 'long' ? 1 : -1
+  return { entry, stop: entry - sign * dist, target: entry + sign * 2 * dist }
+}
+
+/** Turn the two placement anchors into the 3-anchor position representation. */
+function buildPositionPoints(tool: 'long' | 'short', p0: Anchor, p1: Anchor, tfSec: number): Anchor[] {
+  const tLeft = Math.min(p0.time, p1.time)
+  let tRight = Math.max(p0.time, p1.time)
+  if (tRight - tLeft < tfSec) tRight = tLeft + POS_MIN_BARS * tfSec
+  const { entry, stop, target } = posLevels(tool, p0.price, p1.price)
+  return [
+    { time: tLeft, price: entry },
+    { time: tRight, price: stop },
+    { time: tRight, price: target },
+  ]
+}
+
+/** Resolve the display geometry of a position drawing (committed 3-anchor form,
+ *  or an in-progress 2-anchor preview). null if it has no usable anchors. */
+function positionGeom(d: Drawing): { tLeft: number; tRight: number; entry: number; stop: number; target: number } | null {
+  const pts = d.points
+  if (pts.length >= 3) {
+    return { tLeft: pts[0].time, tRight: pts[1].time, entry: pts[0].price, stop: pts[1].price, target: pts[2].price }
+  }
+  if (pts.length === 2 && (d.tool === 'long' || d.tool === 'short')) {
+    const tLeft = Math.min(pts[0].time, pts[1].time)
+    const tRight = Math.max(pts[0].time, pts[1].time)
+    const { entry, stop, target } = posLevels(d.tool, pts[0].price, pts[1].price)
+    return { tLeft, tRight, entry, stop, target }
+  }
+  return null
+}
+
+// Semantic colors for the position tool zones (fixed, like TradingView).
+const POS_STOP = '#ef5350'   // red — risk zone
+const POS_TARGET = '#26a69a' // green — reward zone
+const POS_ENTRY = '#787b86'  // neutral grey — entry line
 
 // ── constants ────────────────────────────────────────────────────────────────
 const HIT_TOL = 6        // px, body hit tolerance
@@ -166,6 +292,9 @@ export function loadDrawings(instrument: string): Drawing[] {
         points: pts,
         style: normalizeStyle(dd.style),
         text: typeof dd.text === 'string' ? dd.text : undefined,
+        // Preserve custom fib levels across reloads / instrument switches (the
+        // loader would otherwise silently drop this per-drawing field).
+        levels: dd.tool === 'fib' ? normalizeFibLevels(dd.levels) : undefined,
       })
     }
     return out
@@ -281,6 +410,11 @@ function withAlpha(color: string, alpha: number): string {
 
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
 
+/** Compact ratio label: 0.500→"0.5", 1.000→"1", 1.272→"1.272" (≤3 decimals). */
+function fmtRatio(v: number): string {
+  return v.toFixed(3).replace(/\.?0+$/, '')
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Renderer — projects stored (time, price) anchors to pixels every frame and
 // paints all committed drawings + the preview + selection handles. Lines/fills
@@ -395,8 +529,11 @@ class DrawingsRenderer implements ISeriesPrimitivePaneRenderer {
         if (a && b) {
           const x1 = X(Math.min(a.x, b.x)), x2 = X(Math.max(a.x, b.x))
           const p0 = d.points[0].price, p1 = d.points[1].price
-          const ys = FIB_LEVELS.map((l) => {
-            const yy = P.yOf(p0 + l * (p1 - p0))
+          // Custom (or default) levels, visible only, sorted so the bands sit
+          // between adjacent ratios regardless of the edit order.
+          const levels = fibLevelsOf(d).filter((l) => l.visible !== false).slice().sort((m, n) => m.value - n.value)
+          const ys = levels.map((l) => {
+            const yy = P.yOf(p0 + l.value * (p1 - p0))
             return yy == null ? null : Y(yy)
           })
           // translucent bands between consecutive levels
@@ -407,11 +544,54 @@ class DrawingsRenderer implements ISeriesPrimitivePaneRenderer {
               ctx.fillStyle = withAlpha(st.color, st.fillOpacity * (i % 2 === 0 ? 0.9 : 0.4))
               ctx.fillRect(x1, Math.min(y0, y1v), x2 - x1, Math.abs(y1v - y0))
             }
-            ctx.fillStyle = withAlpha(st.color, st.fillOpacity)
           }
-          for (const yy of ys) {
+          for (let i = 0; i < ys.length; i++) {
+            const yy = ys[i]
             if (yy == null) continue
+            ctx.strokeStyle = levels[i].color ?? st.color // per-level color override
             this._seg(ctx, x1, yy, x2, yy)
+          }
+        }
+        break
+      }
+      case 'long':
+      case 'short': {
+        // TradingView-style risk/reward box: entry line + red stop zone + green
+        // target zone, spanning the drawing's time extent. Zones use the semantic
+        // colors (not style.color); style.color paints the entry line + edges,
+        // style.fillOpacity scales the zone translucency, width/dash the lines.
+        const g = positionGeom(d)
+        if (g) {
+          let x0 = P.xOf(g.tLeft); let x1 = P.xOf(g.tRight)
+          if (x0 != null && x1 != null) {
+            if (x1 < x0) { const t = x0; x0 = x1; x1 = t }
+            const Wm = W / hr
+            if (x1 - x0 < 2) x1 = Wm // keep a near-zero-width preview visible
+            const ye = P.yOf(g.entry), ys = P.yOf(g.stop), yt = P.yOf(g.target)
+            const zoneAlpha = Math.max(0.05, Math.min(0.5, st.fillOpacity + 0.03))
+            ctx.setLineDash([])
+            if (ye != null && ys != null) {
+              ctx.fillStyle = withAlpha(POS_STOP, zoneAlpha)
+              ctx.fillRect(X(x0), Math.min(Y(ye), Y(ys)), X(x1) - X(x0), Math.abs(Y(ys) - Y(ye)))
+            }
+            if (ye != null && yt != null) {
+              ctx.fillStyle = withAlpha(POS_TARGET, zoneAlpha)
+              ctx.fillRect(X(x0), Math.min(Y(ye), Y(yt)), X(x1) - X(x0), Math.abs(Y(yt) - Y(ye)))
+            }
+            // vertical edges spanning the whole box (faint)
+            const yTop = Math.min(ye ?? Infinity, ys ?? Infinity, yt ?? Infinity)
+            const yBot = Math.max(ye ?? -Infinity, ys ?? -Infinity, yt ?? -Infinity)
+            if (Number.isFinite(yTop) && Number.isFinite(yBot)) {
+              ctx.strokeStyle = withAlpha(st.color, 0.5)
+              ctx.lineWidth = Math.max(1, vr)
+              this._seg(ctx, X(x0), Y(yTop), X(x0), Y(yBot))
+              this._seg(ctx, X(x1), Y(yTop), X(x1), Y(yBot))
+            }
+            ctx.lineWidth = lw
+            this._dash(ctx, st.dash, vr)
+            if (ye != null) { ctx.strokeStyle = st.color; this._seg(ctx, X(x0), Y(ye), X(x1), Y(ye)) }
+            if (ys != null) { ctx.strokeStyle = POS_STOP; this._seg(ctx, X(x0), Y(ys), X(x1), Y(ys)) }
+            if (yt != null) { ctx.strokeStyle = POS_TARGET; this._seg(ctx, X(x0), Y(yt), X(x1), Y(yt)) }
           }
         }
         break
@@ -484,12 +664,47 @@ class DrawingsRenderer implements ISeriesPrimitivePaneRenderer {
       ctx.save()
       ctx.font = `10px ${FONT}`
       ctx.textBaseline = 'middle'
-      ctx.fillStyle = d.style.color
-      for (const l of FIB_LEVELS) {
-        const price = p0 + l * (p1 - p0)
+      for (const l of fibLevelsOf(d)) {
+        if (l.visible === false) continue
+        const price = p0 + l.value * (p1 - p0)
         const yy = P.yOf(price)
         if (yy == null) continue
-        ctx.fillText(`${l.toFixed(3)}  ${P.fmtPrice(price)}`, rightX + 4, yy)
+        ctx.fillStyle = l.color ?? d.style.color
+        ctx.fillText(`${fmtRatio(l.value)}  ${P.fmtPrice(price)}`, rightX + 4, yy)
+      }
+      ctx.restore()
+      return
+    }
+    if (d.tool === 'long' || d.tool === 'short') {
+      const g = positionGeom(d)
+      if (!g) return
+      let x0 = P.xOf(g.tLeft); let x1 = P.xOf(g.tRight)
+      if (x0 == null || x1 == null) return
+      if (x1 < x0) { const t = x0; x0 = x1; x1 = t }
+      const ye = P.yOf(g.entry), ys = P.yOf(g.stop), yt = P.yOf(g.target)
+      const risk = Math.abs(g.entry - g.stop)
+      const reward = Math.abs(g.target - g.entry)
+      const rr = risk > 0 ? reward / risk : 0
+      const pct = (v: number) => (g.entry !== 0 ? (v / g.entry) * 100 : 0)
+      const cx = x0 + 6
+      ctx.save()
+      ctx.font = `11px ${FONT}`
+      ctx.textBaseline = 'middle'
+      const chip = (text: string, x: number, y: number, bg: string) => {
+        const w = ctx.measureText(text).width
+        ctx.fillStyle = withAlpha(bg, 0.92)
+        ctx.fillRect(x - 3, y - 8, w + 6, 16)
+        ctx.fillStyle = '#ffffff'
+        ctx.fillText(text, x, y)
+      }
+      if (ye != null && yt != null) {
+        chip(`Target ${P.fmtPrice(g.target)}  +${P.fmtPrice(reward)} (${pct(reward).toFixed(2)}%)`, cx, (ye + yt) / 2, POS_TARGET)
+      }
+      if (ye != null && ys != null) {
+        chip(`Stop ${P.fmtPrice(g.stop)}  -${P.fmtPrice(risk)} (${pct(risk).toFixed(2)}%)`, cx, (ye + ys) / 2, POS_STOP)
+      }
+      if (ye != null) {
+        chip(`${d.tool === 'long' ? 'LONG' : 'SHORT'}  Entry ${P.fmtPrice(g.entry)}  R:R ${rr.toFixed(2)}`, cx, ye, POS_ENTRY)
       }
       ctx.restore()
       return
@@ -580,6 +795,8 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
   // tool / mode state
   activeTool: DrawTool = 'cursor'
   defaults: DrawStyle = { ...DEFAULT_DRAW_STYLE }
+  /** default fib levels applied to NEW fibs; undefined ⇒ the standard 7. */
+  fibDefaults: FibLevel[] | undefined = undefined
   magnet = false
   hidden = false
   locked = false
@@ -645,6 +862,12 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
     for (const d of this.drawings) {
       if (d.tool === 'hline' || d.tool === 'hray') {
         out.push(new DrawingsAxisView(this, d.points[0].price, d.style.color))
+      } else if (d.tool === 'long' || d.tool === 'short') {
+        const g = positionGeom(d)
+        if (!g) continue
+        out.push(new DrawingsAxisView(this, g.entry, POS_ENTRY))
+        out.push(new DrawingsAxisView(this, g.stop, POS_STOP))
+        out.push(new DrawingsAxisView(this, g.target, POS_TARGET))
       }
     }
     return out
@@ -733,6 +956,23 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
     switch (d.tool) {
       case 'trendline': case 'ray': case 'extended': case 'rect': case 'fib': case 'measure':
         push(this.pt(d.points[0])); push(this.pt(d.points[1])); break
+      case 'long': case 'short': {
+        // entry / stop / target handles at the box's horizontal center. Hit
+        // mapping lives in _handleHitTest (level-index based), so skipping an
+        // off-scale handle here only affects which squares get drawn.
+        const g = positionGeom(d)
+        if (g) {
+          const x0 = this.xOf(g.tLeft); const x1 = this.xOf(g.tRight)
+          if (x0 != null && x1 != null) {
+            const mx = (x0 + x1) / 2
+            for (const price of [g.entry, g.stop, g.target]) {
+              const yy = this.yOf(price)
+              if (yy != null) out.push({ x: mx, y: yy })
+            }
+          }
+        }
+        break
+      }
       case 'text':
         push(this.pt(d.points[0])); break
       case 'hline': {
@@ -750,6 +990,21 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
     return out
   }
   private _handleHitTest(d: Drawing, x: number, y: number): number {
+    // Position tools: the three level handles map to points[0/1/2] (entry/stop/
+    // target) by LEVEL, independent of how handlePoints packed the drawn squares.
+    if (d.tool === 'long' || d.tool === 'short') {
+      const g = positionGeom(d)
+      if (!g) return -1
+      const x0 = this.xOf(g.tLeft); const x1 = this.xOf(g.tRight)
+      if (x0 == null || x1 == null) return -1
+      const mx = (x0 + x1) / 2
+      const levels = [g.entry, g.stop, g.target]
+      for (let i = 0; i < 3; i++) {
+        const yy = this.yOf(levels[i])
+        if (yy != null && Math.hypot(mx - x, yy - y) <= HANDLE_TOL) return i
+      }
+      return -1
+    }
     const pts = this.handlePoints(d)
     // map handle-array index back to a points[] index
     for (let i = 0; i < pts.length; i++) {
@@ -805,11 +1060,25 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
         const x1 = Math.min(a.x, b.x), x2 = Math.max(a.x, b.x)
         if (x < x1 - t || x > x2 + t) return false
         const p0 = d.points[0].price, p1 = d.points[1].price
-        for (const l of FIB_LEVELS) {
-          const yy = this.yOf(p0 + l * (p1 - p0))
+        for (const l of fibLevelsOf(d)) {
+          if (l.visible === false) continue
+          const yy = this.yOf(p0 + l.value * (p1 - p0))
           if (yy != null && Math.abs(y - yy) <= t) return true
         }
         return false
+      }
+      case 'long':
+      case 'short': {
+        // whole risk/reward box grabbable (easy select + body-drag)
+        const g = positionGeom(d)
+        if (!g) return false
+        let x0 = this.xOf(g.tLeft); let x1 = this.xOf(g.tRight)
+        if (x0 == null || x1 == null) return false
+        if (x1 < x0) { const tt = x0; x0 = x1; x1 = tt }
+        const ye = this.yOf(g.entry), ys = this.yOf(g.stop), yt = this.yOf(g.target)
+        if (ye == null || ys == null || yt == null) return false
+        const top = Math.min(ye, ys, yt), bot = Math.max(ye, ys, yt)
+        return pointInRect(x, y, x0, top, x1, bot, t)
       }
       case 'text': {
         const p = this.pt(d.points[0])
@@ -918,7 +1187,12 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
       if (!sel) return
       const a = this._anchorAt(x, y)
       if (!a) return
-      sel.points[this._handleIdx] = a
+      if (sel.tool === 'long' || sel.tool === 'short') {
+        // level handles move the PRICE only; the box's time extent is unchanged.
+        sel.points[this._handleIdx] = { time: sel.points[this._handleIdx].time, price: a.price }
+      } else {
+        sel.points[this._handleIdx] = a
+      }
       this._moved = true
       this._req()
       return
@@ -1000,7 +1274,15 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
   }
 
   private _commit(tool: DrawKind, points: Anchor[], text?: string) {
-    const d: Drawing = { id: uid(), tool, points, style: { ...this.defaults }, text }
+    // Position tools carry THREE anchors (entry/stop/target); the placement gives
+    // two, so derive the risk/reward box here.
+    let pts = points
+    if ((tool === 'long' || tool === 'short') && points.length === 2) {
+      pts = buildPositionPoints(tool, points[0], points[1], this.tfSec)
+    }
+    // New fibs inherit the current default levels (if the user customized them).
+    const levels = tool === 'fib' && this.fibDefaults ? cloneFibLevels(this.fibDefaults) : undefined
+    const d: Drawing = { id: uid(), tool, points: pts, style: { ...this.defaults }, text, levels }
     if (this.hidden) this.hidden = false // a fresh draw un-hides so it is never an invisible commit
     this.drawings.push(d)
     this.preview = null
@@ -1096,11 +1378,15 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
       selection: sel
         ? {
           id: sel.id, tool: sel.tool, style: { ...sel.style }, text: sel.text,
-          supportsFill: sel.tool === 'rect' || sel.tool === 'fib' || sel.tool === 'measure',
+          supportsFill: sel.tool === 'rect' || sel.tool === 'fib' || sel.tool === 'measure'
+            || sel.tool === 'long' || sel.tool === 'short',
           supportsText: sel.tool === 'text',
+          supportsFibLevels: sel.tool === 'fib',
+          fibLevels: sel.tool === 'fib' ? cloneFibLevels(fibLevelsOf(sel)) : undefined,
         }
         : null,
       defaults: { ...this.defaults },
+      fibDefaults: cloneFibLevels(this.fibDefaults ?? defaultFibLevels()),
     }
   }
   subscribe(fn: (s: DrawingState) => void): () => void {
@@ -1152,6 +1438,27 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
       hasSelection: () => this.selectedId != null,
       getState: () => this.getState(),
       subscribe: (fn) => this.subscribe(fn),
+      setSelectedFibLevels: (levels) => {
+        const sel = this._selected()
+        if (!sel || sel.tool !== 'fib') return
+        sel.levels = cloneFibLevels(levels)
+        this._persist(); this._emit(); this._req()
+      },
+      resetSelectedFibLevels: () => {
+        const sel = this._selected()
+        if (!sel || sel.tool !== 'fib') return
+        sel.levels = undefined
+        this._persist(); this._emit(); this._req()
+      },
+      getSelectedFibLevels: () => {
+        const sel = this._selected()
+        return sel && sel.tool === 'fib' ? cloneFibLevels(fibLevelsOf(sel)) : null
+      },
+      setFibDefaults: (levels) => {
+        this.fibDefaults = cloneFibLevels(levels)
+        this._emit()
+      },
+      getFibDefaults: () => cloneFibLevels(this.fibDefaults ?? defaultFibLevels()),
     }
   }
   hasSelection(): boolean {

@@ -51,6 +51,88 @@ export type ClosedTrade = {
   dollars: number        // points * pointValue * qty, signed
 }
 
+// ── GOAL 2: resting LIMIT order (pure sim, additive) ─────────────────────────
+// A single resting order can exist while FLAT. Unlike a market order it does not
+// open immediately — the reveal loop tests each newly revealed bar with
+// checkLimitFill(); on a fill the order becomes an OpenPosition via
+// openFromLimit(). stopPrice / targetPrice are ABSOLUTE prices (already resolved
+// off the limit), each null when the trader left that bracket blank — exactly
+// the OpenPosition convention, so a filled order behaves identically thereafter.
+export type PendingOrder = {
+  direction: Direction
+  qty: number
+  limitPrice: number
+  stopPrice: number | null
+  targetPrice: number | null
+}
+
+// Build a resting limit order, resolving the OPTIONAL stop/target off the limit
+// price the same way openPosition() resolves them off the entry close. This lets
+// the ticket feed point-based inputs (stop distance in points, target as an
+// r-multiple or points) and keep MARKET and LIMIT flows symmetric. Passing
+// null/undefined (or a non-positive stop) yields a bare limit with no bracket;
+// an 'r' target with no stop simply yields no target (same as market).
+export function makePendingOrder(
+  direction: Direction,
+  qty: number,
+  limitPrice: number,
+  stopPoints?: number | null,
+  target?: TargetSpec | null,
+): PendingOrder {
+  const dir = direction === 'long' ? 1 : -1
+  const risk = stopPoints != null && stopPoints > 0 ? stopPoints : null
+  let targetPrice: number | null = null
+  if (target != null) {
+    const tp = target.kind === 'r'
+      ? (risk != null ? risk * target.value : null)
+      : target.value
+    if (tp != null && tp > 0) targetPrice = limitPrice + dir * tp
+  }
+  return {
+    direction,
+    qty,
+    limitPrice,
+    stopPrice: risk != null ? limitPrice - dir * risk : null,
+    targetPrice,
+  }
+}
+
+// Test a newly revealed bar for a resting-limit fill. A LONG limit rests BELOW
+// price and fills when the bar trades down to it (bar.low <= limit); a SHORT
+// limit rests ABOVE and fills when the bar trades up to it (bar.high >= limit).
+// Fills exactly at the limit price (no slippage / no gap improvement in v1),
+// matching the stop/target fill convention. null when the bar didn't reach it.
+export function checkLimitFill(order: PendingOrder, bar: SimBar): { price: number } | null {
+  if (order.direction === 'long') {
+    if (bar.low <= order.limitPrice) return { price: order.limitPrice }
+  } else {
+    if (bar.high >= order.limitPrice) return { price: order.limitPrice }
+  }
+  return null
+}
+
+// Promote a FILLED limit order into an OpenPosition. Entry is the limit price
+// (v1: exact fill); risk is |entry − stop| when a stop was set, else 0 so r math
+// stays null forever — identical semantics to openPosition(). The filled trade
+// then records normally through checkExit / closePosition, so stats + markers
+// include it with no special-casing.
+export function openFromLimit(
+  order: PendingOrder,
+  fillTime: number,
+  fillPrice: number = order.limitPrice,
+): OpenPosition {
+  const risk = order.stopPrice != null ? Math.abs(fillPrice - order.stopPrice) : null
+  return {
+    direction: order.direction,
+    qty: order.qty,
+    entryPrice: fillPrice,
+    entryTime: fillTime,
+    stopPrice: order.stopPrice,
+    targetPrice: order.targetPrice,
+    riskPoints: risk ?? 0,
+  }
+}
+
 // Open a market position at the current bar's close. GOAL G: both the stop and
 // the target are OPTIONAL — pass null/undefined (or a non-positive stop) to open
 // a bare market order, exactly like FX Replay. An 'r'-based target needs a stop

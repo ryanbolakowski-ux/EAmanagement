@@ -34,6 +34,14 @@ export type TVPosition = {
   direction: 'long' | 'short'; qty: number; entryPrice: number; entryTime: number
   stopPrice: number | null; targetPrice: number | null
 }
+// GOAL 2: a resting LIMIT order awaiting a fill (drawn while FLAT). limitPrice is
+// the resting level; stopPrice / targetPrice are the ABSOLUTE bracket prices it
+// will carry once filled (null when unset). Rendered as dashed price lines that
+// clear on fill / cancel. Blind-safe (only prices ever hit the axis).
+export type TVPendingOrder = {
+  direction: 'long' | 'short'; qty: number; limitPrice: number
+  stopPrice: number | null; targetPrice: number | null
+}
 
 // Master toggles for the session-shading bands (GOAL B). Any omitted key
 // defaults to visible; the whole overlay is gated by `sessionsEnabled`.
@@ -54,7 +62,12 @@ type Props = {
   pdh?: number | null
   pdl?: number | null
   position?: TVPosition | null
+  /** GOAL 2: resting limit order to draw while flat (null = none). */
+  pendingOrder?: TVPendingOrder | null
   trades?: TVTrade[]
+  // ── GOAL 1: grid visibility (default true = current look; applied live) ───
+  /** Show the background grid. Omit / true keeps the existing appearance. */
+  showGrid?: boolean
   // ── GOAL A: live color customization ─────────────────────────────────────
   /** Up candle+wick color. Default TradingView green #26a69a. */
   upColor?: string
@@ -101,6 +114,9 @@ const DOWN = '#ef5350'
 const VOL_UP = 'rgba(38, 166, 154, 0.45)'
 const VOL_DOWN = 'rgba(239, 83, 80, 0.45)'
 const ENTRY_LINE = '#787b86'
+// GOAL 2: resting-limit price line — a distinct violet so it never reads as an
+// entry (grey), SL (red), TP (green) or PDH/PDL (amber/blue) line.
+const PENDING_LINE = '#b388ff'
 
 const THEMES = {
   dark: {
@@ -411,8 +427,8 @@ class SessionBands implements ISeriesPrimitive<Time> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function TVReplayChart({
-  instrument, bars, displayTf, resetKey, showDate, pdh, pdl, position, trades = [],
-  upColor, downColor, background, sessionsEnabled, sessionVisibility,
+  instrument, bars, displayTf, resetKey, showDate, pdh, pdl, position, pendingOrder,
+  trades = [], showGrid, upColor, downColor, background, sessionsEnabled, sessionVisibility,
   timezone = 'America/New_York', hour12 = false, onChartClick, onContextMenu,
   onDrawingApi, onDrawingState,
 }: Props) {
@@ -447,6 +463,10 @@ export default function TVReplayChart({
   liveRef.current = { instrument, displayTf, showDate, timezone, hour12, onChartClick, onContextMenu }
   const backgroundRef = useRef<string | null>(background ?? null)
   backgroundRef.current = background ?? null
+  // GOAL 1: grid visibility read live. Undefined ⇒ true so existing users see no
+  // change; applied via applyOptions so zoom / reveal state is preserved.
+  const showGridRef = useRef<boolean>(showGrid ?? true)
+  showGridRef.current = showGrid ?? true
   const sessionsEnabledRef = useRef<boolean>(sessionsEnabled ?? false)
   sessionsEnabledRef.current = sessionsEnabled ?? false
   const sessionVisibilityRef = useRef<Record<SessionKey, boolean>>(resolvedVisibility)
@@ -487,11 +507,14 @@ export default function TVReplayChart({
     fontSize: 40,
   })
 
-  const themeOptions = (dark: boolean, bgOverride?: string | null) => {
+  const themeOptions = (dark: boolean, bgOverride?: string | null, gridVisible = true) => {
     const t = dark ? THEMES.dark : THEMES.light
     return {
       layout: { background: { type: ColorType.Solid as const, color: bgOverride ?? t.bg }, textColor: t.text },
-      grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
+      grid: {
+        vertLines: { color: t.grid, visible: gridVisible },
+        horzLines: { color: t.grid, visible: gridVisible },
+      },
       rightPriceScale: { borderColor: t.border },
       timeScale: { borderColor: t.border },
       crosshair: {
@@ -514,7 +537,7 @@ export default function TVReplayChart({
     const chart = createChart(el, {
       width: el.clientWidth,
       height: el.clientHeight,
-      ...themeOptionsRef.current(isDarkRef.current, backgroundRef.current),
+      ...themeOptionsRef.current(isDarkRef.current, backgroundRef.current, showGridRef.current),
       timeScale: {
         borderColor: (isDarkRef.current ? THEMES.dark : THEMES.light).border,
         timeVisible: true,
@@ -650,7 +673,7 @@ export default function TVReplayChart({
       isDarkRef.current = dark
       const bg = backgroundRef.current
       chart.applyOptions({
-        ...themeOptionsRef.current(dark, bg),
+        ...themeOptionsRef.current(dark, bg, showGridRef.current),
         watermark: watermarkOptionsRef.current(dark),
       })
       const eff = bg ?? (dark ? THEMES.dark.bg : THEMES.light.bg)
@@ -750,6 +773,16 @@ export default function TVReplayChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionsEnabled, resolvedVisibility.asia, resolvedVisibility.london, resolvedVisibility.nyAm, resolvedVisibility.nyLunch, resolvedVisibility.nyPm])
 
+  // ── GOAL 1: grid on/off applied live (no recreate — zoom/reveal preserved) ─
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      grid: {
+        vertLines: { visible: showGridRef.current },
+        horzLines: { visible: showGridRef.current },
+      },
+    })
+  }, [showGrid])
+
   // ── data: setData only on hard reset, series.update() during playback ─────
   useEffect(() => {
     const chart = chartRef.current
@@ -822,6 +855,15 @@ export default function TVReplayChart({
       if (position.stopPrice != null) add(position.stopPrice, DOWN, LineStyle.Dashed, 'SL')
       if (position.targetPrice != null) add(position.targetPrice, UP, LineStyle.Dashed, 'TP')
     }
+    // GOAL 2: a resting limit order (only while FLAT — position + pendingOrder are
+    // mutually exclusive). Distinct violet dashed line + its projected bracket, all
+    // clearing automatically when pendingOrder becomes null (fill / cancel / rewind).
+    if (pendingOrder && !position) {
+      const lbl = `${pendingOrder.direction.toUpperCase()} LMT ×${pendingOrder.qty}`
+      add(pendingOrder.limitPrice, PENDING_LINE, LineStyle.Dashed, lbl, 2)
+      if (pendingOrder.stopPrice != null) add(pendingOrder.stopPrice, DOWN, LineStyle.Dotted, 'SL·pend')
+      if (pendingOrder.targetPrice != null) add(pendingOrder.targetPrice, UP, LineStyle.Dotted, 'TP·pend')
+    }
     return () => {
       // candleRef may already be nulled by the mount cleanup (StrictMode);
       // chart.remove() disposes price lines with the chart in that case.
@@ -829,7 +871,7 @@ export default function TVReplayChart({
       if (c) for (const pl of priceLinesRef.current) c.removePriceLine(pl)
       priceLinesRef.current = []
     }
-  }, [pdh, pdl, position, resetKey])
+  }, [pdh, pdl, position, pendingOrder, resetKey])
 
   // ── trade markers, snapped to the display-TF bucket start ─────────────────
   useEffect(() => {
