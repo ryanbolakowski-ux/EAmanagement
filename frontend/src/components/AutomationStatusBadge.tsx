@@ -9,12 +9,15 @@ import { Bot, Signal, ClipboardCheck, FlaskConical } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { useMyAccess } from '../hooks/useMyAccess'
 import PlanAccessModal from './PlanAccessModal'
+import { useAutomationEnabled } from '../hooks/useAutomationEnabled'
 
 type Tone = 'badge-green' | 'badge-amber' | 'badge-grey'
 
-function describe(access: NonNullable<ReturnType<typeof useMyAccess>['data']>): { label: string; tone: Tone; Icon: any } {
+function describe(access: NonNullable<ReturnType<typeof useMyAccess>['data']>, automationEnabled: boolean): { label: string; tone: Tone; Icon: any } {
   const { tier, automation_status } = access
   if (tier === 'tier_5') {
+    // Master-switch off → coming-soon everywhere, incl. this pill.
+    if (!automationEnabled) return { label: 'Coming soon', tone: 'badge-grey', Icon: Bot }
     if (automation_status === 'enabled') return { label: 'Automation ON', tone: 'badge-green', Icon: Bot }
     if (automation_status === 'agreement_required' || automation_status === 'pending') {
       return { label: 'Activate automation', tone: 'badge-amber', Icon: Bot }
@@ -31,6 +34,7 @@ function describe(access: NonNullable<ReturnType<typeof useMyAccess>['data']>): 
 export default function AutomationStatusBadge() {
   const { user } = useAuthStore()
   const { data: access, isLoading } = useMyAccess()
+  const automationEnabled = useAutomationEnabled()
   const [open, setOpen] = useState(false)
 
   // Hidden for admins and while user is null/loading.
@@ -39,7 +43,7 @@ export default function AutomationStatusBadge() {
     return <div className="h-5 w-24 rounded-full bg-slate-200 dark:bg-slate-800 animate-pulse"/>
   }
 
-  const { label, tone, Icon } = describe(access)
+  const { label, tone, Icon } = describe(access, automationEnabled)
 
   return (
     <>

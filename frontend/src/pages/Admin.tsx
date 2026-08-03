@@ -154,7 +154,8 @@ export default function Admin() {
     try {
       const r = await fetch(API + '/config', { headers })
       if (r.ok) { const d = await r.json(); setAutomationEnabled(!!d.automation_enabled) }
-    } catch { /* leave as null → shows "Loading…" */ }
+      else { setAutomationError('Could not load automation setting (HTTP ' + r.status + '). Refresh to retry.') }
+    } catch { setAutomationError('Could not load automation setting. Refresh to retry.') }
   }
   async function setAutomationMaster(enabled: boolean) {
     setAutomationBusy(true); setAutomationError(null)
