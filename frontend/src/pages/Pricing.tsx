@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { CheckCircle2, X, BarChart2, ArrowLeft } from 'lucide-react'
+import { useAutomationEnabled } from '../hooks/useAutomationEnabled'
 
 const TIERS = [
   {
@@ -131,6 +132,9 @@ function FeatureValue({ val }: { val: boolean | string }) {
 }
 
 export default function Pricing() {
+  // Global automation master-switch — fail-safe FALSE while loading/erroring, so
+  // Tier 5 shows "Coming soon" until the flag confirms automation is live.
+  const automationEnabled = useAutomationEnabled()
   return (
     <div className="min-h-screen bg-white dark:bg-slate-900">
       {/* Nav */}
@@ -171,6 +175,11 @@ export default function Pricing() {
                   {tier.tag}
                 </div>
               )}
+              {tier.id === 'tier_5' && !automationEnabled && (
+                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-red-600 text-white text-xs font-bold px-3 py-1 rounded-full whitespace-nowrap">
+                  Coming soon
+                </div>
+              )}
 
               <div className={`text-base font-bold mb-0.5 ${tier.highlight ? 'text-white' : 'text-slate-900'}`}>
                 {tier.name}
@@ -200,12 +209,21 @@ export default function Pricing() {
                 {tier.desc}
               </div>
 
-              <Link
-                to="/register"
-                className={`text-center text-sm font-semibold py-2.5 rounded-xl transition-colors ${ tier.highlight ? 'bg-white text-blue-700 hover:bg-blue-50' : 'bg-blue-600 text-white hover:bg-blue-700' }`}
-              >
-                {tier.cta}
-              </Link>
+              {tier.id === 'tier_5' && !automationEnabled ? (
+                <div
+                  aria-disabled="true"
+                  className="text-center text-sm font-semibold py-2.5 rounded-xl border border-red-300 bg-red-50 text-red-700 cursor-not-allowed select-none dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-300"
+                >
+                  Coming soon
+                </div>
+              ) : (
+                <Link
+                  to="/register"
+                  className={`text-center text-sm font-semibold py-2.5 rounded-xl transition-colors ${ tier.highlight ? 'bg-white text-blue-700 hover:bg-blue-50' : 'bg-blue-600 text-white hover:bg-blue-700' }`}
+                >
+                  {tier.cta}
+                </Link>
+              )}
             </div>
           ))}
         </div>

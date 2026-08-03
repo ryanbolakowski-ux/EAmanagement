@@ -718,3 +718,15 @@ export const replayApi = {
     return { ...res, data }
   },
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public config — reflects the global automation master-switch
+// (app_config.automation_enabled). GET /api/v1/config/public is auth-free, so
+// it is safe to call from logged-out marketing pages. The request interceptor
+// still attaches a bearer token when one exists, which the backend ignores.
+// ─────────────────────────────────────────────────────────────────────────────
+export type PublicConfig = { automation_enabled: boolean }
+
+export const configApi = {
+  public: () => api.get<PublicConfig>('/api/v1/config/public'),
+}

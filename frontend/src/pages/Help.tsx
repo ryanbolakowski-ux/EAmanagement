@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, X, ChevronDown, Menu, ArrowUp, Mail } from 'lucide-react'
+import { useAutomationEnabled } from '../hooks/useAutomationEnabled'
 
 /**
  * Help & FAQ page.
@@ -50,6 +51,15 @@ const A = ({ href, children, external = false }: { href: string; children: React
   ) : (
     <Link to={href} className="text-violet-600 dark:text-violet-400 underline hover:no-underline">{children}</Link>
   )
+
+// Inline red note appended to the Tier 5 (Fully Automated) mention while the
+// global automation master-switch is off. Rendered as a child of the existing
+// answer <p> so the surrounding text stays fully searchable.
+const Tier5ComingSoonNote = () => {
+  const automationEnabled = useAutomationEnabled()
+  if (automationEnabled) return null
+  return <span className="text-red-600 dark:text-red-400 font-bold"> (coming soon — working out the kinks)</span>
+}
 
 const FAQS: Faq[] = [
   // ── Getting Started ─────────────────────────────────────────────────────
@@ -577,7 +587,7 @@ const FAQS: Faq[] = [
     category: 'Billing & Subscription',
     question: 'What does each tier include?',
     answer: (
-      <p>Tier 1 (Free) — paper, basic backtests. Tier 2 (Futures Signals, $49/mo) — ICT futures signals via email. Tier 3 (Options Scanner, $99/mo) — daily Saro picks. Tier 4 (Options Live, $199/mo) — broker integration + one-click execution. Tier 5 (Fully Automated, $399/mo) — full auto-trade across all strategies. Full breakdown on the <A href="/pricing">Pricing page</A>.</p>
+      <p>Tier 1 (Free) — paper, basic backtests. Tier 2 (Futures Signals, $49/mo) — ICT futures signals via email. Tier 3 (Options Scanner, $99/mo) — daily Saro picks. Tier 4 (Options Live, $199/mo) — broker integration + one-click execution. Tier 5 (Fully Automated, $399/mo) — full auto-trade across all strategies<Tier5ComingSoonNote />. Full breakdown on the <A href="/pricing">Pricing page</A>.</p>
     ),
   },
   {

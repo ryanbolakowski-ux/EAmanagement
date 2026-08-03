@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import ThetaLogo from '../components/ThetaLogo'
+import { useAutomationEnabled } from '../hooks/useAutomationEnabled'
 import {
   BarChart2, TrendingUp, Zap, ShieldCheck, FlaskConical,
   Sliders, PlayCircle, ChevronRight, CheckCircle2, ArrowRight,
@@ -154,6 +155,8 @@ function useScrollReveal() {
 // ── Main component ────────────────────────────────────────────────────────────
 export default function Landing() {
   useScrollReveal()
+  // Global automation master-switch — fail-safe FALSE while loading/erroring.
+  const automationEnabled = useAutomationEnabled()
   return (
     <div className="min-h-screen bg-slate-200 dark:bg-slate-950">
 
@@ -531,6 +534,11 @@ export default function Landing() {
                   Most Popular
                 </div>
               )}
+              {name === 'Fully Automated' && !automationEnabled && (
+                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-red-600 text-white text-xs font-bold px-3 py-1 rounded-full">
+                  Coming soon
+                </div>
+              )}
               <div className={`text-xs font-semibold mb-1 ${highlight ? 'text-blue-200' : 'text-blue-600'}`}>{tag}</div>
               <div className={`text-xl font-bold mb-2 ${highlight ? 'text-white' : 'text-slate-900 dark:text-slate-100'}`}>{name}</div>
               <div className={`text-sm mb-5 leading-relaxed ${highlight ? 'text-blue-100' : 'text-slate-500 dark:text-slate-400'}`}>{desc}</div>
@@ -542,9 +550,15 @@ export default function Landing() {
                   </div>
                 ))}
               </div>
-              <Link to="/register" className={`block text-center text-sm font-semibold py-2.5 rounded-xl transition-colors ${highlight ? 'bg-white dark:bg-slate-900 text-blue-700 hover:bg-blue-50' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
-                {cta}
-              </Link>
+              {name === 'Fully Automated' && !automationEnabled ? (
+                <div aria-disabled="true" className="block text-center text-sm font-semibold py-2.5 rounded-xl border border-red-300 bg-red-50 text-red-700 cursor-not-allowed select-none dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-300">
+                  Coming soon
+                </div>
+              ) : (
+                <Link to="/register" className={`block text-center text-sm font-semibold py-2.5 rounded-xl transition-colors ${highlight ? 'bg-white dark:bg-slate-900 text-blue-700 hover:bg-blue-50' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                  {cta}
+                </Link>
+              )}
             </div>
           ))}
         </div>

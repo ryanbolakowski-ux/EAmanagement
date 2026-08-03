@@ -18,9 +18,10 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Bot, ShieldCheck, AlertCircle, Building2, Power, Loader2, FileText } from 'lucide-react'
+import { Bot, ShieldCheck, AlertCircle, AlertTriangle, Building2, Power, Loader2, FileText } from 'lucide-react'
 import { liveTradingApi, legalApi } from '../api/endpoints'
 import { useMyAccess, useInvalidateMyAccess } from '../hooks/useMyAccess'
+import { useAutomationEnabled } from '../hooks/useAutomationEnabled'
 import LegalGate from './LegalGate'
 import CodeVerifyModal from './CodeVerifyModal'
 import type { LegalKind } from '../api/endpoints'
@@ -42,6 +43,8 @@ export default function AutomationActivation({ onClose }: Props) {
   const { data: access } = useMyAccess()
   const invalidateAccess = useInvalidateMyAccess()
   const qc = useQueryClient()
+  // Global master-switch. FALSE while loading/erroring → fail-safe coming-soon.
+  const automationEnabled = useAutomationEnabled()
 
   // Agreement signed status + when + which version (for the "signed on ..." line).
   const { data: legal } = useQuery({
@@ -98,6 +101,29 @@ export default function AutomationActivation({ onClose }: Props) {
   })
 
   if (!access) return null
+
+  // ── Master switch OFF → fully automated trading is closed off ("coming soon").
+  // Big red, clearly-not-an-error banner. We render NEITHER the agreement flow
+  // NOR the enable/disable toggle while disabled (the backend also 403s any new
+  // activation and halts auto-trading, so this is purely reflecting state). ──
+  if (!automationEnabled) {
+    return (
+      <div className="rounded-2xl border-2 border-red-500 dark:border-red-500/70 bg-red-50 dark:bg-red-950/40 p-5">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-red-600 text-white flex items-center justify-center flex-shrink-0">
+            <AlertTriangle size={20}/>
+          </div>
+          <div className="min-w-0">
+            <div className="text-base font-extrabold text-red-700 dark:text-red-300">Fully Automated — Coming Soon</div>
+            <p className="text-sm text-red-700/90 dark:text-red-200/90 mt-1">
+              We&apos;re working out the kinks. Fully automated trading will be available in the
+              near future. Every other part of Theta Algos stays fully available in the meantime.
+            </p>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // automation_status pending/disabled/enabled all imply the agreement is
   // already accepted (server logic), so use it as the primary "signed" signal —

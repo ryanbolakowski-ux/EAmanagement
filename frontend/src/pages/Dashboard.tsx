@@ -13,6 +13,7 @@ import {
   Sparkline, fmt, fmtUsd, pnlColor, pnlSign,
 } from '../components/DashboardKit'
 import { useMyAccess } from '../hooks/useMyAccess'
+import { useAutomationEnabled } from '../hooks/useAutomationEnabled'
 import PlanAccessModal from '../components/PlanAccessModal'
 
 const BIAS_STYLE: Record<DailyBias['bias'], { label: string; tone: string; bar: string; icon: any }> = {
@@ -107,6 +108,8 @@ export default function Dashboard() {
   const { user } = useAuthStore()
   const [planOpen, setPlanOpen] = useState(false)
   const { data: access } = useMyAccess()
+  // Global automation master-switch (fail-safe FALSE while loading/erroring).
+  const automationEnabled = useAutomationEnabled()
 
   const { data, isLoading } = useQuery({
     queryKey: ['dashboard'],
@@ -154,7 +157,13 @@ export default function Dashboard() {
             <div className="text-sm font-extrabold text-slate-900 dark:text-slate-100">Your plan &amp; access</div>
             <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
               {access.fully_automated
-                ? (access.automation_status === 'enabled' ? 'Fully automated · automation ON' : 'Fully automated · activate to start')
+                ? (automationEnabled
+                    ? (access.automation_status === 'enabled' ? 'Fully automated · automation ON' : 'Fully automated · activate to start')
+                    : (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-red-300 dark:border-red-500/50 bg-red-100 dark:bg-red-950/50 px-2 py-0.5 text-[11px] font-bold text-red-700 dark:text-red-300">
+                        Fully automated — coming soon (working out the kinks)
+                      </span>
+                    ))
                 : access.can_place_on_approval
                   ? 'Signals · we place trades when you approve'
                   : access.gets_signals

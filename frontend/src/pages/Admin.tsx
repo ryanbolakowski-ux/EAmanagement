@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { authApi } from '../api/endpoints'
 import api from '../api/client'
 import { useAuthStore } from '../stores/authStore'
+import { PUBLIC_CONFIG_KEY } from '../hooks/useAutomationEnabled'
 import {
   Shield, ShieldCheck, ShieldAlert, Users, TrendingUp, Activity,
   FlaskConical, Sliders, Trash2, Eye, DollarSign, X, Search,
@@ -76,6 +78,7 @@ function SectionHeader({ title, subtitle, action }: { title: string; subtitle?: 
 
 export default function Admin() {
   const { token, user: storedMe, setAuth } = useAuthStore()
+  const qc = useQueryClient()
   const [freshMe, setFreshMe] = useState<any>(null)
   const me = freshMe ?? storedMe
   const [tab, setTab] = useState<AdminTab>('overview')
@@ -91,6 +94,11 @@ export default function Admin() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [passcodeVerified, setPasscodeVerified] = useState<boolean | null>(null)
+  // ── Fully-automated master-switch (app_config.automation_enabled) ──
+  const [automationEnabled, setAutomationEnabled] = useState<boolean | null>(null)
+  const [automationBusy, setAutomationBusy] = useState(false)
+  const [automationConfirm, setAutomationConfirm] = useState(false)
+  const [automationError, setAutomationError] = useState<string | null>(null)
   const [passcodeInput, setPasscodeInput] = useState('')
   const [passcodeError, setPasscodeError] = useState<string | null>(null)
   const [passcodeBusy, setPasscodeBusy] = useState(false)
@@ -140,6 +148,29 @@ export default function Admin() {
     setPasscodeVerified(false)
   }
 
+  // ── Fully-automated master-switch ── (loaded separately from fetchData so a
+  // config hiccup never breaks the rest of the admin dashboard).
+  async function loadAutomationConfig() {
+    try {
+      const r = await fetch(API + '/config', { headers })
+      if (r.ok) { const d = await r.json(); setAutomationEnabled(!!d.automation_enabled) }
+    } catch { /* leave as null → shows "Loading…" */ }
+  }
+  async function setAutomationMaster(enabled: boolean) {
+    setAutomationBusy(true); setAutomationError(null)
+    try {
+      const r = await fetch(API + '/config/automation-enabled', { method: 'PUT', headers, body: JSON.stringify({ enabled }) })
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.detail || 'Could not update automation setting.') }
+      const d = await r.json()
+      setAutomationEnabled(!!d.automation_enabled)
+      setAutomationConfirm(false)
+      // Reflect the new state everywhere the public-config query is consumed
+      // (dashboard tier-5 line, marketing cards, activation modal).
+      qc.invalidateQueries({ queryKey: PUBLIC_CONFIG_KEY })
+    } catch (e: any) { setAutomationError(e.message || 'Could not update automation setting.') }
+    finally { setAutomationBusy(false) }
+  }
+
   async function fetchData() {
     setLoading(true)
     try {
@@ -165,6 +196,7 @@ export default function Admin() {
   useEffect(() => {
     if (!passcodeVerified) return
     fetchData()
+    loadAutomationConfig()
     const i = setInterval(fetchData, 300000)
     return () => clearInterval(i)
   }, [passcodeVerified])
@@ -576,6 +608,50 @@ export default function Admin() {
                 <p className="text-sm text-slate-500 dark:text-slate-400 mb-2">Powered by IPQualityScore. Non-US IPs, confirmed VPNs, Tor, and high-fraud-score connections are blocked at the middleware layer.</p>
                 <p className="text-xs text-slate-400">Admin accounts bypass the gate for platform-management purposes.</p>
               </div>
+            </div>
+
+            {/* ── Fully-automated master-switch ── */}
+            <div className={`mt-4 rounded-2xl p-5 border-2 ${automationEnabled === false ? 'border-red-400 bg-red-50 dark:border-red-500/60 dark:bg-red-950/30' : automationEnabled ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-500/50 dark:bg-emerald-950/20' : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900'}`}>
+              <div className="flex items-center gap-2 mb-2"><Sliders size={18} className="text-violet-600"/><h3 className="font-extrabold text-slate-900 dark:text-slate-100">Fully Automated master-switch</h3></div>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
+                Global kill-switch for tier-5 fully-automated trading. When <strong>OFF</strong>, the backend blocks all new activations and halts auto-trading, and every &ldquo;Fully Automated&rdquo; surface across the app and marketing shows a red <strong>coming-soon</strong> state. When <strong>ON</strong>, everything reverts to normal live behavior.
+              </p>
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Current state:</span>
+                {automationEnabled === null ? (
+                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">Loading…</span>
+                ) : automationEnabled ? (
+                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">ON · automation live</span>
+                ) : (
+                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">OFF · coming-soon everywhere</span>
+                )}
+              </div>
+              {automationError && <div className="mb-3 text-xs font-semibold text-red-600 dark:text-red-400">{automationError}</div>}
+              {automationEnabled !== null && (
+                !automationConfirm ? (
+                  <button
+                    onClick={() => { setAutomationError(null); setAutomationConfirm(true) }}
+                    disabled={automationBusy}
+                    className={`text-sm font-bold px-4 py-2 rounded-lg text-white disabled:opacity-50 ${automationEnabled ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                  >
+                    {automationEnabled ? 'Turn automation OFF (show coming-soon)' : 'Turn automation ON (go live)'}
+                  </button>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                      {automationEnabled ? 'Disable fully-automated trading across the whole platform?' : 'Enable fully-automated trading across the whole platform?'}
+                    </span>
+                    <button onClick={() => setAutomationMaster(!automationEnabled)} disabled={automationBusy}
+                      className={`text-sm font-bold px-4 py-2 rounded-lg text-white disabled:opacity-50 ${automationEnabled ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                      {automationBusy ? 'Saving…' : `Confirm: turn ${automationEnabled ? 'OFF' : 'ON'}`}
+                    </button>
+                    <button onClick={() => setAutomationConfirm(false)} disabled={automationBusy}
+                      className="text-sm font-semibold px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300">
+                      Cancel
+                    </button>
+                  </div>
+                )
+              )}
             </div>
           </>)}
         </main>

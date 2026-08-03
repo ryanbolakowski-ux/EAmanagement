@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import ThetaLogo from '../../components/ThetaLogo'
 import { StatCard, LiveNumber, TickerTape, EngineField } from '../../components/v2'
+import { useAutomationEnabled } from '../../hooks/useAutomationEnabled'
 
 // ═════════════════════════════════════════════════════════════════════════
 // Published platform facts — every figure below already appears on the V1
@@ -397,6 +398,8 @@ function BacktestVisual() {
 // ═════════════════════════════════════════════════════════════════════════
 export default function LandingV2() {
   useScrollReveal()
+  // Global automation master-switch — fail-safe FALSE while loading/erroring.
+  const automationEnabled = useAutomationEnabled()
 
   return (
     <div className="v2-root v2-page v2-lp v2-force-light">
@@ -662,6 +665,9 @@ export default function LandingV2() {
               className={`v2-card v2-lp-plan${tier.highlight ? ' v2-lp-plan--highlight' : ''}`}
             >
               {tier.tag && <span className="v2-badge v2-badge--accent v2-lp-plan__tag">{tier.tag}</span>}
+              {tier.id === 'tier_5' && !automationEnabled && (
+                <span className="v2-badge v2-lp-plan__tag" style={{ background: '#dc2626', color: '#fff', borderColor: '#dc2626' }}>Coming soon</span>
+              )}
               <div className="v2-lp-plan__name">{tier.name}</div>
               <div className="v2-lp-plan__tier">{tier.tierLabel}</div>
               <div className="v2-lp-plan__pricing">
@@ -678,12 +684,22 @@ export default function LandingV2() {
                   </li>
                 ))}
               </ul>
-              <Link
-                to="/register"
-                className={`v2-btn ${tier.highlight ? 'v2-btn--primary' : 'v2-btn--ghost'}`}
-              >
-                {tier.id === 'free_trial' ? 'Start free trial' : 'Get started'}
-              </Link>
+              {tier.id === 'tier_5' && !automationEnabled ? (
+                <span
+                  aria-disabled="true"
+                  className="v2-btn"
+                  style={{ background: '#fee2e2', color: '#b91c1c', border: '1px solid #fca5a5', cursor: 'not-allowed', pointerEvents: 'none' }}
+                >
+                  Coming soon
+                </span>
+              ) : (
+                <Link
+                  to="/register"
+                  className={`v2-btn ${tier.highlight ? 'v2-btn--primary' : 'v2-btn--ghost'}`}
+                >
+                  {tier.id === 'free_trial' ? 'Start free trial' : 'Get started'}
+                </Link>
+              )}
             </div>
           ))}
         </div>
