@@ -28,7 +28,10 @@ import {
 
 export type TVBar = { time: number; open: number; high: number; low: number; close: number; volume?: number }
 // r is null for trades opened without an initial stop (GOAL G): risk is undefined.
-export type TVTrade = { direction: 'long' | 'short'; entryTime: number; exitTime: number; r: number | null }
+// winner (optional) colours the exit glyph when r is null — used by the Replay
+// page's range-backtest overlay, whose trades carry no stop_loss/R but do carry
+// an is_winner flag. Practice trades never set it, so their behavior is unchanged.
+export type TVTrade = { direction: 'long' | 'short'; entryTime: number; exitTime: number; r: number | null; winner?: boolean | null }
 // stopPrice / targetPrice are null when the position has no SL / TP (GOAL G).
 export type TVPosition = {
   direction: 'long' | 'short'; qty: number; entryPrice: number; entryTime: number
@@ -894,12 +897,17 @@ export default function TVReplayChart({
     for (const tr of trades) {
       markers.push(entryMarker(tr.entryTime, tr.direction))
       // GOAL G: r may be null (no initial stop) — show a neutral exit glyph.
+      // Backtest overlays carry no R but do carry a winner flag: colour by that
+      // rather than the neutral grey, without fabricating an R label.
       const hasR = tr.r != null
+      const exitColor = hasR
+        ? (tr.r! >= 0 ? UP : DOWN)
+        : tr.winner != null ? (tr.winner ? UP : DOWN) : ENTRY_LINE
       markers.push({
         time: snap(tr.exitTime),
         position: 'aboveBar',
         shape: 'circle',
-        color: !hasR ? ENTRY_LINE : (tr.r! >= 0 ? UP : DOWN),
+        color: exitColor,
         text: !hasR ? '' : `${tr.r! >= 0 ? '+' : ''}${tr.r!.toFixed(1)}R`,
       })
     }

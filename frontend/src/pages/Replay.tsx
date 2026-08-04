@@ -4,10 +4,11 @@ import {
   Play, Pause, StepForward, FastForward, Shuffle, Rewind, Download,
   TrendingUp, TrendingDown, X, AlertTriangle, CalendarOff, Loader2, EyeOff,
   Settings as SettingsIcon, Maximize2, Minimize2, Plus, Check, Clock, Crosshair, RotateCcw, Layers,
-  Trash2, Eraser, Flag,
+  Trash2, Eraser, Flag, FlaskConical, History,
 } from 'lucide-react'
-import { replayApi, type ReplayDay, type ReplayMeta } from '../api/endpoints'
-import TVReplayChart, { type SessionVisibility } from '../components/TVReplayChart'
+import { replayApi, strategiesApi, backtestsApi, type ReplayDay, type ReplayMeta } from '../api/endpoints'
+import TVReplayChart, { type SessionVisibility, type TVTrade } from '../components/TVReplayChart'
+import type { Strategy, BacktestRun } from '../types'
 import DrawingToolbar from '../components/DrawingToolbar'
 import {
   DEFAULT_DRAW_STYLE,
@@ -40,6 +41,78 @@ const APPEND_BUFFER = 240
 // Flat-only rewind can scrub back through revealed history down to this floor
 // (kept above 0 so the chart never empties).
 const REWIND_FLOOR = 2
+
+// ── range-backtest mode ──────────────────────────────────────────────────────
+// The Replay page has two modes: the manual bar-by-bar "practice" replay
+// (everything else on this page) and a "Range Backtest" mode that runs the
+// EXISTING async backtest engine over a whole date range at once, then plots
+// every trade the strategy took on the same TradingView chart. It reuses
+// backtestsApi verbatim (POST run → poll list for status/redis progress → GET
+// metrics + trades) — no engine is rebuilt here.
+const DATA_START = '2023-04-30'            // candle_cache lower bound (matches BacktestLab)
+const BT_LOG_KEY = 'theta_replay_backtest_log'
+const BT_LOG_MAX = 8
+// On-chart visualization: the chart is fed REAL 1m bars (via replayApi.continuous)
+// anchored at the run's start date — NOT the /chart-data candles, which come back
+// at the strategy's ~15m timeframe and would mis-bucket the 1m resampler + marker
+// snap. A single continuous call spans up to 30 trading days; we chain a couple
+// more chunks to widen the window but CAP it so a multi-year range never tries to
+// pull years of 1m bars into the browser (we log + surface a note when capped).
+const BT_CHART_MAX_CHUNKS = 3              // initial 30d + up to 3×30d more ≈ 120 trading days
+const BT_CHART_MAX_BARS = 60000
+
+const isoDay = (d: Date) => d.toISOString().split('T')[0]
+const btYesterday = () => { const d = new Date(); d.setDate(d.getDate() - 1); return isoDay(d) }
+const btMonthsBack = (from: string, months: number) => {
+  const d = new Date(from + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() - months); return isoDay(d)
+}
+// Fixed-day lookback (not calendar months) so 1Y can't exceed the free-trial
+// 365-day backend cap across a leap Feb 29.
+const btDaysBack = (endIso: string, n: number) => {
+  const d = new Date(endIso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - n); return isoDay(d)
+}
+const btClampStart = (s: string, end: string) => (s < DATA_START ? DATA_START : s > end ? end : s)
+// "All" is bounded by data start AND the backend's 3-year paid cap.
+const btAllStart = (end: string) => {
+  const d = new Date(end + 'T00:00:00Z'); d.setUTCFullYear(d.getUTCFullYear() - 3); d.setUTCDate(d.getUTCDate() + 1)
+  const threeYr = isoDay(d); return threeYr > DATA_START ? threeYr : DATA_START
+}
+const BT_PRESETS: { label: string; start: (end: string) => string }[] = [
+  { label: '1M', start: (e) => btClampStart(btMonthsBack(e, 1), e) },
+  { label: '3M', start: (e) => btClampStart(btMonthsBack(e, 3), e) },
+  { label: '6M', start: (e) => btClampStart(btMonthsBack(e, 6), e) },
+  { label: '1Y', start: (e) => btClampStart(btDaysBack(e, 364), e) },
+  { label: 'All', start: (e) => btAllStart(e) },
+]
+const fmtMoney = (v: number) =>
+  `${v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+const fmtPct01 = (v: number) => `${(v * 100).toFixed(1)}%`
+const fmtBtElapsed = (s: number) => {
+  const m = Math.floor(s / 60), sec = s % 60
+  return m > 0 ? `${m}m ${sec.toString().padStart(2, '0')}s` : `${sec}s`
+}
+const fmtBtTime = (t: string | null) => {
+  if (!t) return '—'
+  const d = new Date(t)
+  if (isNaN(d.getTime())) return t.slice(0, 16).replace('T', ' ')
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+const btIsActive = (status?: string) => {
+  const s = (status || '').toLowerCase()
+  return s === 'running' || s === 'queued' || s === 'pending'
+}
+
+type BtLogEntry = {
+  run_id: string; strategy_name: string; instrument: string; start_date: string; end_date: string
+  win_rate: number | null; profit_factor: number | null; net_profit: number | null
+  total_trades: number | null; finished_at: string
+}
+function btReadLog(): BtLogEntry[] {
+  try { const raw = localStorage.getItem(BT_LOG_KEY); const arr = raw ? JSON.parse(raw) : []; return Array.isArray(arr) ? arr : [] } catch { return [] }
+}
+function btWriteLog(entries: BtLogEntry[]) {
+  try { localStorage.setItem(BT_LOG_KEY, JSON.stringify(entries.slice(0, BT_LOG_MAX))) } catch { /* quota — ignore */ }
+}
 
 // ── chart settings (GOAL A/B/I — persisted, passed live to TVReplayChart) ────
 
@@ -244,6 +317,29 @@ function StatChip({ label, value, tone, note }: { label: string; value: string; 
   )
 }
 
+/** Dependency-free equity line for the range-backtest results (client-rendered
+ *  from metrics.equity_curve). Mirrors BacktestLab's EquityLine. */
+function BtEquityLine({ data, height = 120 }: { data: number[]; height?: number }) {
+  if (data.length < 2) return null
+  const w = 600
+  const min = Math.min(...data), max = Math.max(...data)
+  const span = max - min || 1
+  const pad = 3
+  const stepX = (w - pad * 2) / (data.length - 1)
+  const pts = data.map((v, i) =>
+    `${(pad + i * stepX).toFixed(2)} ${(pad + (1 - (v - min) / span) * (height - pad * 2)).toFixed(2)}`)
+  const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p}`).join(' ')
+  const area = `${line} L${(pad + (data.length - 1) * stepX).toFixed(2)} ${height} L${pad} ${height} Z`
+  const up = data[data.length - 1] >= data[0]
+  const stroke = up ? '#10b981' : '#ef4444'
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} className="w-full" style={{ height }} aria-hidden="true" preserveAspectRatio="none">
+      <path d={area} fill={stroke} opacity={0.08} stroke="none" />
+      <path d={line} fill="none" stroke={stroke} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
     <button type="button" role="switch" aria-checked={checked} disabled={disabled}
@@ -342,6 +438,31 @@ export default function Replay() {
   const [drawState, setDrawState] = useState<DrawingState | null>(null)
   const drawPrefsJsonRef = useRef('')
 
+  // ── range-backtest mode (items 1-3) ──────────────────────────────────────
+  const [mode, setMode] = useState<'practice' | 'backtest'>('practice')
+  const btEndBound = useMemo(() => btYesterday(), [])
+  const [strategyId, setStrategyId] = useState('')
+  const [btStart, setBtStart] = useState(() => BT_PRESETS[2].start(btYesterday())) // 6M default
+  const [btEnd, setBtEnd] = useState(btEndBound)
+  const [btPreset, setBtPreset] = useState<string | null>('6M')
+  const [runId, setRunId] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [startError, setStartError] = useState<string | null>(null)
+  const [btStartedAt, setBtStartedAt] = useState<number | null>(null)
+  const [btElapsed, setBtElapsed] = useState(0)
+  const [btLog, setBtLog] = useState<BtLogEntry[]>(() => btReadLog())
+  const btLoggedRef = useRef<Set<string>>(new Set())
+  const btMissesRef = useRef(0)
+  const [runLost, setRunLost] = useState(false)
+  // On-chart backtest window (real 1m bars) + trade overlay bookkeeping.
+  const [btTf, setBtTf] = useState<number>(15)
+  const [btChartBars, setBtChartBars] = useState<SimBar[]>([])
+  const [btChartState, setBtChartState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [btChartCapped, setBtChartCapped] = useState(false)
+  const [btChartSpan, setBtChartSpan] = useState<{ from: string; to: string } | null>(null)
+  const [btChartNonce, setBtChartNonce] = useState(0)
+  const btFsRef = useRef<HTMLDivElement>(null)
+
   const updateSettings = (patch: Partial<ReplaySettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch }
@@ -366,6 +487,215 @@ export default function Replay() {
   const bars: SimBar[] = day?.candles ?? []
   const revealedBars = useMemo(() => bars.slice(0, revealed), [bars, revealed])
   const lastBar = revealedBars.length > 0 ? revealedBars[revealedBars.length - 1] : null
+
+  // ── range-backtest data flow (items 1-3) ─────────────────────────────────
+  // Lifted wholesale from BacktestLab: POST run → poll the list for status +
+  // redis progress → GET metrics + trades once completed. Only fetches while in
+  // backtest mode / while a run id is set, so practice mode is untouched.
+  const { data: strategies = [] } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: () => strategiesApi.list().then((r) => r.data as Strategy[]),
+    enabled: mode === 'backtest',
+  })
+
+  const { data: btRuns = [] } = useQuery({
+    queryKey: ['replay-backtest-runs'],
+    queryFn: () => backtestsApi.list().then((r) => {
+      const rows = r.data as BacktestRun[]
+      if (runId && !rows.some((x) => x.id === runId)) {
+        btMissesRef.current += 1
+        if (btMissesRef.current >= 5) setRunLost(true)
+      } else {
+        btMissesRef.current = 0
+      }
+      return rows
+    }),
+    enabled: !!runId,
+    refetchInterval: (q: any) => {
+      const rows: BacktestRun[] = (q?.state?.data as BacktestRun[]) || []
+      const mine = rows.find((r) => r.id === runId)
+      if (!mine) return btMissesRef.current >= 5 ? false : 2000
+      if (btIsActive(mine.status) && btStartedAt != null && Date.now() - btStartedAt > 35 * 60_000) return false
+      return btIsActive(mine.status) ? 2000 : false
+    },
+  })
+
+  const btRun = btRuns.find((r) => r.id === runId)
+  const btRunStatus = (btRun?.status || (runId ? 'queued' : '')).toLowerCase()
+  const btStalled = !!runId && (btRunStatus === '' || btIsActive(btRunStatus)) && btStartedAt != null && btElapsed > 35 * 60
+  const btRunning = !!runId && !runLost && !btStalled && (btRunStatus === '' || btIsActive(btRunStatus))
+  const btFailed = btRunStatus === 'failed' || btRunStatus === 'cancelled'
+  const btCompleted = btRunStatus === 'completed'
+
+  const { data: btMetrics, isLoading: btMetricsLoading }: any = useQuery({
+    queryKey: ['replay-backtest-metrics', runId],
+    queryFn: () => backtestsApi.getMetrics(runId!).then((r) => r.data),
+    enabled: !!runId && btCompleted,
+    refetchInterval: (q: any) => (q?.state?.data ? false : 2000), // metrics row trails the status flip
+    retry: 3,
+    retryDelay: 1500,
+  })
+
+  const { data: btTrades = [], isPending: btTradesPending }: any = useQuery({
+    queryKey: ['replay-backtest-trades', runId],
+    queryFn: () => backtestsApi.getTrades(runId!).then((r) => r.data),
+    enabled: !!runId && btCompleted && !!btMetrics,
+  })
+
+  // Elapsed ticker while a backtest runs.
+  useEffect(() => {
+    if (!btRunning || btStartedAt == null) return
+    const t = setInterval(() => setBtElapsed(Math.floor((Date.now() - btStartedAt) / 1000)), 1000)
+    return () => clearInterval(t)
+  }, [btRunning, btStartedAt])
+
+  // Log completed backtests once per run id (localStorage, this browser).
+  useEffect(() => {
+    if (!runId || !btCompleted || !btMetrics || btLoggedRef.current.has(runId)) return
+    btLoggedRef.current.add(runId)
+    const entry: BtLogEntry = {
+      run_id: runId,
+      strategy_name: btRun?.strategy_name || strategies.find((s) => s.id === strategyId)?.name || 'Strategy',
+      instrument: btRun?.instrument || instrument,
+      start_date: (btRun?.start_date || btStart).slice(0, 10),
+      end_date: (btRun?.end_date || btEnd).slice(0, 10),
+      win_rate: btMetrics.win_rate ?? null,
+      profit_factor: btMetrics.profit_factor ?? null,
+      net_profit: btMetrics.net_profit ?? null,
+      total_trades: btMetrics.total_trades ?? null,
+      finished_at: new Date().toISOString(),
+    }
+    setBtLog((prev) => {
+      const next = [entry, ...prev.filter((e) => e.run_id !== runId)].slice(0, BT_LOG_MAX)
+      btWriteLog(next)
+      return next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, btCompleted, btMetrics])
+
+  // Item 3: once a run completes, load a REAL 1m window (replayApi.continuous)
+  // anchored at the run's start date and overlay its trade markers. Capped so a
+  // long range never pulls years of 1m bars — logs + surfaces a note when capped.
+  useEffect(() => {
+    if (!runId || !btCompleted) return
+    const r = btRun
+    if (!r) return
+    const myRun = runId
+    const inst = r.instrument
+    const startD = (r.start_date || btStart).slice(0, 10)
+    const endD = (r.end_date || btEnd).slice(0, 10)
+    const endTs = Math.floor(Date.parse(endD + 'T23:59:59Z') / 1000)
+    let cancelled = false
+    setBtChartState('loading'); setBtChartCapped(false); setBtChartSpan(null); setBtChartBars([])
+    ;(async () => {
+      try {
+        const first = await replayApi.continuous(inst, startD, { context: 0, forward: 30, eth: false })
+        if (cancelled) return
+        let candles = first.data.candles || []
+        let hasMore = first.data.hasMoreForward
+        let chunks = 0
+        while (hasMore && chunks < BT_CHART_MAX_CHUNKS && candles.length < BT_CHART_MAX_BARS) {
+          const lastTs = candles.length ? candles[candles.length - 1].time : 0
+          if (lastTs >= endTs) break // reached the range end — no need to load more
+          const more = await replayApi.continuousMore(inst, lastTs, { days: 30, eth: false })
+          if (cancelled) return
+          const add = (more.data.candles || []).filter((b) => b.time > lastTs)
+          if (!add.length) { hasMore = false; break }
+          candles = candles.concat(add)
+          hasMore = more.data.hasMoreForward
+          chunks++
+        }
+        if (cancelled) return
+        if (!candles.length) { setBtChartState('error'); return }
+        const lastTs = candles[candles.length - 1].time
+        const capped = (hasMore && lastTs < endTs) || candles.length >= BT_CHART_MAX_BARS
+        if (capped) {
+          console.warn('[Replay backtest] charted window capped', {
+            run: myRun, bars: candles.length, chunks,
+            loadedThrough: new Date(lastTs * 1000).toISOString(), rangeEnd: endD,
+          })
+        }
+        setBtChartBars(candles as SimBar[])
+        setBtChartSpan({ from: etDateOf(candles[0].time), to: etDateOf(lastTs) })
+        setBtChartCapped(capped)
+        setBtChartState('ready')
+        setBtChartNonce((n) => n + 1)
+      } catch (e) {
+        if (!cancelled) { console.warn('[Replay backtest] chart-window load failed', e); setBtChartState('error') }
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, btCompleted])
+
+  async function startBacktest() {
+    if (!strategyId || starting) return
+    if (btStart > btEnd) { setStartError('Start date must be on or before the end date.'); return }
+    btMissesRef.current = 0
+    setRunLost(false); setStarting(true); setStartError(null)
+    setBtChartState('idle'); setBtChartBars([]); setBtChartSpan(null); setBtChartCapped(false)
+    try {
+      const res = await backtestsApi.run({
+        strategy_id: strategyId,
+        instrument,
+        start_date: btStart,
+        end_date: btEnd,
+        initial_capital: 100000,
+        commission_per_side: 2.25,
+        slippage_ticks: 1,
+      })
+      setRunId((res.data as BacktestRun).id)
+      setBtStartedAt(Date.now()); setBtElapsed(0)
+    } catch (e: any) {
+      setStartError(e?.response?.data?.detail || e?.message || 'Failed to start backtest')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  function applyBtPreset(label: string) {
+    const p = BT_PRESETS.find((x) => x.label === label)
+    if (!p) return
+    setBtEnd(btEndBound); setBtStart(p.start(btEndBound)); setBtPreset(label)
+  }
+
+  function viewBtLogEntry(e: BtLogEntry) {
+    btMissesRef.current = 0; setRunLost(false)
+    setRunId(e.run_id); setBtStartedAt(null); setStartError(null)
+  }
+
+  const switchMode = (m: 'practice' | 'backtest') => {
+    if (m === mode) return
+    if (m === 'backtest') { setPlaying(false); setArmed(null) } // never leave practice playback running
+    setMode(m)
+  }
+
+  // Strategy grouping (V2 engine vs V1) for the picker.
+  const v2Strats = strategies.filter((s) => s.engine_version === 'v2')
+  const v1Strats = strategies.filter((s) => s.engine_version !== 'v2')
+  const btGrouped = v2Strats.length > 0 && v1Strats.length > 0
+  const btEquitySeries: number[] = (btMetrics?.equity_curve || []).map((p: any) => p.equity)
+
+  // Backtest trades → chart markers, clipped to the loaded 1m window (item 3).
+  // The trades API returns no stop_loss/R, so we pass r=null (no fake R label)
+  // and colour the exit by is_winner via TVTrade.winner.
+  const btChartTrades: TVTrade[] = useMemo(() => {
+    if (!btChartBars.length || !btTrades.length) return []
+    const first = btChartBars[0].time
+    const last = btChartBars[btChartBars.length - 1].time
+    const out: TVTrade[] = []
+    for (const t of btTrades as any[]) {
+      const et = Math.floor(Date.parse(t.entry_time) / 1000)
+      if (!Number.isFinite(et) || et < first || et > last) continue
+      const xtRaw = Date.parse(t.exit_time)
+      const xt = Number.isFinite(xtRaw) ? Math.min(Math.max(Math.floor(xtRaw / 1000), first), last) : et
+      out.push({ direction: t.direction === 'short' ? 'short' : 'long', entryTime: et, exitTime: xt, r: null, winner: !!t.is_winner })
+    }
+    return out
+  }, [btChartBars, btTrades])
+
+  const btPlottedCount = btChartTrades.length
+  const btResultTradeCount = (btTrades as any[]).length
 
   // ── day loading ────────────────────────────────────────────────────────────
 
@@ -720,6 +1050,20 @@ export default function Replay() {
       exit?.call(document)
     }
   }
+  // Backtest-mode chart uses its own wrapper ref; the `fullscreen` flag is shared
+  // (only one chart mounts at a time, so the icon state can't be ambiguous).
+  const toggleBtFullscreen = () => {
+    const el = btFsRef.current
+    if (!el) return
+    const fsEl = document.fullscreenElement || (document as any).webkitFullscreenElement
+    if (!fsEl) {
+      const req = el.requestFullscreen || (el as any).webkitRequestFullscreen
+      req?.call(el)
+    } else {
+      const exit = document.exitFullscreen || (document as any).webkitExitFullscreen
+      exit?.call(document)
+    }
+  }
   useEffect(() => {
     const onFs = () => setFullscreen(!!(document.fullscreenElement || (document as any).webkitFullscreenElement))
     document.addEventListener('fullscreenchange', onFs)
@@ -819,6 +1163,8 @@ export default function Replay() {
   const chipOn = 'bg-white dark:bg-slate-700 text-violet-700 dark:text-violet-300 shadow-sm'
   const chipOff = 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
   const iconBtn = 'inline-flex items-center justify-center h-8 w-8 rounded-lg text-slate-600 dark:text-slate-300 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 transition-colors'
+  const inputCls = 'rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm px-2 py-1.5'
+  const fieldLabel = 'text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500'
 
   return (
     <div className="p-4 sm:p-8 max-w-screen-2xl">
@@ -826,19 +1172,40 @@ export default function Replay() {
       <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950 dark:from-slate-950 dark:via-slate-950 dark:to-violet-950 text-white p-6 md:p-8 shadow-xl mb-6">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div className="min-w-0 flex-1">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">Practice</div>
-            <h1 className="text-2xl md:text-3xl font-extrabold text-white">Replay</h1>
-            <p className="text-sm text-slate-400 mt-1">Bar-by-bar practice trading on historical futures days · stop checked before target, fills at level</p>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-violet-300 font-bold mb-1">{mode === 'practice' ? 'Practice' : 'Research'}</div>
+            <h1 className="text-2xl md:text-3xl font-extrabold text-white flex items-center gap-2.5">
+              {mode === 'backtest' && <FlaskConical size={26}/>} Replay
+            </h1>
+            <p className="text-sm text-slate-400 mt-1">
+              {mode === 'practice'
+                ? 'Bar-by-bar practice trading on historical futures days · stop checked before target, fills at level'
+                : 'Pick a strategy and a date range — the engine backtests the whole span at once and plots every trade on the chart'}
+            </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => loadRandomDay()} disabled={loadState === 'loading'}
-              className="inline-flex items-center gap-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors shadow-lg shadow-violet-900/30">
-              <Shuffle size={15}/> Random day
-            </button>
+          <div className="flex flex-col items-stretch sm:items-end gap-3">
+            {/* MODE TOGGLE (item 1) */}
+            <div className="inline-flex rounded-xl bg-white/10 p-0.5 border border-white/10 self-start sm:self-auto">
+              <button onClick={() => switchMode('practice')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors inline-flex items-center gap-1.5 ${mode === 'practice' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-300 hover:text-white'}`}>
+                <Rewind size={13}/> Bar Replay
+              </button>
+              <button onClick={() => switchMode('backtest')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors inline-flex items-center gap-1.5 ${mode === 'backtest' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-300 hover:text-white'}`}>
+                <FlaskConical size={13}/> Range Backtest
+              </button>
+            </div>
+            {mode === 'practice' && (
+              <button onClick={() => loadRandomDay()} disabled={loadState === 'loading'}
+                className="inline-flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors shadow-lg shadow-violet-900/30">
+                <Shuffle size={15}/> Random day
+              </button>
+            )}
           </div>
         </div>
       </div>
 
+      {/* ══ PRACTICE (bar-by-bar replay) ══════════════════════════════════ */}
+      {mode === 'practice' && (<>
       {/* CONTROLS ROW */}
       <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700 mb-4">
         <div className="flex flex-wrap items-end gap-3">
@@ -1403,6 +1770,315 @@ export default function Replay() {
           </ul>
         )}
       </div>
+      </>)}
+
+      {/* ══ RANGE BACKTEST (items 1-3) ═════════════════════════════════════ */}
+      {mode === 'backtest' && (
+        <>
+          {/* CONTROLS ROW — instrument · date range · presets · strategy · Run */}
+          <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700 mb-4">
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1">
+                <span className={fieldLabel}>Instrument</span>
+                <select value={instrument} onChange={(e) => setInstrument(e.target.value)} className={inputCls}>
+                  {instruments.map((i) => <option key={i} value={i}>{i}</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={fieldLabel}>From</span>
+                <input type="date" value={btStart} min={DATA_START} max={btEnd}
+                  onChange={(e) => { setBtStart(btClampStart(e.target.value, btEnd)); setBtPreset(null) }} className={inputCls}/>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className={fieldLabel}>To</span>
+                <input type="date" value={btEnd} min={btStart} max={btEndBound}
+                  onChange={(e) => { const v = e.target.value > btEndBound ? btEndBound : e.target.value; setBtEnd(v); setBtPreset(null) }} className={inputCls}/>
+              </label>
+              <div className="flex flex-col gap-1">
+                <span className={fieldLabel}>Range</span>
+                <div className="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700">
+                  {BT_PRESETS.map((p) => (
+                    <button key={p.label} onClick={() => applyBtPreset(p.label)}
+                      className={`${chipBase} ${btPreset === p.label ? chipOn : chipOff}`}>{p.label}</button>
+                  ))}
+                </div>
+              </div>
+              <label className="flex flex-col gap-1 min-w-[180px] flex-1 sm:flex-none sm:w-56">
+                <span className={fieldLabel}>Strategy</span>
+                <select value={strategyId} onChange={(e) => setStrategyId(e.target.value)} className={inputCls}>
+                  <option value="">Select a strategy…</option>
+                  {btGrouped ? (
+                    <>
+                      <optgroup label="V2 engine">{v2Strats.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</optgroup>
+                      <optgroup label="V1">{v1Strats.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</optgroup>
+                    </>
+                  ) : strategies.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+              <button onClick={startBacktest} disabled={!strategyId || starting || btRunning}
+                className="inline-flex items-center gap-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-5 py-2 rounded-xl text-sm font-bold transition-colors shadow-lg shadow-violet-300/40 dark:shadow-violet-900/30 ml-auto">
+                <Play size={15}/> {starting ? 'Starting…' : 'Run Backtest'}
+              </button>
+            </div>
+            <p className="text-[10.5px] text-slate-400 dark:text-slate-500 mt-2.5">
+              Data from {DATA_START} · timeframes come from the strategy's own config · $100k sim account, $2.25/side commission, 1 tick slippage · the backtest engine does not apply the live bias / NY-lunch gates
+            </p>
+            {startError && (
+              <div className="mt-3 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-xs text-red-700 dark:text-red-300 flex items-center gap-2">
+                <AlertTriangle size={14} className="flex-shrink-0"/> {startError}
+              </div>
+            )}
+          </div>
+
+          {/* RUNNING */}
+          {btRunning && (
+            <div className="rounded-2xl border border-violet-300 dark:border-violet-700 bg-violet-50 dark:bg-violet-950/30 p-5 mb-4">
+              <div className="flex items-center gap-3 mb-2 flex-wrap">
+                <div className="inline-block w-5 h-5 border-2 border-violet-600 border-r-transparent rounded-full animate-spin flex-shrink-0"/>
+                <div className="font-bold text-slate-900 dark:text-slate-100">
+                  {btRunStatus === 'queued' || btRunStatus === '' ? 'Queued…' : 'Backtesting…'}{' '}
+                  <span className="font-mono tabular-nums">{(btRun?.progress ?? 0).toFixed(0)}%</span>
+                </div>
+                {btStartedAt != null && (
+                  <div className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums ml-auto">{fmtBtElapsed(btElapsed)} elapsed</div>
+                )}
+              </div>
+              <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden mb-2">
+                <div className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-700 ease-out" style={{ width: `${Math.max(2, btRun?.progress ?? 0)}%` }}/>
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                {btRun?.strategy_name || strategies.find((s) => s.id === strategyId)?.name || 'Strategy'} · {btRun?.instrument || instrument} · {(btRun?.start_date || btStart).slice(0, 10)} → {(btRun?.end_date || btEnd).slice(0, 10)}
+              </div>
+            </div>
+          )}
+
+          {/* LOST / STALLED */}
+          {(runLost || btStalled) && !btFailed && !btCompleted && (
+            <div className="rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-5 mb-4">
+              <div className="font-bold text-amber-800 dark:text-amber-200 mb-1">{runLost ? 'Run not found' : 'Run stalled'}</div>
+              <div className="text-xs text-amber-700 dark:text-amber-300 mb-3">
+                {runLost
+                  ? 'This run no longer appears in your runs list — it may have been deleted.'
+                  : 'No progress for 35 minutes — the backend may have restarted mid-run. Try again.'}
+              </div>
+              <button onClick={startBacktest} disabled={!strategyId || starting}
+                className="bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5">
+                <RotateCcw size={12}/> Run again
+              </button>
+            </div>
+          )}
+
+          {/* FAILED */}
+          {btFailed && (
+            <div className="rounded-2xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-5 mb-4">
+              <div className="font-bold text-red-800 dark:text-red-200 mb-1">Backtest {btRunStatus}</div>
+              <div className="text-xs text-red-700 dark:text-red-300 mb-3">{(btRun as any)?.error_message || 'The run did not finish. Try a shorter date range or a different strategy.'}</div>
+              <button onClick={startBacktest} disabled={!strategyId || starting}
+                className="bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5">
+                <RotateCcw size={12}/> Run again
+              </button>
+            </div>
+          )}
+
+          {/* metrics loading */}
+          {btCompleted && !btMetrics && btMetricsLoading && (
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 text-center mb-4">
+              <div className="inline-block w-6 h-6 border-2 border-violet-500 border-r-transparent rounded-full animate-spin mb-2"/>
+              <div className="text-sm text-slate-600 dark:text-slate-300">Loading results…</div>
+            </div>
+          )}
+
+          {/* RESULTS + ON-CHART TRADE OVERLAY */}
+          {btCompleted && btMetrics && (
+            <div className="space-y-4 mb-4">
+              {/* header */}
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-sm font-bold text-slate-900 dark:text-slate-100 min-w-0 truncate">
+                  {btRun?.strategy_name || 'Strategy'}
+                  <span className="text-slate-400 dark:text-slate-500 font-medium"> · {btRun?.instrument || instrument} · {(btRun?.start_date || btStart).slice(0, 10)} → {(btRun?.end_date || btEnd).slice(0, 10)}</span>
+                </div>
+                <button onClick={startBacktest} disabled={!strategyId || starting}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white transition-colors">
+                  <RotateCcw size={12}/> Run again
+                </button>
+              </div>
+
+              {/* stat tiles — only stats the metrics API actually returns */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                <Stat label="Win rate" value={fmtPct01(btMetrics.win_rate)} tone={btMetrics.win_rate >= 0.5 ? 'pos' : 'neg'}/>
+                <Stat label="Net P&L" value={fmtMoney(btMetrics.net_profit)} tone={btMetrics.net_profit >= 0 ? 'pos' : 'neg'}/>
+                <Stat label="Profit factor" value={btMetrics.profit_factor?.toFixed(2) ?? '—'} tone={btMetrics.profit_factor >= 1 ? 'pos' : 'neg'}/>
+                <Stat label="Trades" value={String(btMetrics.total_trades)}/>
+                <Stat label="W / L" value={`${btMetrics.winning_trades ?? '—'} / ${btMetrics.losing_trades ?? '—'}`}/>
+                <Stat label="Avg R" value={btMetrics.avg_rr != null ? btMetrics.avg_rr.toFixed(2) : '—'} tone={(btMetrics.avg_rr ?? 0) >= 0 ? 'pos' : 'neg'}/>
+                <Stat label="Max drawdown" value={btMetrics.max_drawdown_pct != null ? `${btMetrics.max_drawdown_pct.toFixed(1)}%` : '—'} tone="neg"/>
+                {btMetrics.expectancy != null && <Stat label="Expectancy" value={`${fmtMoney(btMetrics.expectancy)}/t`} tone={btMetrics.expectancy > 0 ? 'pos' : 'neg'}/>}
+                {btMetrics.sharpe_ratio != null && <Stat label="Sharpe" value={btMetrics.sharpe_ratio.toFixed(2)} tone={btMetrics.sharpe_ratio >= 1 ? 'pos' : undefined}/>}
+              </div>
+
+              {/* CHART CARD — the "backtest the entire thing" visualization */}
+              <div ref={btFsRef}
+                style={settings.background ? { background: settings.background } : undefined}
+                className={`relative rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-white dark:bg-[#131722] ${fullscreen ? 'flex flex-col' : ''}`}>
+                <div className="flex flex-wrap items-center gap-2 px-2.5 py-2 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900">
+                  <div className="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700">
+                    {TF_CHIPS.map((t) => (
+                      <button key={t} onClick={() => setBtTf(t)} className={`${chipBase} ${btTf === t ? chipOn : chipOff}`}>{tfLabel(t)}</button>
+                    ))}
+                  </div>
+                  <button onClick={() => updateSettings({ sessionsEnabled: !settings.sessionsEnabled })} title="Toggle session shading"
+                    className={`inline-flex items-center justify-center h-8 w-8 rounded-lg transition-colors ${settings.sessionsEnabled ? 'bg-violet-600 text-white hover:bg-violet-500' : iconBtn}`}>
+                    <Layers size={14}/>
+                  </button>
+                  <button onClick={toggleBtFullscreen} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} className={iconBtn}>
+                    {fullscreen ? <Minimize2 size={14}/> : <Maximize2 size={14}/>}
+                  </button>
+                  {btChartSpan && (
+                    <div className="ml-auto text-right leading-tight">
+                      <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">Charted {btChartSpan.from} → {btChartSpan.to}</div>
+                      <div className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                        {btPlottedCount} of {btResultTradeCount} trades plotted{btChartCapped ? <span className="text-amber-600 dark:text-amber-400"> · window capped</span> : null}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className={`relative ${fullscreen ? 'flex-1 min-h-0' : 'h-[380px] md:h-[62vh] md:max-h-[620px]'}`}>
+                  {btChartState === 'loading' && (
+                    <div className="absolute inset-0 flex items-center justify-center"><Loader2 className="animate-spin text-slate-400"/></div>
+                  )}
+                  {btChartState === 'error' && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-4">
+                      <AlertTriangle className="text-amber-400" size={26}/>
+                      <div className="text-sm font-semibold text-slate-600 dark:text-slate-300">Couldn't load chart bars for this range</div>
+                      <div className="text-xs text-slate-400 dark:text-slate-500">The stats and trades table below are still complete.</div>
+                    </div>
+                  )}
+                  {btChartState === 'ready' && btChartBars.length > 0 && (
+                    <>
+                      <TVReplayChart
+                        instrument={btRun?.instrument || instrument}
+                        bars={btChartBars}
+                        displayTf={btTf}
+                        resetKey={`bt-${runId}-${btChartNonce}`}
+                        showDate
+                        pdh={null}
+                        pdl={null}
+                        position={null}
+                        trades={btChartTrades}
+                        upColor={settings.upColor}
+                        downColor={settings.downColor}
+                        background={settings.background}
+                        sessionsEnabled={settings.sessionsEnabled}
+                        sessionVisibility={settings.sessionVisibility as SessionVisibility}
+                        timezone={resolveTz(settings.timezone)}
+                        hour12={settings.hour12}
+                        onDrawingApi={handleDrawingApi}
+                        onDrawingState={handleDrawingState}
+                      />
+                      <DrawingToolbar state={drawState} api={drawApiRef.current} onSelectTool={selectDrawTool} onSetDefaults={setDrawDefaults}/>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* equity curve */}
+              {btEquitySeries.length > 1 && (
+                <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 sm:p-5 dark:bg-slate-900 dark:border-slate-700">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2"><TrendingUp size={15} className="text-slate-400"/> Equity curve</div>
+                    <div className="text-[11px] text-slate-400 dark:text-slate-500 font-mono tabular-nums">{fmtMoney(btEquitySeries[0])} → {fmtMoney(btEquitySeries[btEquitySeries.length - 1])}</div>
+                  </div>
+                  <BtEquityLine data={btEquitySeries}/>
+                </div>
+              )}
+
+              {/* trades table */}
+              <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 sm:p-5 dark:bg-slate-900 dark:border-slate-700">
+                <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3">
+                  Trades <span className="text-slate-400 dark:text-slate-500 font-normal">({btTradesPending ? '…' : btTrades.length})</span>
+                </div>
+                {btTradesPending ? (
+                  <div className="text-center text-sm text-slate-400 dark:text-slate-500 py-8 border border-dashed rounded-xl border-slate-300 dark:border-slate-700">Loading trades…</div>
+                ) : btTrades.length === 0 ? (
+                  <div className="text-center text-sm text-slate-400 dark:text-slate-500 py-8 border border-dashed rounded-xl border-slate-300 dark:border-slate-700">No trades in this window — the strategy's conditions never lined up.</div>
+                ) : (
+                  <div className="overflow-x-auto -mx-1 px-1">
+                    <table className="w-full text-xs min-w-[640px]">
+                      <thead>
+                        <tr className="text-left text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 border-b border-slate-200 dark:border-slate-700">
+                          <th className="py-2 pr-3 font-bold">#</th>
+                          <th className="py-2 pr-3 font-bold">Dir</th>
+                          <th className="py-2 pr-3 font-bold">Entry</th>
+                          <th className="py-2 pr-3 font-bold">Exit</th>
+                          <th className="py-2 pr-3 font-bold">Entry time</th>
+                          <th className="py-2 pr-3 font-bold">Exit time</th>
+                          <th className="py-2 pr-3 font-bold text-right">Net P&L</th>
+                          <th className="py-2 font-bold">Exit reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(btTrades as any[]).map((t, i) => (
+                          <tr key={t.id ?? i} className="border-b border-slate-100 dark:border-slate-800 last:border-0">
+                            <td className="py-2 pr-3 text-slate-400 dark:text-slate-500 tabular-nums">{i + 1}</td>
+                            <td className="py-2 pr-3"><span className={`font-bold uppercase ${t.direction === 'long' ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>{t.direction}</span></td>
+                            <td className="py-2 pr-3 font-mono tabular-nums text-slate-700 dark:text-slate-300">{t.entry_price ?? '—'}</td>
+                            <td className="py-2 pr-3 font-mono tabular-nums text-slate-700 dark:text-slate-300">{t.exit_price ?? '—'}</td>
+                            <td className="py-2 pr-3 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtBtTime(t.entry_time)}</td>
+                            <td className="py-2 pr-3 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtBtTime(t.exit_time)}</td>
+                            <td className={`py-2 pr-3 font-mono tabular-nums font-bold text-right ${((t.net_pnl ?? t.pnl) ?? 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>{fmtMoney((t.net_pnl ?? t.pnl) ?? 0)}</td>
+                            <td className="py-2 text-slate-500 dark:text-slate-400 whitespace-nowrap">{t.exit_reason || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* EMPTY STATE (no run yet) */}
+          {!runId && (
+            strategies.length === 0 ? (
+              <div className="text-center py-16 border border-dashed rounded-2xl border-slate-300 dark:border-slate-700 mb-4">
+                <FlaskConical size={22} className="mx-auto text-slate-300 dark:text-slate-600 mb-2"/>
+                <div className="text-sm font-semibold text-slate-600 dark:text-slate-300 mb-1">No strategies yet</div>
+                <div className="text-xs text-slate-400 dark:text-slate-500">Build a strategy first, then backtest it across a whole date range here.</div>
+              </div>
+            ) : (
+              <div className="text-center py-16 border border-dashed rounded-2xl border-slate-300 dark:border-slate-700 mb-4">
+                <Play size={22} className="mx-auto text-slate-300 dark:text-slate-600 mb-2"/>
+                <div className="text-sm font-semibold text-slate-600 dark:text-slate-300 mb-1">Backtest the entire range at once</div>
+                <div className="text-xs text-slate-400 dark:text-slate-500">Pick a strategy + window above and hit Run — stats, the trades table and every trade on the chart land right here.</div>
+              </div>
+            )
+          )}
+
+          {/* RECENT BACKTESTS (localStorage log) */}
+          {btLog.length > 0 && (
+            <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 sm:p-5 dark:bg-slate-900 dark:border-slate-700">
+              <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3 flex items-center gap-2">
+                <History size={15} className="text-slate-400"/> Recent backtests
+                <span className="text-[10px] text-slate-400 dark:text-slate-500 font-normal">(this browser, last {BT_LOG_MAX})</span>
+              </div>
+              <div className="space-y-1.5">
+                {btLog.map((e) => (
+                  <button key={e.run_id} onClick={() => viewBtLogEntry(e)}
+                    className={`w-full text-left rounded-lg border px-3 py-2 transition-colors flex items-center gap-3 flex-wrap ${runId === e.run_id ? 'border-violet-400 dark:border-violet-600 bg-violet-50 dark:bg-violet-950/30' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700'}`}>
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate min-w-0 flex-1">{e.strategy_name}</span>
+                    <span className="text-[10.5px] text-slate-400 dark:text-slate-500 flex-shrink-0">{e.instrument} · {e.start_date} → {e.end_date}</span>
+                    <span className="text-[11px] font-mono tabular-nums flex-shrink-0">
+                      {e.win_rate != null && <span className={e.win_rate >= 0.5 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}>WR {fmtPct01(e.win_rate)}</span>}
+                      {e.profit_factor != null && <span className="text-slate-500 dark:text-slate-400"> · PF {e.profit_factor.toFixed(2)}</span>}
+                      {e.total_trades != null && <span className="text-slate-400 dark:text-slate-500"> · {e.total_trades}t</span>}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   )
 }
