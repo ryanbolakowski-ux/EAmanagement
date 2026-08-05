@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends
@@ -19,25 +20,45 @@ router = APIRouter()
 DAILY_BIAS_INSTRUMENTS = ["ES", "NQ", "RTY", "YM"]
 
 
-async def _compute_daily_bias(db: AsyncSession, instrument: str) -> dict:
-    """Compute today's ICT-style directional bias for an instrument.
+async def _compute_daily_bias(
+    db: AsyncSession, instrument: str, as_of: Optional[datetime] = None
+) -> dict:
+    """Compute the ICT-style directional bias for an instrument.
 
     Pulls 60 days of 1m bars from candle_cache and runs the ICT bias engine,
     which combines the 30-day EMA trend (as context) with intraday structure:
     PDH/PDL position, opening type, Asian-range sweeps, draw on liquidity.
     See `app/engines/ict_bias.py` for the full rule set.
-    """
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=60)
 
-    rows = (await db.execute(
-        text("""
-            SELECT timestamp, open, high, low, close, volume FROM candle_cache
-            WHERE instrument = :inst AND timestamp >= :start
-            ORDER BY timestamp
-        """),
-        {"inst": instrument, "start": start},
-    )).all()
+    `as_of` (default None) selects the point in time the bias is computed for.
+    When None this is TODAY's live bias — behaviour is byte-identical to the
+    original (get_daily_bias / the dashboard always call with no as_of): the
+    query has NO upper time bound. When a datetime is given (backtest as-of
+    replay) the 60-day window ENDS at `as_of` and an upper bound
+    `timestamp <= :end` is added so no future bars leak in (look-ahead guard).
+    """
+    if as_of is None:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=60)
+        rows = (await db.execute(
+            text("""
+                SELECT timestamp, open, high, low, close, volume FROM candle_cache
+                WHERE instrument = :inst AND timestamp >= :start
+                ORDER BY timestamp
+            """),
+            {"inst": instrument, "start": start},
+        )).all()
+    else:
+        end = as_of
+        start = end - timedelta(days=60)
+        rows = (await db.execute(
+            text("""
+                SELECT timestamp, open, high, low, close, volume FROM candle_cache
+                WHERE instrument = :inst AND timestamp >= :start AND timestamp <= :end
+                ORDER BY timestamp
+            """),
+            {"inst": instrument, "start": start, "end": end},
+        )).all()
 
     # Engine consumes a list of (ts, o, h, l, c, v) tuples
     return compute_ict_bias([tuple(r) for r in rows], instrument)

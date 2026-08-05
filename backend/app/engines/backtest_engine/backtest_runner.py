@@ -12,6 +12,57 @@ from loguru import logger
 from app.engines.strategy_engine.base_strategy import BaseStrategy, TradeSignal, SignalType, ExitReason
 from app.engines.backtest_engine.data_handler import DataHandler
 from app.engines.backtest_engine.metrics import BacktestMetricsResult, calculate_metrics
+# OWNER-GATES-BACKTEST-V1 (A/B toggle): reuse the LIVE lunch-window constants so
+# the backtest window matches the live gate exactly (11:00 <= ET < 14:00, futures
+# roots only). We deliberately do NOT call lunch_window.lunch_blocked / the async
+# bias_alignment path here — those honour env kill-switches (LUNCH_WINDOW_BLOCK /
+# DAILY_BIAS_ALIGNMENT) and fail OPEN, which would make the per-run A/B
+# non-deterministic. The gate below is driven ONLY by the per-run
+# apply_owner_gates flag + the precomputed {ET-date: bias} map.
+from app.engines.lunch_window import (
+    _FUTURES_ROOTS as _OWNER_FUTURES_ROOTS,
+    _WINDOW_START as _OWNER_LUNCH_START,
+    _WINDOW_END as _OWNER_LUNCH_END,
+    _ET as _OWNER_ET,
+)
+
+
+def _owner_gate_skip(instrument: str, direction: str, timestamp,
+                     bias_by_date: dict) -> Optional[str]:
+    """Pure/sync mirror of the LIVE owner gates, for the backtest A/B toggle.
+
+    Returns a short reason ('lunch' | 'bias') if the trade should be SKIPPED,
+    else None. No env reads, no DB, no async — safe to call inside the sync
+    runner loop.
+
+      * LUNCH  — futures roots only (upper()-checked against the live
+        _FUTURES_ROOTS). Blocked when 11:00:00 <= ET wall time < 14:00:00
+        (13:59:59 blocked, 14:00:00 allowed), DST-correct via zoneinfo.
+      * BIAS   — look up the precomputed daily bias for the bar's ET date and
+        mirror bias_alignment.direction_allowed EXACTLY: bias 'bullish' blocks
+        a short; 'bearish' blocks a long; 'neutral'/None gate nothing.
+
+    `timestamp` is the bar's tz-aware index value (UTC); it is converted to
+    America/New_York for BOTH the lunch check and the bias date key (never the
+    UTC date). `direction` is 'long' | 'short' (signal.signal.value).
+    """
+    inst = (instrument or "").upper()
+    et = timestamp.astimezone(_OWNER_ET)
+
+    # LUNCH gate — futures roots only.
+    if inst in _OWNER_FUTURES_ROOTS:
+        t = et.time()
+        if _OWNER_LUNCH_START <= t < _OWNER_LUNCH_END:
+            return "lunch"
+
+    # BIAS gate — daily value keyed by ET date.
+    d = (direction or "").lower()
+    bias = bias_by_date.get(et.strftime("%Y-%m-%d"))
+    if bias == "bullish" and d == "short":
+        return "bias"
+    if bias == "bearish" and d == "long":
+        return "bias"
+    return None
 
 
 TICK_VALUES = {
@@ -113,6 +164,15 @@ class BacktestConfig:
     # rolls over. This mirrors Apex Eval's $1,000 / day limit on a 50K.
     # Set 0 to disable.
     daily_loss_limit: float = 0.0
+    # OWNER-GATES-BACKTEST-V1: opt-in A/B of the LIVE owner rules (live-bias
+    # direction gate + NY-lunch no-trade window). Default False = today's
+    # backtest EXACTLY (no gate calls, no behaviour change). When True the
+    # runner skips trade-opens that the live/paper path would have blocked.
+    apply_owner_gates: bool = False
+    # {ET-date 'YYYY-MM-DD' -> 'bullish'|'bearish'|'neutral'|None} precomputed
+    # as-of each trading day (see _run_backtest_task). Only read when
+    # apply_owner_gates is True.
+    owner_bias_by_date: dict = field(default_factory=dict)
 
 
 class BacktestRunner:
@@ -144,6 +204,9 @@ class BacktestRunner:
         self._equity_peak: float = float(config.initial_capital)
         self._skipped_too_small: int = 0
         self._half_size_count: int = 0
+        # OWNER-GATES-BACKTEST-V1: count of trade-opens skipped by the live-bias
+        # + NY-lunch gates when config.apply_owner_gates is True (0 when off).
+        self._owner_gate_skips: int = 0
         # Today's realized P&L (closed trades only). Reset at each day boundary.
         self._daily_pnl: float = 0.0
         self._daily_loss_lockouts: int = 0
@@ -211,6 +274,21 @@ class BacktestRunner:
                 signal: Optional[TradeSignal] = self.strategy.on_bar(bars)
 
                 if signal and signal.signal != SignalType.NONE:
+                    # OWNER-GATES-BACKTEST-V1 (A/B toggle): when enabled, drop
+                    # trade-opens the LIVE/paper path would have blocked (NY-lunch
+                    # window + live-bias direction gate). Guarded entirely behind
+                    # the per-run flag — when off (default) this block is never
+                    # entered and the backtest is byte-identical to today. A skip
+                    # opens no trade this bar (same as the too-small skip below).
+                    if self.config.apply_owner_gates:
+                        _gate = _owner_gate_skip(
+                            instrument, signal.signal.value, timestamp,
+                            self.config.owner_bias_by_date,
+                        )
+                        if _gate:
+                            self._owner_gate_skips += 1
+                            continue
+
                     entry = self._apply_slippage(signal.entry_price, signal.signal.value, tick_size)
 
                     # Risk-based sizing with auto-micro fallback. If the account
@@ -454,3 +532,9 @@ class BacktestRunner:
     @property
     def completed_trades(self) -> list[SimulatedTrade]:
         return self._completed_trades
+
+    @property
+    def owner_gate_skips(self) -> int:
+        """Trade-opens skipped by the live-bias + NY-lunch gates this run
+        (0 unless config.apply_owner_gates was True)."""
+        return self._owner_gate_skips

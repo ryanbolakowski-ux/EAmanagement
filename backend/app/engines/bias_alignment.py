@@ -30,6 +30,23 @@ def _enabled() -> bool:
     return os.environ.get("DAILY_BIAS_ALIGNMENT", "1") == "1"
 
 
+def normalize_bias(raw: Optional[dict]) -> Optional[str]:
+    """Pure mirror of the live gate's bias normalization.
+
+    Reads the ICT-bias dict's headline (intraday_bias|bias|trend), lower-cases
+    it, and collapses anything OUTSIDE {bullish,bearish,neutral} — notably
+    strong_bullish / strong_bearish / unknown — to None. That collapse is
+    load-bearing: a strong trend must produce NO direction gate (identical to
+    the live path). The backtest owner-gates precompute uses this so its A/B
+    mirrors live/paper faithfully; do NOT collapse strong_* -> bullish/bearish.
+    """
+    bias = (raw or {}).get("intraday_bias") or (raw or {}).get("bias") or (raw or {}).get("trend")
+    bias = str(bias).lower() if bias else None
+    if bias not in ("bullish", "bearish", "neutral"):
+        bias = None
+    return bias
+
+
 async def get_daily_bias(instrument: str) -> Optional[str]:
     """'bullish' | 'bearish' | 'neutral' | None — same engine as the dashboard."""
     inst = _PARENT.get((instrument or "").upper(), (instrument or "").upper())
@@ -42,10 +59,7 @@ async def get_daily_bias(instrument: str) -> Optional[str]:
         from app.database import async_session_factory
         async with async_session_factory() as db:
             b = await _compute_daily_bias(db, inst)
-        bias = (b or {}).get("intraday_bias") or (b or {}).get("bias") or (b or {}).get("trend")
-        bias = str(bias).lower() if bias else None
-        if bias not in ("bullish", "bearish", "neutral"):
-            bias = None
+        bias = normalize_bias(b)
         _CACHE[inst] = (now + _TTL, bias)
         return bias
     except Exception as e:

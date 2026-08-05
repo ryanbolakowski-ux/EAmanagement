@@ -76,6 +76,12 @@ class BacktestRequest(BaseModel):
     # None -> use the strategy's configured breakeven_at_r.
     breakeven_at_r: Optional[float] = None
     breakeven_mode: Optional[str] = None
+    # OWNER-GATES-BACKTEST-V1: opt-in A/B of the LIVE owner rules on this run —
+    # the live-bias direction gate + the NY-lunch no-trade window (the same
+    # gates enforced in paper/live via entry_guard). Default False = today's
+    # backtest EXACTLY. On = mirrors live/paper so a strategy's raw edge can be
+    # A/B'd against what live actually trades.
+    apply_owner_gates: bool = False
 
 
 class BacktestRunResponse(BaseModel):
@@ -163,6 +169,9 @@ async def run_backtest(
                 data.breakeven_mode if data.breakeven_mode is not None
                 else (getattr(strategy, "breakeven_mode", None) or "off")
             ),
+            # OWNER-GATES-BACKTEST-V1: carried in the JSON snapshot (no migration)
+            # so _run_backtest_task can precompute the as-of bias map and gate.
+            "apply_owner_gates": bool(data.apply_owner_gates),
             # SNAPSHOT-V2: full, self-contained config so two runs can be diffed
             # authoritatively (this is what makes 'nearly identical but not' explainable).
             "rule_tree": (getattr(strategy, "rule_tree", None) or {}),
@@ -466,6 +475,46 @@ async def _run_backtest_task(backtest_run_id: str):
                 _be_mode = (run.strategy_params_snapshot or {}).get("breakeven_mode")
                 if _be_mode is None:
                     _be_mode = getattr(strategy_model, "breakeven_mode", None) or "off"
+
+                # OWNER-GATES-BACKTEST-V1: when the run opts in, precompute the
+                # LIVE daily bias AS-OF each trading day (the runner loop is
+                # sync, so all bias work happens here, once per ET date — bias
+                # is a DAILY value). Default OFF touches none of this: no
+                # queries, an empty map, and the runner never reads it.
+                _apply_owner = bool((run.strategy_params_snapshot or {}).get("apply_owner_gates", False))
+                _owner_bias_by_date: dict = {}
+                if _apply_owner:
+                    from app.api.routes.dashboard import _compute_daily_bias
+                    from app.engines.bias_alignment import normalize_bias
+                    from zoneinfo import ZoneInfo as _ZI
+                    from datetime import timezone as _tzutc
+                    _et_zone = _ZI("America/New_York")
+                    # df.index is the fetched candle_cache index (tz-aware UTC);
+                    # normalize to distinct ET trading dates (skips weekends/
+                    # holidays, avoids wasted queries).
+                    _idx = df.index
+                    if getattr(_idx, "tz", None) is None:
+                        _idx = _idx.tz_localize("UTC")
+                    _et_dates = _idx.tz_convert("America/New_York").normalize().unique()
+                    for _d in _et_dates:
+                        _py = _d.to_pydatetime()
+                        # AS-OF = 09:30 ET (RTH open) on that date. This reflects
+                        # info available at the open and avoids the late-day ->
+                        # early-day forward leak an end-of-day as_of would cause;
+                        # a single daily value can't perfectly track the
+                        # intraday-evolving live bias (daily is faithful enough).
+                        _as_of_et = datetime(_py.year, _py.month, _py.day, 9, 30, 0, tzinfo=_et_zone)
+                        _as_of_utc = _as_of_et.astimezone(_tzutc.utc)
+                        try:
+                            _b = await _compute_daily_bias(db, run.instrument, as_of=_as_of_utc)
+                        except Exception as _be:
+                            logger.warning(f"[backtest] run={run.id} owner-gates bias precompute "
+                                           f"failed for {_as_of_et:%Y-%m-%d}: {_be} — treating as neutral/None")
+                            _b = None
+                        _owner_bias_by_date[_as_of_et.strftime("%Y-%m-%d")] = normalize_bias(_b)
+                    logger.info(f"[backtest] run={run.id} owner-gates ON — precomputed "
+                                f"as-of bias for {len(_owner_bias_by_date)} ET trading dates")
+
                 bt_config = BacktestConfig(
                     instrument=run.instrument,
                     start_date=run.start_date,
@@ -480,6 +529,8 @@ async def _run_backtest_task(backtest_run_id: str):
                     daily_loss_limit=run.daily_loss_limit,
                     breakeven_at_r=float(_be_at_r or 0.0),
                     breakeven_mode=str(_be_mode or "off"),
+                    apply_owner_gates=_apply_owner,
+                    owner_bias_by_date=_owner_bias_by_date,
                 )
 
                 run.progress = 40.0
@@ -493,6 +544,17 @@ async def _run_backtest_task(backtest_run_id: str):
                 metrics = await asyncio.to_thread(runner.run)
                 logger.info(f"[PROFILE] run={run.id} engine_run={_tprof.perf_counter()-_prof_engine0:.1f}s "
                             f"trades={getattr(metrics,'total_trades',0)}")
+
+                # OWNER-GATES-BACKTEST-V1: surface how many trade-opens the gates
+                # skipped, stashed in the JSON snapshot (no migration) like
+                # data_rows above. Only written when the run opted in.
+                if _apply_owner:
+                    try:
+                        run.strategy_params_snapshot = {**(run.strategy_params_snapshot or {}),
+                            "owner_gate_skips": int(getattr(runner, "owner_gate_skips", 0))}
+                        await db.commit()
+                    except Exception:
+                        pass
 
                 run.progress = 80.0
                 await db.commit()
