@@ -104,7 +104,15 @@ function OpenPositionsCard() {
   })
   const closeAll = useMutation({
     mutationFn: () => api.post('/api/v1/scanner/close-all'),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['scanner-open-positions'] }),
+    onSuccess: (r: any) => {
+      qc.invalidateQueries({ queryKey: ['scanner-open-positions'] })
+      const d = r?.data || {}
+      const failed = (d.closed || []).filter((x: any) => x && !x.ok)
+      if (!d.count && !failed.length) alert('No open Saro positions to close.')
+      else if (failed.length) alert(`Closed ${d.count || 0}. ${failed.length} could not close: ` + failed.map((f: any) => `${f.ticker} (${f.err})`).join(', '))
+      else alert(`Closed ${d.count} position(s) at market.`)
+    },
+    onError: (e: any) => alert('Close all failed: ' + (e?.response?.data?.detail || e?.message || 'request error')),
   })
   const forceCloseAll = useMutation({
     mutationFn: () => api.post('/api/v1/scanner/force-close-all'),
