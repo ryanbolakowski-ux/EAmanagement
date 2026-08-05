@@ -1047,6 +1047,106 @@ async def approve_signal(signal_id: str, request: Request,
     return {"signal_id": signal_id, "decision": "approved", "placed_ref": placed_ref}
 
 
+# ── Saro STOCK-pick self-serve activation (per-user opt-in) ──────────────────
+# Additive + backward-compatible: the flag users.saro_signals_enabled is added
+# idempotently and the pre-existing recipients are grandfathered to activated by
+# app.core.saro.ensure_saro_column, so nobody currently receiving picks is
+# dropped. Delivery gate = (tier_3/4/5 eligible AND self-activated); wired into
+# the recipient queries in premarket_scheduler.py / premarket_watch.py.
+# Independent of the automation master-switch (app_config.automation_enabled),
+# which only gates tier_5 auto-trading — Saro signals work even while automation
+# is "coming soon".
+async def _saro_is_activated(db: AsyncSession, user_id) -> bool:
+    """Read the per-user Saro activation flag (COALESCE NULL/absent -> False)."""
+    from app.core.saro import ensure_saro_column
+    await ensure_saro_column(db)
+    row = (await db.execute(text(
+        "SELECT COALESCE(saro_signals_enabled, false) FROM users WHERE id = :uid"
+    ), {"uid": str(user_id)})).first()
+    return bool(row[0]) if row else False
+
+
+async def _saro_today_pick(db: AsyncSession) -> Optional[dict]:
+    """Best-effort: today's persisted Saro pick (same source emit_theta_pick
+    writes). Returns None on any error / no pick — never raises to the caller."""
+    try:
+        row = (await db.execute(text(
+            "SELECT ticker, entry, stop, target FROM email_signals_history "
+            "WHERE picked_at::date = (NOW() AT TIME ZONE 'America/New_York')::date "
+            "ORDER BY picked_at DESC LIMIT 1"
+        ))).first()
+        if row:
+            return {"ticker": row[0], "entry": row[1], "stop": row[2], "target": row[3]}
+    except Exception as _e:
+        logger.warning(f"[saro] today-pick lookup failed: {type(_e).__name__}: {_e}")
+    return None
+
+
+@router.get("/saro/status")
+async def saro_status(current_user: User = Depends(get_current_user),
+                      db: AsyncSession = Depends(get_db)):
+    """Saro stock-pick eligibility + activation state for the signed-in user.
+    Shape: { eligible, activated, tier, today_pick? }. The Live Trading "Saro
+    Stock Picker" card reads this to render Activate / Active / upsell."""
+    from app.core.packages import gets_saro_stock, tier_value
+    eligible = gets_saro_stock(current_user)
+    activated = await _saro_is_activated(db, current_user.id)
+    return {
+        "eligible": eligible,
+        "activated": activated,
+        "tier": tier_value(current_user),
+        "today_pick": (await _saro_today_pick(db)) if (eligible and activated) else None,
+    }
+
+
+@router.post("/saro/activate")
+async def saro_activate(current_user: User = Depends(get_current_user),
+                        db: AsyncSession = Depends(get_db)):
+    """Self-activate the daily Saro STOCK pick email for the signed-in user.
+    Tier-gated (tier_3/4/5) + idempotent. Only arms the EMAIL path — the
+    broker/auto-trade path stays independently gated (trade_mode/live broker/
+    trading_enabled), so activating signals never by itself places real trades.
+    """
+    from app.core.packages import gets_saro_stock, tier_value
+    from app.core.saro import ensure_saro_column
+    if not gets_saro_stock(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Saro stock signals require the Options Scanner plan (tier_3) or higher.",
+        )
+    await ensure_saro_column(db)
+    await db.execute(text(
+        "UPDATE users SET saro_signals_enabled = true WHERE id = :uid"
+    ), {"uid": str(current_user.id)})
+    await db.commit()
+    logger.info(f"[saro] ACTIVATED stock signals user={current_user.id} "
+                f"({current_user.email}) tier={tier_value(current_user)}")
+    # FUTURE APP PUSH: no push registered here. Once APNS_ENABLED and the iOS
+    # app are live, the daily pick already fans out to this user's device tokens
+    # via app.services.push.send_pick_push (dormant in emit_theta_pick). Nothing
+    # to send at activation time — this only arms the daily EMAIL.
+    return {"eligible": True, "activated": True, "tier": tier_value(current_user)}
+
+
+@router.post("/saro/deactivate")
+async def saro_deactivate(current_user: User = Depends(get_current_user),
+                          db: AsyncSession = Depends(get_db)):
+    """Opt out of the daily Saro STOCK pick. Idempotent. Intentionally NOT
+    tier-gated: turning delivery OFF can never expand the recipient set or break
+    backward-compat, so we always let a user stop (even after a downgrade)."""
+    from app.core.packages import tier_value, gets_saro_stock
+    from app.core.saro import ensure_saro_column
+    await ensure_saro_column(db)
+    await db.execute(text(
+        "UPDATE users SET saro_signals_enabled = false WHERE id = :uid"
+    ), {"uid": str(current_user.id)})
+    await db.commit()
+    logger.info(f"[saro] DEACTIVATED stock signals user={current_user.id} "
+                f"({current_user.email}) tier={tier_value(current_user)}")
+    return {"eligible": gets_saro_stock(current_user), "activated": False,
+            "tier": tier_value(current_user)}
+
+
 @router.get("/my-access")
 async def my_access(current_user: User = Depends(get_current_user),
                     db: AsyncSession = Depends(get_db)):
@@ -1054,7 +1154,8 @@ async def my_access(current_user: User = Depends(get_current_user),
     / pending / disabled / enabled / not_eligible), capabilities, and which
     agreements are accepted. The frontend badge + access explainer read this."""
     from app.core.packages import (is_fully_automated_tier, gets_signals,
-        requires_manual_approval, can_place_on_approval, automation_status, tier_value)
+        requires_manual_approval, can_place_on_approval, automation_status, tier_value,
+        gets_saro_stock)
     from app.api.routes.legal import has_current_ack
     from sqlalchemy import select as _select
     from app.models.user import BrokerAccount as _BA
@@ -1062,6 +1163,7 @@ async def my_access(current_user: User = Depends(get_current_user),
     has_sig = await has_current_ack(db, current_user.id, "signals_disclosure")
     acct = (await db.execute(_select(_BA).where(_BA.user_id == current_user.id))).scalars().first()
     trading_enabled = getattr(acct, "trading_enabled", None) if acct else None
+    saro_activated = await _saro_is_activated(db, current_user.id)
     return {
         "tier": tier_value(current_user),
         "fully_automated": is_fully_automated_tier(current_user),
@@ -1072,5 +1174,11 @@ async def my_access(current_user: User = Depends(get_current_user),
                                                 trading_enabled=trading_enabled),
         "agreements": {"fully_automated_trading": has_fat, "signals_disclosure_v2": has_sig},
         "has_broker_account": acct is not None,
+        # SARO-OPT-IN (additive — existing consumers ignore unknown keys):
+        # eligibility for the daily Saro STOCK pick + whether the user has
+        # self-activated. The Live Trading "Saro Stock Picker" card and the
+        # one-time "Welcome to Saro" modal read these.
+        "saro_stock_eligible": gets_saro_stock(current_user),
+        "saro_signals_activated": saro_activated,
     }
 

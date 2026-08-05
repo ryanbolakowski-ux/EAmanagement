@@ -372,14 +372,17 @@ async def build_watchlist(today_et: str) -> list:
 
 # ── email ────────────────────────────────────────────────────────────────────
 async def _subscriber_emails() -> list:
-    """SAME recipient set as the daily pick / no-pick emails: active users
-    with an ACTIVE theta_scanner strategy."""
+    """SAME recipient set as the daily pick / no-pick emails: active users on a
+    Saro-eligible tier (tier_3/4/5) who have SELF-ACTIVATED Saro stock signals.
+    Must match the pick / no-pick gate in premarket_scheduler.py exactly, or the
+    premarket watch note would diverge from the actual pick recipients."""
+    from app.core.saro import ensure_saro_column, SARO_RECIPIENT_WHERE
     try:
         async with _session_factory()() as db:
+            await ensure_saro_column(db)
             rows = (await db.execute(text(
-                "SELECT DISTINCT u.email FROM users u JOIN strategies s ON s.user_id = u.id "
-                "WHERE s.signal_mode = 'theta_scanner' AND s.status = 'ACTIVE' "
-                "AND u.is_active = true"))).fetchall()
+                f"SELECT DISTINCT u.email FROM users u WHERE {SARO_RECIPIENT_WHERE}"
+            ))).fetchall()
         return [r[0] for r in rows if r and r[0]]
     except Exception as e:
         logger.error(f"[premarket-watch] recipient query failed ({type(e).__name__}: {e})")

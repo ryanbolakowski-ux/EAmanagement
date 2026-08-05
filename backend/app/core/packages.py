@@ -19,6 +19,11 @@ SIGNAL_TIERS = {"tier_2", "tier_3", "tier_4"}
 # Tiers permitted to PLACE a live trade after the user approves a signal
 # (they have a real brokerage connection / live-execution entitlement).
 APPROVE_TO_PLACE_TIERS = {"tier_4"}
+# Tiers eligible for the daily Saro STOCK pick (the options-scanner morning
+# email). This is DELIBERATELY separate from SIGNAL_TIERS: SIGNAL_TIERS
+# includes tier_2 (FUTURES signals) and excludes tier_5, so it is NOT a
+# correct gate for the Saro stock pick. Saro stock = tier_3 + tier_4 + tier_5.
+SARO_STOCK_TIERS = {"tier_3", "tier_4", "tier_5"}
 
 # Agreement kinds (must match app/api/routes/legal.py CURRENT_VERSIONS).
 FULLY_AUTOMATED_AGREEMENT = "fully_automated_trading"
@@ -41,6 +46,14 @@ def gets_signals(user_or_tier) -> bool:
     """True if the user receives trade-idea signals (signal tiers + fully-auto,
     which still gets notified)."""
     return tier_value(user_or_tier) in (SIGNAL_TIERS | FULLY_AUTOMATED_TIERS)
+
+
+def gets_saro_stock(user_or_tier) -> bool:
+    """True if the tier is eligible for the daily Saro STOCK pick (options
+    scanner morning email). Eligibility only — actual delivery additionally
+    requires the per-user opt-in flag users.saro_signals_enabled (see
+    app/core/saro.py). tier_3 / tier_4 / tier_5."""
+    return tier_value(user_or_tier) in SARO_STOCK_TIERS
 
 
 def requires_manual_approval(user_or_tier) -> bool:

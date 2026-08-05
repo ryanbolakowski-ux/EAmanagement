@@ -1208,12 +1208,23 @@ async def run_theta_scanner_for_all_users():
         if not pick:
             logger.info("[ThetaScanner] no qualified pick today — sending nothing")
             return
-        users = (await db.execute(_t("""
-            SELECT DISTINCT ON (u.id) u.id, u.email, u.username, s.id AS strategy_id FROM users u
-              JOIN strategies s ON s.user_id = u.id
-             WHERE s.signal_mode = 'theta_scanner' AND s.status = 'ACTIVE'
-               AND u.is_active = true   -- exclude deactivated/deleted accounts
-             ORDER BY u.id, s.id
+        # SARO-OPT-IN: recipients are now (tier-eligible AND self-activated),
+        # NOT the old manually-seeded strategy join. ensure_saro_column adds the
+        # flag + grandfathers the pre-existing recipients so this set is
+        # byte-identical on first deploy (see app/core/saro.py). strategy_id is
+        # an OPTIONAL subquery — newly self-activated users may have NO
+        # theta_scanner strategy, so it can be NULL (guarded below before the
+        # paper session, which needs a real strategy_id).
+        from app.core.saro import ensure_saro_column, SARO_RECIPIENT_WHERE
+        await ensure_saro_column(db)
+        users = (await db.execute(_t(f"""
+            SELECT DISTINCT ON (u.id) u.id, u.email, u.username,
+              (SELECT s.id FROM strategies s
+                 WHERE s.user_id = u.id AND s.signal_mode = 'theta_scanner'
+                   AND s.status = 'ACTIVE' LIMIT 1) AS strategy_id
+            FROM users u
+            WHERE {SARO_RECIPIENT_WHERE}
+            ORDER BY u.id
         """))).fetchall()
         for u in users:
             class _U: pass
@@ -1223,8 +1234,19 @@ async def run_theta_scanner_for_all_users():
                 logger.info(f"[ThetaScanner] emitted to {u.email}: ok={ok}")
             except Exception as e:
                 logger.error(f"[ThetaScanner] emit failed for {u.email}: {e}")
+            # FUTURE APP PUSH: the per-recipient iOS push already fans out from
+            # inside emit_theta_pick -> app.services.push.send_pick_push (wired
+            # dormant, hard-gated on APNS_ENABLED). Once the iOS app is live and
+            # APNS_ENABLED=1, activated users receive the pick on-device with no
+            # change needed here — device tokens are keyed by user.id.
             # THETA-AUTOPAPER-V1 (#27): also paper-trade the pick through the
-            # options-paper engine (flag-gated, idempotent).
+            # options-paper engine (flag-gated, idempotent). GUARD: self-activated
+            # Saro users may have NO theta_scanner strategy (strategy_id is NULL);
+            # TradeSession.strategy_id is NOT NULL so we MUST skip the paper start
+            # for them, otherwise the emit loop would crash mid-fan-out.
+            if u.strategy_id is None:
+                logger.info(f"[OptionsPaper-Theta] no theta_scanner strategy for {u.email} — email only, skip paper session")
+                continue
             try:
                 await _start_theta_pick_paper_session(db, u.id, u.strategy_id, pick.get("ticker"), pick)
             except Exception as e:
@@ -1246,11 +1268,15 @@ async def _send_no_pick_emails(date_str: str, reason: str) -> None:
     from app.database import async_session_factory
     from app.services.email import _send_tracked
     from sqlalchemy import text as _t
+    # SARO-OPT-IN: must use the SAME (tier + activation) gate as the daily pick
+    # query above — otherwise activated users would get inconsistent "no pick"
+    # notes vs picks. Grandfather keeps the current recipient set unchanged.
+    from app.core.saro import ensure_saro_column, SARO_RECIPIENT_WHERE
     try:
         async with async_session_factory() as _db:
+            await ensure_saro_column(_db)
             rows = (await _db.execute(_t(
-                "SELECT DISTINCT u.email FROM users u JOIN strategies s ON s.user_id = u.id "
-                "WHERE s.signal_mode = 'theta_scanner' AND s.status = 'ACTIVE' AND u.is_active = true"
+                f"SELECT DISTINCT u.email FROM users u WHERE {SARO_RECIPIENT_WHERE}"
             ))).fetchall()
     except Exception as _e:
         logger.error(f"[ThetaScanner] no-pick recipient query failed: {_e}")
