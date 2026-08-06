@@ -1073,7 +1073,8 @@ async def _saro_today_pick(db: AsyncSession) -> Optional[dict]:
         row = (await db.execute(text(
             "SELECT ticker, entry, stop, target FROM email_signals_history "
             "WHERE picked_at::date = (NOW() AT TIME ZONE 'America/New_York')::date "
-            "ORDER BY picked_at DESC LIMIT 1"
+            "AND asset_type = 'options' AND (shadow IS NOT TRUE) "
+            "ORDER BY picked_at ASC LIMIT 1"
         ))).first()
         if row:
             return {"ticker": row[0], "entry": row[1], "stop": row[2], "target": row[3]}
