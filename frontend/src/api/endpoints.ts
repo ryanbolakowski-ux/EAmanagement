@@ -354,8 +354,36 @@ export const legalApi = {
 // Plan access (Phase G) — tier capabilities + automation status
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Saro STOCK-pick self-serve activation. Mirrors the backend contract on the
+// account-signals router (GET/POST /saro/*). today_pick is populated only when
+// the user is eligible AND activated; null otherwise.
+export type SaroTodayPick = {
+  ticker: string
+  entry: number | null
+  stop: number | null
+  target: number | null
+}
+
+export type SaroStatus = {
+  eligible: boolean
+  activated: boolean
+  tier: string
+  today_pick: SaroTodayPick | null
+}
+
+// activate/deactivate return the same eligible/activated/tier triple (no
+// today_pick) — the card refetches saro/status after a toggle for the pick.
+export type SaroToggleResult = {
+  eligible: boolean
+  activated: boolean
+  tier: string
+}
+
 export const accountSignalsApi = {
   myAccess: () => api.get<MyAccess>('/api/v1/account-signals/my-access'),
+  saroStatus: () => api.get<SaroStatus>('/api/v1/account-signals/saro/status'),
+  saroActivate: () => api.post<SaroToggleResult>('/api/v1/account-signals/saro/activate'),
+  saroDeactivate: () => api.post<SaroToggleResult>('/api/v1/account-signals/saro/deactivate'),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

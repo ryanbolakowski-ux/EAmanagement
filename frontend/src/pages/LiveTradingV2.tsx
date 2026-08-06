@@ -1,15 +1,18 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
   Activity, TrendingUp, TrendingDown, DollarSign, Briefcase, X,
   Wallet, Zap, AlertCircle, ArrowLeft, RefreshCw, Calculator,
-  Lock, Unlock, Pause, Play, ChevronDown, ChevronUp
+  Lock, Unlock, Pause, Play, ChevronDown, ChevronUp,
+  Sparkles, Bell, CheckCircle2, ArrowUpRight
 } from 'lucide-react'
-import { liveTradingApi, tradesApi, strategiesApi, dashboardApi } from '../api/endpoints'
+import { liveTradingApi, tradesApi, strategiesApi, dashboardApi, accountSignalsApi } from '../api/endpoints'
 import api from '../api/client'
 import SizingModal from '../components/SizingModal'
 import AddBrokerInline from '../components/AddBrokerInline'
+import WelcomeToSaroModal, { SARO_STATUS_KEY } from '../components/WelcomeToSaroModal'
+import { MY_ACCESS_KEY } from '../hooks/useMyAccess'
 import { classifyAssetClass, supportedClasses, type AssetClass } from '../utils/assetClass'
 
 type Period = 'today' | 'week' | 'month' | 'ytd'
@@ -395,6 +398,150 @@ function TodayPickCard() {
         </div>
       )}
     </div>
+  )
+}
+
+// ── Saro Stock Picker — self-serve activation of the daily Saro STOCK pick ──
+// Reads GET /api/v1/account-signals/saro/status; Activate/Deactivate toggle the
+// per-user email opt-in (POST /saro/activate|deactivate). Backward-compatible:
+// existing recipients are grandfathered server-side, so this card never changes
+// who currently gets picks — it only lets NEW eligible users self-activate.
+// APP PUSH is intentionally NOT wired here — the copy flags it "coming with the
+// app"; activation only arms the daily pick EMAIL.
+function SaroStockPickerCard() {
+  const qc = useQueryClient()
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: SARO_STATUS_KEY,
+    queryFn: () => accountSignalsApi.saroStatus().then(r => r.data),
+    staleTime: 30_000,
+  })
+  // On toggle, refresh both the Saro status read and the shared plan-access
+  // cache (my-access carries saro_stock_eligible/saro_signals_activated, which
+  // also drives the Welcome-to-Saro modal).
+  const onToggleSuccess = () => {
+    qc.invalidateQueries({ queryKey: SARO_STATUS_KEY })
+    qc.invalidateQueries({ queryKey: MY_ACCESS_KEY })
+  }
+  const activate = useMutation({
+    mutationFn: () => accountSignalsApi.saroActivate().then(r => r.data),
+    onSuccess: onToggleSuccess,
+  })
+  const deactivate = useMutation({
+    mutationFn: () => accountSignalsApi.saroDeactivate().then(r => r.data),
+    onSuccess: onToggleSuccess,
+  })
+
+  const header = (
+    <div className="flex items-center gap-2.5 mb-3">
+      <div className="w-9 h-9 rounded-xl bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300 flex items-center justify-center flex-shrink-0">
+        <Sparkles size={17}/>
+      </div>
+      <div className="min-w-0">
+        <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-violet-700 dark:text-violet-300">Saro Stock Picker</div>
+        <div className="text-sm font-extrabold text-slate-900 dark:text-slate-100">Daily stock signals, delivered</div>
+      </div>
+    </div>
+  )
+  const wrap = (children: ReactNode) => (
+    <div className="rounded-2xl border border-violet-200 dark:border-violet-900 bg-white dark:bg-slate-900 p-5">
+      {header}
+      {children}
+    </div>
+  )
+  const pushNote = (
+    <div className="mt-3 flex items-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-500">
+      <Bell size={12}/> Push notifications coming with the app.
+    </div>
+  )
+
+  if (isLoading) return wrap(<div className="h-16 rounded-xl bg-slate-100 dark:bg-slate-800 animate-pulse"/>)
+  if (isError || !data) {
+    return wrap(
+      <div className="text-xs text-slate-500 dark:text-slate-400">
+        Couldn't load your Saro status.{' '}
+        <button onClick={() => refetch()} className="text-violet-600 dark:text-violet-400 font-bold hover:underline">Retry</button>
+      </div>
+    )
+  }
+
+  // ── Not eligible (tier < 3): soft upsell to the Options Scanner plan ──
+  if (!data.eligible) {
+    return wrap(
+      <>
+        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-4 flex items-start gap-3">
+          <div className="w-8 h-8 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-500 flex items-center justify-center flex-shrink-0">
+            <Lock size={14}/>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-bold text-slate-800 dark:text-slate-100">Saro picks aren't on your plan yet</div>
+            <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Upgrade to the Options Scanner plan to get Saro's daily stock pick by email — entry, stop, and target included.
+            </div>
+            <Link to="/pricing" className="inline-flex items-center gap-1 mt-2.5 text-xs font-bold text-violet-600 dark:text-violet-400 hover:underline">
+              See plans <ArrowUpRight size={13}/>
+            </Link>
+          </div>
+        </div>
+        {pushNote}
+      </>
+    )
+  }
+
+  // ── Eligible + activated: active state + today's pick + Deactivate ──
+  if (data.activated) {
+    const p = data.today_pick
+    return wrap(
+      <>
+        <div className="rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950/30 px-4 py-3 flex items-center gap-2.5">
+          <CheckCircle2 size={18} className="text-emerald-600 dark:text-emerald-400 flex-shrink-0"/>
+          <div className="min-w-0">
+            <div className="text-sm font-bold text-emerald-800 dark:text-emerald-200">Active — you'll get the daily pick by email</div>
+            <div className="text-[11px] text-emerald-700/80 dark:text-emerald-300/80">Sent every trading day around 9:36 AM ET.</div>
+          </div>
+        </div>
+        {p && (
+          <div className="mt-3 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-700 text-white px-4 py-3">
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-80">Today's Saro pick</div>
+            <div className="flex items-baseline gap-3 mt-1 flex-wrap">
+              <div className="text-2xl font-extrabold tabular-nums">{p.ticker}</div>
+              <div className="text-xs opacity-95 tabular-nums flex flex-wrap gap-x-3 gap-y-0.5">
+                {p.entry != null && <span>entry ${Number(p.entry).toFixed(2)}</span>}
+                {p.stop != null && <span className="text-rose-200">stop ${Number(p.stop).toFixed(2)}</span>}
+                {p.target != null && <span className="text-emerald-200">target ${Number(p.target).toFixed(2)}</span>}
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <span className="flex items-center gap-1.5 text-[11px] text-slate-400 dark:text-slate-500">
+            <Bell size={12}/> Push coming with the app.
+          </span>
+          <button onClick={() => deactivate.mutate()} disabled={deactivate.isPending}
+            className="text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 disabled:opacity-50 whitespace-nowrap">
+            {deactivate.isPending ? 'Turning off…' : 'Deactivate'}
+          </button>
+        </div>
+      </>
+    )
+  }
+
+  // ── Eligible + not activated: prominent Activate CTA ──
+  return wrap(
+    <>
+      <p className="text-sm text-slate-600 dark:text-slate-300 leading-snug">
+        Turn on Saro's daily stock pick. Every trading morning we email you one high-conviction pick with entry, stop, and target already worked out.
+      </p>
+      {activate.isError && (
+        <div className="mt-3 rounded-lg p-2.5 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-900/40 text-[11px] text-rose-700 dark:text-rose-300">
+          {(activate.error as any)?.response?.data?.detail || 'Could not activate right now — please try again.'}
+        </div>
+      )}
+      <button onClick={() => activate.mutate()} disabled={activate.isPending}
+        className="mt-3 w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-extrabold bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white shadow-lg shadow-violet-900/20">
+        <Sparkles size={16}/> {activate.isPending ? 'Activating…' : 'Activate Saro daily stock signals'}
+      </button>
+      {pushNote}
+    </>
   )
 }
 
@@ -1218,6 +1365,11 @@ export default function LiveTradingV2() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      {/* One-time "Welcome to Saro" modal — fires for newly Saro-eligible users
+          who have never activated (driven off my-access; dismissal persisted in
+          localStorage). Renders nothing when not applicable. */}
+      <WelcomeToSaroModal/>
+
       {/* Top nav row */}
       <div className="flex items-center justify-end gap-2">
         <button onClick={() => setShowDeploy(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/20">
@@ -1230,6 +1382,8 @@ export default function LiveTradingV2() {
       </div>
 
       <TodayPickCard/>
+
+      <SaroStockPickerCard/>
 
       <ThetaScannerCriteriaCard/>
 

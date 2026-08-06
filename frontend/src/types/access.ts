@@ -27,6 +27,12 @@ export interface MyAccess {
   automation_status: AutomationStatus
   agreements: MyAccessAgreements
   has_broker_account: boolean
+  // Saro STOCK-pick self-serve activation (additive — older payloads omit these,
+  // so treat undefined as false). saro_stock_eligible = tier in tier_3/4/5;
+  // saro_signals_activated = the user has opted in to the daily pick email.
+  // The Welcome-to-Saro modal fires on eligible===true && activated===false.
+  saro_stock_eligible?: boolean
+  saro_signals_activated?: boolean
 }
 
 // Lite shape of BrokerAccountResponse — only the fields the activation flow
