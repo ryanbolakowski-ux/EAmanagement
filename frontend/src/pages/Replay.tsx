@@ -445,6 +445,9 @@ export default function Replay() {
   const [btStart, setBtStart] = useState(() => BT_PRESETS[2].start(btYesterday())) // 6M default
   const [btEnd, setBtEnd] = useState(btEndBound)
   const [btPreset, setBtPreset] = useState<string | null>('6M')
+  // Per-run A/B toggle for the live-bias + NY-lunch owner gates. Default OFF =
+  // today's raw-edge backtest exactly; ON mirrors what live/paper actually trade.
+  const [btOwnerGates, setBtOwnerGates] = useState(false)
   const [runId, setRunId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
@@ -643,6 +646,7 @@ export default function Replay() {
         initial_capital: 100000,
         commission_per_side: 2.25,
         slippage_ticks: 1,
+        apply_owner_gates: btOwnerGates,
       })
       setRunId((res.data as BacktestRun).id)
       setBtStartedAt(Date.now()); setBtElapsed(0)
@@ -675,6 +679,17 @@ export default function Replay() {
   const v1Strats = strategies.filter((s) => s.engine_version !== 'v2')
   const btGrouped = v2Strats.length > 0 && v1Strats.length > 0
   const btEquitySeries: number[] = (btMetrics?.equity_curve || []).map((p: any) => p.equity)
+
+  // Owner-gate skip count for the current run, when the run opted into the
+  // live-bias + NY-lunch gates. The backend stashes it on the run's
+  // strategy_params_snapshot (JSON); read it defensively from wherever the API
+  // surfaces it (metrics body or the run record) so it renders whenever present.
+  const btOwnerGateSkips: number | null = (() => {
+    const m: any = btMetrics
+    const r: any = btRun
+    const v = m?.owner_gate_skips ?? r?.owner_gate_skips ?? r?.strategy_params_snapshot?.owner_gate_skips
+    return typeof v === 'number' && Number.isFinite(v) ? v : null
+  })()
 
   // Backtest trades → chart markers, clipped to the loaded 1m window (item 3).
   // The trades API returns no stop_loss/R, so we pass r=null (no fake R label)
@@ -1820,8 +1835,18 @@ export default function Replay() {
                 <Play size={15}/> {starting ? 'Starting…' : 'Run Backtest'}
               </button>
             </div>
+            {/* OWNER-GATES A/B TOGGLE — mirrors the live/paper live-bias + NY-lunch gates */}
+            <label className="mt-3 flex items-start gap-2.5 cursor-pointer select-none w-fit">
+              <input type="checkbox" checked={btOwnerGates} disabled={btRunning}
+                onChange={(e) => setBtOwnerGates(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 dark:border-slate-600 accent-violet-600 cursor-pointer disabled:cursor-not-allowed"/>
+              <span className="flex flex-col gap-0.5">
+                <span className="text-xs font-bold text-slate-700 dark:text-slate-200">Apply live-bias + NY-lunch gates</span>
+                <span className="text-[10.5px] text-slate-400 dark:text-slate-500">Off = raw strategy edge · On = mirrors live/paper · run both to A/B</span>
+              </span>
+            </label>
             <p className="text-[10.5px] text-slate-400 dark:text-slate-500 mt-2.5">
-              Data from {DATA_START} · timeframes come from the strategy's own config · $100k sim account, $2.25/side commission, 1 tick slippage · the backtest engine does not apply the live bias / NY-lunch gates
+              Data from {DATA_START} · timeframes come from the strategy's own config · $100k sim account, $2.25/side commission, 1 tick slippage · live-bias / NY-lunch gates apply only when the checkbox above is on
             </p>
             {startError && (
               <div className="mt-3 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-xs text-red-700 dark:text-red-300 flex items-center gap-2">
@@ -1914,7 +1939,13 @@ export default function Replay() {
                 <Stat label="Max drawdown" value={btMetrics.max_drawdown_pct != null ? `${btMetrics.max_drawdown_pct.toFixed(1)}%` : '—'} tone="neg"/>
                 {btMetrics.expectancy != null && <Stat label="Expectancy" value={`${fmtMoney(btMetrics.expectancy)}/t`} tone={btMetrics.expectancy > 0 ? 'pos' : 'neg'}/>}
                 {btMetrics.sharpe_ratio != null && <Stat label="Sharpe" value={btMetrics.sharpe_ratio.toFixed(2)} tone={btMetrics.sharpe_ratio >= 1 ? 'pos' : undefined}/>}
+                {btOwnerGateSkips != null && <Stat label="Gate-skipped entries" value={String(btOwnerGateSkips)} tone={btOwnerGateSkips > 0 ? 'neg' : 'muted'}/>}
               </div>
+              {btOwnerGateSkips != null && (
+                <p className="text-[10.5px] text-slate-400 dark:text-slate-500 -mt-1">
+                  Live-bias + NY-lunch gates were applied: {btOwnerGateSkips} entr{btOwnerGateSkips === 1 ? 'y' : 'ies'} the raw strategy would have taken were skipped. Run again with the toggle off to compare the raw edge.
+                </p>
+              )}
 
               {/* CHART CARD — the "backtest the entire thing" visualization */}
               <div ref={btFsRef}

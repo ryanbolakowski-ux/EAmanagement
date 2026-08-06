@@ -82,6 +82,10 @@ export const backtestsApi = {
     initial_capital: number
     slippage_ticks: number
     commission_per_side: number
+    // Optional per-run A/B toggle: when true the engine mirrors the live/paper
+    // owner gates (live-bias direction filter + NY-lunch no-entry window).
+    // Omitting it → server defaults false → today's raw-edge behavior exactly.
+    apply_owner_gates?: boolean
   }) => api.post<BacktestRun>('/api/v1/backtests/', data),
   getMetrics: (id: string) => api.get<BacktestMetrics>(`/api/v1/backtests/${id}/metrics`),
   delete: (id: string) => api.delete(`/api/v1/backtests/${id}`),
