@@ -230,7 +230,33 @@ async def today_pick(
         pick = json.loads(raw)
         # Enrich with live price + % change vs entry — best-effort
         try:
-            live = await asyncio.to_thread(_polygon_snapshot_price, pick.get("ticker"))
+            # FMP realtime first (REALTIME_FEED primary; the prod Polygon key
+            # is 15-min DELAYED tier, so it is fallback only — 2026-08-06).
+            live = None
+            try:
+                # 20s redis-shared cache: every open dashboard polls this
+                # endpoint ~1/min per user — without sharing, the FMP
+                # daily budget blows up (the 402 storm of 2026-08-07).
+                _ck = f"livepx:{pick.get('ticker')}"
+                _cv = None
+                try:
+                    _cv = await _redis.get(_ck)
+                except Exception:
+                    _cv = None
+                if _cv:
+                    live = float(_cv)
+                else:
+                    from app.engines.data_feeds.fmp_feed import fetch_quote_short_price
+                    live = await fetch_quote_short_price(pick.get("ticker"))
+                    if live:
+                        try:
+                            await _redis.set(_ck, str(live), ex=20)
+                        except Exception:
+                            pass
+            except Exception:
+                live = None
+            if not live:
+                live = await asyncio.to_thread(_polygon_snapshot_price, pick.get("ticker"))
             if live and pick.get("entry"):
                 pick["live_price"] = round(live, 4)
                 pick["live_pct"] = round((live - float(pick["entry"])) / float(pick["entry"]) * 100.0, 2)

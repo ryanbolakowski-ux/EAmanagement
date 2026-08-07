@@ -36,13 +36,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+from loguru import logger  # stdlib INFO was invisible in prod (2026-08-07)
 import os
 from typing import Optional
 
 from app.engines.scanner.saro12 import config as C
 
-logger = logging.getLogger(__name__)
+# (loguru imported above — stdlib getLogger dropped INFO below root level)
 
 # `source` column: email_signals_history has no such column in prod — add it
 # with the established idempotent ALTER pattern (scanner/shadow._SHADOW_COLS).

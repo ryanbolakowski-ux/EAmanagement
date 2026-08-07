@@ -26,14 +26,14 @@ finally. Zero tradier accounts -> skip with a log (fail-open).
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger  # stdlib INFO was invisible in prod (2026-08-07)
 import os
 from datetime import timedelta
 from typing import Optional
 
 from app.engines.scanner.saro12 import config as C
 
-logger = logging.getLogger(__name__)
+# (loguru imported above — stdlib getLogger dropped INFO below root level)
 
 
 # ── pure surge math (unit-tested, no I/O) ──────────────────────────────────
