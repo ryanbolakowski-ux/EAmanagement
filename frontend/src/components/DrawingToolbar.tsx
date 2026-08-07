@@ -13,15 +13,15 @@
 //
 // BLIND MODE: nothing here renders a date. Tool labels + style values only.
 // ─────────────────────────────────────────────────────────────────────────────
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   MousePointer2, TrendingUp, ArrowUpRight, Slash, Minus, MoveRight,
   MoveVertical, Square, AlignJustify, Type, Ruler,
   Magnet, Lock, LockOpen, Eye, EyeOff, Pin, PinOff, Trash2, Eraser,
-  Palette, Pencil, X,
+  Palette, Pencil, X, ArrowBigUp, ArrowBigDown, Plus, RotateCcw,
 } from 'lucide-react'
 import type {
-  DrawTool, DrawStyle, LineDash, DrawingState, DrawingApi,
+  DrawTool, DrawStyle, LineDash, DrawingState, DrawingApi, FibLevel,
 } from '../lib/replayDrawings'
 
 type IconType = typeof MousePointer2
@@ -37,6 +37,8 @@ const TOOLS: { tool: DrawTool; icon: IconType; label: string }[] = [
   { tool: 'vline', icon: MoveVertical, label: 'Vertical line' },
   { tool: 'rect', icon: Square, label: 'Rectangle / zone' },
   { tool: 'fib', icon: AlignJustify, label: 'Fib retracement' },
+  { tool: 'long', icon: ArrowBigUp, label: 'Long position — entry / stop / target with R:R' },
+  { tool: 'short', icon: ArrowBigDown, label: 'Short position — entry / stop / target with R:R' },
   { tool: 'text', icon: Type, label: 'Text label' },
   { tool: 'measure', icon: Ruler, label: 'Measure — Δprice / Δ% / bars' },
 ]
@@ -160,6 +162,122 @@ function StyleControls({
   )
 }
 
+// ── fib "Edit levels" editor (GOAL 4) ─────────────────────────────────────────
+// Small panel below the style bar, shown when the selection is a fib. Rows are
+// kept as LOCAL strings so mid-typing values ("0.", "") never turn into NaN;
+// only rows that parse to a finite number are pushed to the engine, and an
+// all-invalid set is simply not applied (the drawing keeps its last levels).
+// Re-seeded only when the SELECTED drawing changes, so engine state pushes
+// (which echo our own edits back) can't clobber in-progress typing.
+
+type FibRow = { value: string; visible: boolean; color?: string }
+
+const rowsFrom = (levels: FibLevel[]): FibRow[] =>
+  levels.map((l) => ({ value: String(l.value), visible: l.visible !== false, color: l.color }))
+const levelsFrom = (rows: FibRow[]): FibLevel[] =>
+  rows
+    .filter((r) => r.value.trim() !== '' && Number.isFinite(Number(r.value)))
+    .map((r) => ({ value: Number(r.value), visible: r.visible, ...(r.color ? { color: r.color } : {}) }))
+
+function FibLevelsEditor({
+  api, selectionId, seed, onClose,
+}: { api: DrawingApi | null; selectionId: string; seed: FibLevel[]; onClose: () => void }) {
+  const [rows, setRows] = useState<FibRow[]>(() => rowsFrom(seed))
+  const seededForRef = useRef(selectionId)
+
+  // Re-seed only when a DIFFERENT fib gets selected (see header comment).
+  useEffect(() => {
+    if (seededForRef.current === selectionId) return
+    seededForRef.current = selectionId
+    setRows(rowsFrom(seed))
+  }, [selectionId, seed])
+
+  // Push a cleaned level list to the engine; empty/duplicate/garbage rows are
+  // tolerated locally and simply skipped (never applied as NaN).
+  const apply = (next: FibRow[]) => {
+    const levels = levelsFrom(next)
+    if (levels.length > 0) api?.setSelectedFibLevels(levels)
+  }
+
+  const setValue = (i: number, v: string) =>
+    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, value: v } : r)))
+  const commitValues = () => apply(rows)
+  const toggleVisible = (i: number) =>
+    setRows((rs) => {
+      const next = rs.map((r, j) => (j === i ? { ...r, visible: !r.visible } : r))
+      apply(next)
+      return next
+    })
+  const removeRow = (i: number) =>
+    setRows((rs) => {
+      const next = rs.filter((_, j) => j !== i)
+      apply(next)
+      return next
+    })
+  const addRow = () => setRows((rs) => [...rs, { value: '', visible: true }])
+  const resetToDefaults = () => {
+    api?.resetSelectedFibLevels()
+    const fresh = api?.getSelectedFibLevels()
+    if (fresh) setRows(rowsFrom(fresh))
+  }
+  const useAsDefault = () => {
+    const levels = levelsFrom(rows)
+    if (levels.length > 0) api?.setFibDefaults(levels)
+  }
+
+  const canDefault = levelsFrom(rows).length > 0
+
+  return (
+    <div className="pointer-events-auto absolute z-20 top-24 sm:top-14 left-2 sm:left-14 w-[240px]
+      rounded-xl border border-slate-200/80 dark:border-slate-700/80
+      bg-white/95 dark:bg-slate-900/95 backdrop-blur shadow-lg p-2.5">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[10px] uppercase tracking-wider font-bold text-violet-500 dark:text-violet-300">Fib levels</span>
+        <button type="button" title="Close" onClick={onClose}
+          className="inline-flex items-center justify-center h-5 w-5 rounded text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">
+          <X size={13}/>
+        </button>
+      </div>
+      <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
+        {rows.map((r, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <input type="checkbox" checked={r.visible} onChange={() => toggleVisible(i)}
+              title={r.visible ? 'Hide level' : 'Show level'}
+              className="h-3.5 w-3.5 accent-violet-600 shrink-0"/>
+            <input type="number" step={0.001} value={r.value} placeholder="ratio"
+              onChange={(e) => setValue(i, e.target.value)}
+              onBlur={commitValues}
+              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+              className="flex-1 min-w-0 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800
+                text-slate-800 dark:text-slate-100 text-xs px-1.5 py-1 tabular-nums"/>
+            <button type="button" title="Remove level" onClick={() => removeRow(i)}
+              className="inline-flex items-center justify-center h-5 w-5 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 shrink-0">
+              <X size={12}/>
+            </button>
+          </div>
+        ))}
+        {rows.length === 0 && (
+          <div className="text-[11px] text-slate-400 dark:text-slate-500 py-1">No levels — add one or reset.</div>
+        )}
+      </div>
+      <div className="flex items-center gap-1 mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+        <button type="button" onClick={addRow}
+          className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 dark:text-slate-300 hover:text-violet-600 dark:hover:text-violet-300 px-1 py-0.5">
+          <Plus size={12}/> Add
+        </button>
+        <button type="button" onClick={resetToDefaults} title="Back to the default levels"
+          className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 dark:text-slate-300 hover:text-violet-600 dark:hover:text-violet-300 px-1 py-0.5">
+          <RotateCcw size={12}/> Reset
+        </button>
+        <button type="button" onClick={useAsDefault} disabled={!canDefault} title="Use these levels for every NEW fib"
+          className="ml-auto text-[11px] font-bold text-violet-600 dark:text-violet-300 hover:text-violet-500 disabled:opacity-40 px-1 py-0.5">
+          Set default
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── the palette + style bar ───────────────────────────────────────────────────
 
 type Props = {
@@ -176,6 +294,7 @@ type Props = {
 export default function DrawingToolbar({ state, api, onSelectTool, onSetDefaults }: Props) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [styleOpen, setStyleOpen] = useState(false)
+  const [fibOpen, setFibOpen] = useState(false)
 
   const activeTool = state?.activeTool ?? 'cursor'
   const magnet = !!state?.magnet
@@ -188,6 +307,8 @@ export default function DrawingToolbar({ state, api, onSelectTool, onSetDefaults
 
   // A live selection takes over the style bar; hide the manual defaults popover.
   useEffect(() => { if (selection) setStyleOpen(false) }, [selection])
+  // The fib-levels editor only makes sense while a fib is selected.
+  useEffect(() => { if (!selection?.supportsFibLevels) setFibOpen(false) }, [selection?.supportsFibLevels])
 
   if (!state) return null
 
@@ -294,6 +415,14 @@ export default function DrawingToolbar({ state, api, onSelectTool, onSetDefaults
                   <Pencil size={12}/> Edit text
                 </button>
               )}
+              {selection.supportsFibLevels && (
+                <button type="button" onClick={() => setFibOpen((o) => !o)}
+                  className={`inline-flex items-center gap-1 text-[11px] font-bold transition-colors ${fibOpen
+                    ? 'text-violet-600 dark:text-violet-300'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-violet-600 dark:hover:text-violet-300'}`}>
+                  <AlignJustify size={12}/> Edit levels
+                </button>
+              )}
               <div className="h-5 w-px bg-slate-200 dark:bg-slate-700"/>
               <button type="button" title="Delete (Del)" onClick={() => api?.deleteSelected()}
                 className="inline-flex items-center justify-center h-6 w-6 rounded text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40">
@@ -319,6 +448,18 @@ export default function DrawingToolbar({ state, api, onSelectTool, onSetDefaults
             </>
           )}
         </div>
+      )}
+
+      {/* FIB "EDIT LEVELS" PANEL (GOAL 4) — below the style bar while a fib is
+          selected. Keyed by the selection id so switching fibs re-seeds it. */}
+      {showSelectionBar && selection?.supportsFibLevels && fibOpen && (
+        <FibLevelsEditor
+          key={selection.id}
+          api={api}
+          selectionId={selection.id}
+          seed={selection.fibLevels ?? api?.getSelectedFibLevels() ?? []}
+          onClose={() => setFibOpen(false)}
+        />
       )}
     </div>
   )

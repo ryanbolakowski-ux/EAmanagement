@@ -4,7 +4,7 @@ import {
   Play, Pause, StepForward, FastForward, Shuffle, Rewind, Download,
   TrendingUp, TrendingDown, X, AlertTriangle, CalendarOff, Loader2, EyeOff,
   Settings as SettingsIcon, Maximize2, Minimize2, Plus, Check, Clock, Crosshair, RotateCcw, Layers,
-  Trash2, Eraser, Flag, FlaskConical, History,
+  Trash2, Eraser, Flag, FlaskConical, History, Grid3x3,
 } from 'lucide-react'
 import { replayApi, strategiesApi, backtestsApi, type ReplayDay, type ReplayMeta } from '../api/endpoints'
 import TVReplayChart, { type SessionVisibility, type TVTrade } from '../components/TVReplayChart'
@@ -15,9 +15,9 @@ import {
   type DrawTool, type DrawStyle, type DrawingApi, type DrawingState,
 } from '../lib/replayDrawings'
 import {
-  POINT_VALUES, checkExit, closePosition, openPosition,
-  sessionStats, unrealized,
-  type ClosedTrade, type Direction, type OpenPosition, type SimBar,
+  POINT_VALUES, checkExit, checkLimitFill, closePosition, makePendingOrder,
+  openFromLimit, openPosition, sessionStats, unrealized,
+  type ClosedTrade, type Direction, type OpenPosition, type PendingOrder, type SimBar,
 } from '../lib/replaySim'
 
 const INSTRUMENTS = ['ES', 'NQ', 'YM', 'RTY']
@@ -124,6 +124,8 @@ type ReplaySettings = {
   upColor: string
   downColor: string
   background: string | null
+  // GOAL 1: background grid on/off. Default true = the chart's existing look.
+  showGrid: boolean
   sessionsEnabled: boolean
   sessionVisibility: SessionVis
   timezone: string    // IANA, or '__local__' for the browser zone
@@ -135,6 +137,7 @@ const DEFAULT_SETTINGS: ReplaySettings = {
   upColor: '#26a69a',
   downColor: '#ef5350',
   background: null,
+  showGrid: true,
   sessionsEnabled: false,
   sessionVisibility: { asia: true, london: true, nyAm: true, nyLunch: true, nyPm: true },
   timezone: 'America/New_York',
@@ -151,6 +154,8 @@ function loadSettings(): ReplaySettings {
       ...DEFAULT_SETTINGS,
       ...p,
       background: typeof p.background === 'string' ? p.background : null,
+      // Missing/legacy key ⇒ grid stays on (the pre-GOAL-1 appearance).
+      showGrid: typeof p.showGrid === 'boolean' ? p.showGrid : true,
       sessionVisibility: { ...DEFAULT_SETTINGS.sessionVisibility, ...(p.sessionVisibility || {}) },
     }
   } catch {
@@ -403,9 +408,15 @@ export default function Replay() {
   const [stopStr, setStopStr] = useState('')
   const [targetMode, setTargetMode] = useState<'r' | 'points'>('r')
   const [targetStr, setTargetStr] = useState('')
+  // GOAL 2: MARKET fills at the current close; LIMIT rests until a bar touches it.
+  const [orderType, setOrderType] = useState<'market' | 'limit'>('market')
+  const [limitStr, setLimitStr] = useState('')
 
   // Sim state
   const [pos, setPos] = useState<OpenPosition | null>(null)
+  // GOAL 2: a single resting limit order, only while FLAT (mutually exclusive
+  // with `pos` — the ticket blocks placing while either exists).
+  const [pendingOrder, setPendingOrder] = useState<PendingOrder | null>(null)
   const [closed, setClosed] = useState<ClosedTrade[]>([])
   const sessionIdRef = useRef('')
   const [logVersion, setLogVersion] = useState(0)
@@ -417,10 +428,11 @@ export default function Replay() {
   const [hasMoreForward, setHasMoreForward] = useState(false)
   const fetchingMoreRef = useRef(false)
 
-  // Live SL/TP price editors + place-on-chart arming (GOAL G).
+  // Live SL/TP price editors + place-on-chart arming (GOAL G). 'limit' arms the
+  // LIMIT ticket's price field to the next chart click (GOAL 2).
   const [slInput, setSlInput] = useState('')
   const [tpInput, setTpInput] = useState('')
-  const [armed, setArmed] = useState<'sl' | 'tp' | null>(null)
+  const [armed, setArmed] = useState<'sl' | 'tp' | 'limit' | null>(null)
 
   // Chart settings + UI chrome
   const [settings, setSettings] = useState<ReplaySettings>(() => loadSettings())
@@ -716,7 +728,10 @@ export default function Replay() {
 
   const resetSession = () => {
     setDay(null); setRevealed(0); setPlaying(false); setDone(false)
-    setPos(null); setClosed([]); setTf(1); setArmed(null)
+    setPos(null); setPendingOrder(null); setClosed([]); setTf(1); setArmed(null)
+    // A limit price from the previous window would be far off-market — clear it
+    // (the LMT toggle / chart-click re-fills it from the new day's close).
+    setLimitStr('')
     setHasMoreForward(false)
     fetchingMoreRef.current = false
     sessionIdRef.current = ''
@@ -830,6 +845,7 @@ export default function Replay() {
       recordTrade(closePosition(pos, lastBar.close, lastBar.time, 'session_end', pointValue))
       setPos(null)
     }
+    setPendingOrder(null) // GOAL 2: an unfilled resting order expires at session end
     setDone(true)
   }
 
@@ -877,10 +893,25 @@ export default function Replay() {
       endSession()
       return
     }
-    let curPos = pos // local mirror — state won't update mid-function
+    // Local mirrors — state won't update mid-function, and advance(10)/10x
+    // playback processes every bar in ONE synchronous call, so both the position
+    // AND the resting order must be mirrored or fills would read stale state.
+    let curPos = pos
+    let curOrder = pendingOrder
     const stop = Math.min(total, revealed + Math.max(1, n))
     for (let i = revealed; i < stop; i++) {
       const bar = bars[i] // the bar being revealed
+      // GOAL 2: test the resting limit BEFORE the exit check. When it fills, the
+      // SAME bar still runs checkExit on the new position (stop before target) —
+      // a wide bar that spans both the limit and the stop exits immediately at
+      // the stop, matching the engine's conservative worst-case convention.
+      if (!curPos && curOrder) {
+        const fill = checkLimitFill(curOrder, bar)
+        if (fill) {
+          curPos = openFromLimit(curOrder, bar.time, fill.price)
+          curOrder = null
+        }
+      }
       if (!curPos) continue
       const ex = checkExit(curPos, bar) // stop checked before target (conservative)
       if (ex) {
@@ -889,6 +920,7 @@ export default function Replay() {
       }
     }
     setPos(curPos)
+    setPendingOrder(curOrder)
     setRevealed(stop)
     // Prefetch the next chunk as we near the loaded end so a fast run rolls on
     // without stalling at the boundary.
@@ -902,15 +934,17 @@ export default function Replay() {
         recordTrade(closePosition(curPos, last.close, last.time, 'session_end', pointValue))
         setPos(null)
       }
+      if (curOrder) setPendingOrder(null) // unfilled resting order expires with the data
     }
   }
 
   // Flat-only rewind: scrub the reveal cursor BACK through revealed history.
   // Disabled while a position is open (re-advancing an open trade would
-  // double-count its exit). Clears `done` so you can rewind after the session
-  // ended, and pauses playback.
+  // double-count its exit) and while a limit order rests (rewinding behind the
+  // bars it was placed against is nonsense — cancel it first). Clears `done` so
+  // you can rewind after the session ended, and pauses playback.
   const rewind = (n = 1) => {
-    if (!day || pos) return
+    if (!day || pos || pendingOrder) return
     setDone(false)
     setPlaying(false)
     setRevealed((r) => Math.max(REWIND_FLOOR, Math.min(bars.length, r) - Math.max(1, n)))
@@ -937,12 +971,34 @@ export default function Replay() {
   const targetValNum = targetStr.trim() === '' ? null : Number(targetStr)
   const stopOk = stopPtsNum == null || (Number.isFinite(stopPtsNum) && stopPtsNum > 0)
   const targetOk = targetValNum == null || (Number.isFinite(targetValNum) && targetValNum > 0)
-  const ticketValid = qty >= 1 && stopOk && targetOk
+  // GOAL 2: a LIMIT ticket additionally needs a valid resting price.
+  const limitNum = limitStr.trim() === '' ? null : Number(limitStr)
+  const limitOk = orderType === 'market' || (limitNum != null && Number.isFinite(limitNum) && limitNum > 0)
+  const ticketValid = qty >= 1 && stopOk && targetOk && limitOk
 
   const placeOrder = (direction: Direction) => {
-    if (!lastBar || pos || done || !ticketValid) return
+    if (!lastBar || pos || pendingOrder || done || !ticketValid) return
     const target = targetValNum != null ? { kind: targetMode, value: targetValNum } : null
-    setPos(openPosition(direction, qty, lastBar, stopPtsNum, target))
+    if (orderType === 'limit' && limitNum != null) {
+      // Rests until a revealed bar trades through it (checked in advance()).
+      setPendingOrder(makePendingOrder(direction, qty, limitNum, stopPtsNum, target))
+    } else {
+      setPos(openPosition(direction, qty, lastBar, stopPtsNum, target))
+    }
+  }
+
+  // Cancel button on the resting-order card (reset/end-of-data clear it themselves).
+  const cancelPendingOrder = () => { setPendingOrder(null) }
+
+  // Switching the ticket to LIMIT pre-fills the price with the last revealed
+  // close so the field is never armed empty; MARKET clears the limit arm.
+  const setTicketType = (t: 'market' | 'limit') => {
+    setOrderType(t)
+    if (t === 'limit') {
+      if (limitStr.trim() === '' && lastBar) setLimitStr(lastBar.close.toFixed(2))
+    } else {
+      setArmed((a) => (a === 'limit' ? null : a))
+    }
   }
 
   const manualClose = () => {
@@ -987,10 +1043,18 @@ export default function Replay() {
   const clearSl = () => { setSlInput(''); setPos((p) => (p && p.stopPrice != null ? { ...p, stopPrice: null } : p)) }
   const clearTp = () => { setTpInput(''); setPos((p) => (p && p.targetPrice != null ? { ...p, targetPrice: null } : p)) }
 
-  // Place-on-chart: when armed, the next chart click sets that level's price.
+  // Place-on-chart: when armed, the next chart click sets that price. 'limit'
+  // fills the LIMIT ticket's price field (flat, GOAL 2); 'sl'/'tp' edit the open
+  // position's levels (GOAL G).
   const handleChartClick = (price: number) => {
     const a = armed
-    if (!a || !pos) return
+    if (!a) return
+    if (a === 'limit') {
+      setLimitStr(price.toFixed(2))
+      setArmed(null)
+      return
+    }
+    if (!pos) return
     setPos((p) => (p ? { ...p, [a === 'sl' ? 'stopPrice' : 'targetPrice']: price } : p))
     setArmed(null)
   }
@@ -1027,7 +1091,7 @@ export default function Replay() {
     if (tool !== 'cursor') setArmed(null)
   }
   const setDrawDefaults = (patch: Partial<DrawStyle>) => { drawApiRef.current?.setDefaults(patch) }
-  const armLevel = (level: 'sl' | 'tp') => {
+  const armLevel = (level: 'sl' | 'tp' | 'limit') => {
     setArmed((prev) => {
       const next = prev === level ? null : level
       if (next) drawApiRef.current?.setActiveTool('cursor') // leave any drawing tool
@@ -1168,7 +1232,7 @@ export default function Replay() {
   const tzShort = TZ_SHORT[settings.timezone] ?? ''
 
   // Context-menu position, clamped to the viewport.
-  const MENU_W = 210, MENU_H = 260
+  const MENU_W = 210, MENU_H = 292
   const mx = ctxMenu ? Math.max(6, Math.min(ctxMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 1200) - MENU_W)) : 0
   const my = ctxMenu ? Math.max(6, Math.min(ctxMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 800) - MENU_H)) : 0
 
@@ -1346,14 +1410,15 @@ export default function Replay() {
                 className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-bold px-1.5 py-1.5">
                 {SPEEDS.map((s) => <option key={s} value={s}>{s}x</option>)}
               </select>
-              {/* flat-only rewind (look-back scrub) — disabled with a position open */}
-              <button onClick={() => rewindRef.current(10)} disabled={!!pos || playing || revealed <= REWIND_FLOOR}
-                title={pos ? 'Close the position to rewind' : 'Rewind 10 bars'}
+              {/* flat-only rewind (look-back scrub) — disabled with a position open
+                  or a limit order resting (cancel it first) */}
+              <button onClick={() => rewindRef.current(10)} disabled={!!pos || !!pendingOrder || playing || revealed <= REWIND_FLOOR}
+                title={pos ? 'Close the position to rewind' : pendingOrder ? 'Cancel the resting order to rewind' : 'Rewind 10 bars'}
                 className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
                 <Rewind size={13}/> -10
               </button>
-              <button onClick={() => rewindRef.current(1)} disabled={!!pos || playing || revealed <= REWIND_FLOOR}
-                title={pos ? 'Close the position to rewind' : 'Rewind 1 bar'}
+              <button onClick={() => rewindRef.current(1)} disabled={!!pos || !!pendingOrder || playing || revealed <= REWIND_FLOOR}
+                title={pos ? 'Close the position to rewind' : pendingOrder ? 'Cancel the resting order to rewind' : 'Rewind 1 bar'}
                 className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
                 <Rewind size={13}/> -1
               </button>
@@ -1409,7 +1474,9 @@ export default function Replay() {
                 pdh={day.pdh}
                 pdl={day.pdl}
                 position={pos}
+                pendingOrder={pendingOrder}
                 trades={closed}
+                showGrid={settings.showGrid}
                 upColor={settings.upColor}
                 downColor={settings.downColor}
                 background={settings.background}
@@ -1435,7 +1502,7 @@ export default function Replay() {
             {/* place-on-chart armed banner (GOAL G) */}
             {armed && (
               <div className="absolute left-1/2 -translate-x-1/2 top-2 z-[80] flex items-center gap-2 rounded-lg bg-violet-600 text-white text-xs font-bold px-3 py-1.5 shadow-lg">
-                <Crosshair size={13}/> Click the chart to set {armed === 'sl' ? 'SL' : 'TP'}
+                <Crosshair size={13}/> Click the chart to set {armed === 'sl' ? 'SL' : armed === 'tp' ? 'TP' : 'the limit price'}
                 <button onClick={() => setArmed(null)} className="ml-1 hover:opacity-80" title="Cancel (Esc)"><X size={12}/></button>
               </div>
             )}
@@ -1448,6 +1515,7 @@ export default function Replay() {
                 <MenuItem icon={SettingsIcon} label="Settings…" autoFocus onClick={() => { openSettings('appearance'); setCtxMenu(null) }}/>
                 <MenuItem icon={Clock} label="Timezone & time…" onClick={() => { openSettings('time'); setCtxMenu(null) }}/>
                 <MenuItem icon={Check} label="12-hour clock" active={settings.hour12} onClick={() => { updateSettings({ hour12: !settings.hour12 }); setCtxMenu(null) }}/>
+                <MenuItem icon={Grid3x3} label="Show grid" active={settings.showGrid} onClick={() => { updateSettings({ showGrid: !settings.showGrid }); setCtxMenu(null) }}/>
                 {(drawState?.selection || (drawState && drawState.count > 0)) && (
                   <div className="my-1 h-px bg-slate-200 dark:bg-slate-700"/>
                 )}
@@ -1516,7 +1584,12 @@ export default function Replay() {
                             </label>
                           </div>
                         </div>
-                        <button onClick={() => updateSettings({ upColor: DEFAULT_SETTINGS.upColor, downColor: DEFAULT_SETTINGS.downColor, background: null })}
+                        {/* GOAL 1: background grid on/off (applied live to both charts) */}
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"><Grid3x3 size={14} className="text-slate-400"/> Show grid</span>
+                          <Toggle checked={settings.showGrid} onChange={(v) => updateSettings({ showGrid: v })}/>
+                        </div>
+                        <button onClick={() => updateSettings({ upColor: DEFAULT_SETTINGS.upColor, downColor: DEFAULT_SETTINGS.downColor, background: null, showGrid: true })}
                           className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200">
                           <RotateCcw size={13}/> Reset to defaults
                         </button>
@@ -1569,13 +1642,37 @@ export default function Replay() {
           <div className="flex flex-col gap-4 min-w-0">
             {!done && (
           <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700">
-            <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500 mb-3">Order ticket · fills at current close</div>
+            <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500 mb-3">
+              Order ticket · {orderType === 'market' ? 'fills at current close' : 'rests until a bar touches it'}
+            </div>
             <div className="flex flex-wrap items-end gap-3">
+              {/* GOAL 2: MARKET | LIMIT toggle */}
+              <div className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">Type</span>
+                <div className="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700">
+                  <button onClick={() => setTicketType('market')} className={`${chipBase} ${orderType === 'market' ? chipOn : chipOff}`}>MKT</button>
+                  <button onClick={() => setTicketType('limit')} className={`${chipBase} ${orderType === 'limit' ? chipOn : chipOff}`}>LMT</button>
+                </div>
+              </div>
               <label className="flex flex-col gap-1">
                 <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">Contracts</span>
                 <input type="number" min={1} step={1} value={qtyStr} onChange={(e) => setQtyStr(e.target.value)}
                   className="w-20 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm px-2 py-1.5"/>
               </label>
+              {orderType === 'limit' && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">Limit price</span>
+                  <div className="flex gap-1">
+                    <input type="number" min={0.25} step={0.25} value={limitStr} placeholder="price"
+                      onChange={(e) => setLimitStr(e.target.value)}
+                      className="w-28 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm px-2 py-1.5"/>
+                    <button onClick={() => armLevel('limit')} title="Set the limit price by clicking the chart"
+                      className={`shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-lg transition-colors ${armed === 'limit' ? 'bg-violet-600 text-white' : 'bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300'}`}>
+                      <Crosshair size={13}/>
+                    </button>
+                  </div>
+                </div>
+              )}
               <label className="flex flex-col gap-1">
                 <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500">Stop (pts)</span>
                 <input type="number" min={0.25} step={0.25} value={stopStr} onChange={(e) => setStopStr(e.target.value)} placeholder="optional"
@@ -1594,25 +1691,27 @@ export default function Replay() {
                 </div>
               </label>
               <div className="flex gap-2">
-                <button onClick={() => placeOrder('long')} disabled={!!pos || !ticketValid || !lastBar}
+                <button onClick={() => placeOrder('long')} disabled={!!pos || !!pendingOrder || !ticketValid || !lastBar}
                   className="inline-flex items-center gap-1.5 bg-green-600 hover:bg-green-500 disabled:opacity-40 text-white px-4 py-1.5 rounded-lg text-sm font-bold transition-colors">
                   <TrendingUp size={14}/> Buy
                 </button>
-                <button onClick={() => placeOrder('short')} disabled={!!pos || !ticketValid || !lastBar}
+                <button onClick={() => placeOrder('short')} disabled={!!pos || !!pendingOrder || !ticketValid || !lastBar}
                   className="inline-flex items-center gap-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white px-4 py-1.5 rounded-lg text-sm font-bold transition-colors">
                   <TrendingDown size={14}/> Sell
                 </button>
               </div>
             </div>
             <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">
-              {activeInstrument} point value ${pointValue}/contract · SL/TP optional — leave blank for a bare market order and set them on the chart later
+              {orderType === 'market'
+                ? `${activeInstrument} point value $${pointValue}/contract · SL/TP optional — leave blank for a bare market order and set them on the chart later`
+                : `${activeInstrument} point value $${pointValue}/contract · one resting order at a time · Buy fills when a bar trades DOWN to the limit, Sell when a bar trades UP to it · unfilled orders expire at session end`}
             </div>
           </div>
             )}
 
             {!done && (
           <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 dark:bg-slate-900 dark:border-slate-700">
-            <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500 mb-3">Open position</div>
+            <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500 mb-3">{!pos && pendingOrder ? 'Resting order' : 'Open position'}</div>
             {pos && uPnl ? (
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -1669,6 +1768,32 @@ export default function Replay() {
                   <button onClick={manualClose}
                     className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
                     <X size={12}/> Close
+                  </button>
+                </div>
+              </div>
+            ) : pendingOrder ? (
+              // GOAL 2: resting limit order card — blind-safe (prices/qty only, no dates).
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className={`inline-flex items-center gap-1 text-sm font-extrabold ${pendingOrder.direction === 'long' ? 'text-green-600' : 'text-red-500'}`}>
+                    {pendingOrder.direction === 'long' ? <TrendingUp size={14}/> : <TrendingDown size={14}/>}
+                    {pendingOrder.direction.toUpperCase()} LMT ×{pendingOrder.qty}
+                  </span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">Limit <b className="text-slate-800 dark:text-slate-100">{pendingOrder.limitPrice.toFixed(2)}</b></span>
+                  {pendingOrder.stopPrice != null && (
+                    <span className="text-xs text-slate-500 dark:text-slate-400">SL <b className="text-red-500">{pendingOrder.stopPrice.toFixed(2)}</b></span>
+                  )}
+                  {pendingOrder.targetPrice != null && (
+                    <span className="text-xs text-slate-500 dark:text-slate-400">TP <b className="text-green-600">{pendingOrder.targetPrice.toFixed(2)}</b></span>
+                  )}
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                    Fills when a bar trades {pendingOrder.direction === 'long' ? 'down to' : 'up to'} the limit · expires at session end
+                  </span>
+                  <button onClick={cancelPendingOrder}
+                    className="inline-flex items-center gap-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                    <X size={12}/> Cancel
                   </button>
                 </div>
               </div>
@@ -1996,6 +2121,7 @@ export default function Replay() {
                         pdl={null}
                         position={null}
                         trades={btChartTrades}
+                        showGrid={settings.showGrid}
                         upColor={settings.upColor}
                         downColor={settings.downColor}
                         background={settings.background}
