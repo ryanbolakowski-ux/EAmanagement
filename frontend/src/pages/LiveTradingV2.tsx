@@ -383,6 +383,7 @@ function TodayPickCard() {
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
         <div><div className="text-[10px] uppercase tracking-wider opacity-70">Entry</div><div className="text-lg font-bold tabular-nums">${pick.entry?.toFixed(2)}</div></div>
+        {pick.live_price != null && <div><div className="text-[10px] uppercase tracking-wider opacity-70">Live</div><div className={`text-lg font-bold tabular-nums ${(pick.live_pct ?? 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>${pick.live_price.toFixed(2)}{pick.live_pct != null && <span className="ml-1 text-xs font-semibold">({pick.live_pct >= 0 ? '+' : ''}{pick.live_pct.toFixed(1)}%)</span>}</div></div>}
         <div><div className="text-[10px] uppercase tracking-wider opacity-70">Stop</div><div className="text-lg font-bold tabular-nums text-rose-200">${pick.stop?.toFixed(2)}</div></div>
         <div><div className="text-[10px] uppercase tracking-wider opacity-70">Target</div><div className="text-lg font-bold tabular-nums text-emerald-200">${pick.target?.toFixed(2)}</div></div>
         <div><div className="text-[10px] uppercase tracking-wider opacity-70">R:R</div><div className="text-lg font-bold tabular-nums">{rrMult}×</div></div>
