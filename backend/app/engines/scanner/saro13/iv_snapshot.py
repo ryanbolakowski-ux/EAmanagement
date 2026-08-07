@@ -195,7 +195,7 @@ async def iv_rank_gate(db, ticker: str) -> tuple[bool, str]:
         if rank is None:
             logger.warning(f"[saro13-iv] {tk}: degenerate IV history ({n} rows) — fail-open")
             return True, f"IV Rank incomputable over {n} sessions — fail-open"
-        if rank >= C.IV_RANK_MIN:
+        if rank > C.IV_RANK_MIN:  # spec: ABOVE 50%, strict
             return True, (f"IV Rank {rank:.1f} >= {C.IV_RANK_MIN:g} "
                           f"(vs {n}-session accumulated history)")
         return False, f"IV Rank {rank:.1f} < {C.IV_RANK_MIN:g} ({n}-session history)"
