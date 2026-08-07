@@ -901,20 +901,22 @@ export default function Replay() {
     const stop = Math.min(total, revealed + Math.max(1, n))
     for (let i = revealed; i < stop; i++) {
       const bar = bars[i] // the bar being revealed
-      // GOAL 2: test the resting limit BEFORE the exit check. When it fills, the
-      // SAME bar still runs checkExit on the new position (stop before target) —
-      // a wide bar that spans both the limit and the stop exits immediately at
-      // the stop, matching the engine's conservative worst-case convention.
+      // GOAL 2: test the resting limit BEFORE the exit check. Intra-bar order is
+      // unknown, so on the FILL bar only the STOP may exit (worst-case): a wide
+      // bar spanning limit+stop stops out immediately, but a same-bar TARGET is
+      // NOT credited — the win must print on a later bar (conservative).
+      let filledThisBar = false
       if (!curPos && curOrder) {
         const fill = checkLimitFill(curOrder, bar)
         if (fill) {
           curPos = openFromLimit(curOrder, bar.time, fill.price)
           curOrder = null
+          filledThisBar = true
         }
       }
       if (!curPos) continue
       const ex = checkExit(curPos, bar) // stop checked before target (conservative)
-      if (ex) {
+      if (ex && (!filledThisBar || ex.reason === 'stop')) {
         recordTrade(closePosition(curPos, ex.price, bar.time, ex.reason, pointValue))
         curPos = null
       }

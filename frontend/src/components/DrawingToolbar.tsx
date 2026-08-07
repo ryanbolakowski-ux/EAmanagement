@@ -202,18 +202,18 @@ function FibLevelsEditor({
   const setValue = (i: number, v: string) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, value: v } : r)))
   const commitValues = () => apply(rows)
-  const toggleVisible = (i: number) =>
-    setRows((rs) => {
-      const next = rs.map((r, j) => (j === i ? { ...r, visible: !r.visible } : r))
-      apply(next)
-      return next
-    })
-  const removeRow = (i: number) =>
-    setRows((rs) => {
-      const next = rs.filter((_, j) => j !== i)
-      apply(next)
-      return next
-    })
+  // NOTE: compute `next` OUTSIDE setRows — updaters must stay pure (StrictMode
+  // double-invokes them, which would double-write the engine via apply()).
+  const toggleVisible = (i: number) => {
+    const next = rows.map((r, j) => (j === i ? { ...r, visible: !r.visible } : r))
+    setRows(next)
+    apply(next)
+  }
+  const removeRow = (i: number) => {
+    const next = rows.filter((_, j) => j !== i)
+    setRows(next)
+    apply(next)
+  }
   const addRow = () => setRows((rs) => [...rs, { value: '', visible: true }])
   const resetToDefaults = () => {
     api?.resetSelectedFibLevels()
