@@ -934,6 +934,15 @@ async def _fast_theta_loop():
             maybe_spawn_saro12_shadow()
         except Exception as _s12e:
             logger.warning(f"[saro12-shadow] spawn check failed: {_s12e}")
+        # ── SARO 1.3 SHADOW (2026-08-07 — SHADOW ONLY: rows, no emails/entries) ──
+        # Cheap sync check; ONE hook dispatches both saro13 jobs (env gate
+        # SARO13_SHADOW_ENABLED): 09:33-11:00 ET scan (latch theta:saro13:{ET-date})
+        # + 18:30-21:00 ET nightly ATM-IV snapshot (theta:saro13:iv_done:{ET-date}).
+        try:
+            from app.engines.scanner.saro13.shadow import maybe_spawn_saro13_shadow
+            maybe_spawn_saro13_shadow()
+        except Exception as _s13e:
+            logger.warning(f"[saro13-shadow] spawn check failed: {_s13e}")
         await _aio.sleep(60)
 
 
