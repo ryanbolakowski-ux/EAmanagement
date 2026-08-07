@@ -926,6 +926,14 @@ async def _fast_theta_loop():
             maybe_spawn_ignition_shadow()
         except Exception as _ige:
             logger.warning(f"[ignition-shadow] spawn check failed: {_ige}")
+        # ── SARO 1.2 SHADOW (2026-08-06 — SHADOW ONLY: rows, no emails/entries) ──
+        # Cheap sync check; spawns its own asyncio task (env gate
+        # SARO12_SHADOW_ENABLED, redis latch theta:saro12:{ET-date}).
+        try:
+            from app.engines.scanner.saro12.shadow import maybe_spawn_saro12_shadow
+            maybe_spawn_saro12_shadow()
+        except Exception as _s12e:
+            logger.warning(f"[saro12-shadow] spawn check failed: {_s12e}")
         await _aio.sleep(60)
 
 
