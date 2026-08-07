@@ -79,6 +79,19 @@ class Strategy(Base):
     cooldown_min: Mapped[int | None] = mapped_column(Integer, nullable=True, default=5)
     max_open_positions: Mapped[int | None] = mapped_column(Integer, nullable=True, default=1)
 
+    # STRATEGY-VISIBILITY-V1: provenance marker. 'seeded' = inserted by the
+    # platform (signup seed library / one-shot cross-user scanner backfills);
+    # 'user' (or NULL) = created by the account holder. List surfaces hide
+    # 'seeded' rows; by-id access (watchers, sessions, scan loops, backtest
+    # detail) is deliberately untouched. NULL is treated as 'user' — safest
+    # polarity: an unpatched create path can never hide a user's own strategy.
+    # The column reaches the live DB via scripts/backfill_strategy_origin.py
+    # (idempotent lazy ALTER at deploy, entry_guard precedent). deferred=True
+    # keeps plain entity SELECTs from referencing the column so requests that
+    # land before the ALTER has run don't error; routes that filter on it call
+    # ensure_origin_column() first.
+    origin: Mapped[str | None] = mapped_column(String(16), nullable=True, deferred=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 

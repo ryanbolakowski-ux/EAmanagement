@@ -932,6 +932,14 @@ async def get_strategy_ranking(
     backtest. Returns PF, win rate, drawdown, trade count, expectancy + a
     quality verdict (Bug 11) so the UI never presents a tiny-sample 95% as
     reliable. sort_by: profit_factor|win_rate|max_drawdown|total_trades|expectancy|net_profit."""
+    # STRATEGY-VISIBILITY-V1: the ranking is the second genuine strategy LIST
+    # surface — hide platform-seeded rows for non-admins (NULL/'user' = visible,
+    # IS DISTINCT FROM). The referenced backtest_runs stay untouched and their
+    # by-id detail pages keep resolving. Admins see everything (support view).
+    from app.api.routes.strategies import ensure_origin_column
+    await ensure_origin_column()
+    _origin_clause = "" if getattr(current_user, "is_admin", False) \
+        else " AND s.origin IS DISTINCT FROM 'seeded'"
     rows = (await db.execute(_sql_text("""
         SELECT DISTINCT ON (s.id)
                s.id AS sid, s.name AS name, s.status::text AS status,
@@ -940,7 +948,7 @@ async def get_strategy_ranking(
           FROM strategies s
           JOIN backtest_runs br ON br.strategy_id = s.id AND UPPER(br.status::text) = 'COMPLETED'
           JOIN backtest_metrics m ON m.backtest_run_id = br.id
-         WHERE s.user_id = :uid
+         WHERE s.user_id = :uid""" + _origin_clause + """
          ORDER BY s.id, br.completed_at DESC NULLS LAST
     """), {"uid": str(current_user.id)})).fetchall()
 

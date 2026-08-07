@@ -81,6 +81,11 @@ async def seed_user_strategies(db: AsyncSession, user_id) -> int:
             user_id=user_id,
             name=tpl["name"],
             description=tpl.get("description"),
+            # STRATEGY-VISIBILITY-V1: platform-seeded rows are marked so list
+            # surfaces hide them (Ryan's rule: users only see strategies they
+            # created). Any future re-enable of signup seeding stays hidden
+            # without re-running the backfill. By-id flows are unaffected.
+            origin="seeded",
             status=StrategyStatus.ACTIVE,
             instruments=tpl["instruments"],
             primary_timeframe=tpl["primary_timeframe"],

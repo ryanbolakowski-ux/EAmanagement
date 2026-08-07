@@ -138,13 +138,18 @@ async def register(
     db.add(user)
     await db.flush()
 
-    # Seed the canonical strategy set so every new account starts with the
-    # same library — no template picker UI needed; users edit/delete from here.
-    try:
-        from app.scripts.seed_strategies import seed_user_strategies
-        await seed_user_strategies(db, user.id)
-    except Exception as e:
-        logger.warning(f'[auth.register] strategy seed failed: {e}')
+    # STRATEGY-VISIBILITY-V1: seeding the canonical strategy library on signup
+    # is now OFF by default — Ryan's rule is that a new user only sees the
+    # strategies they created themselves, so new signups start with ZERO
+    # strategies. Re-enable explicitly with SEED_STRATEGIES_ON_SIGNUP=1 (rows
+    # are then inserted with origin='seeded' and stay hidden from list pickers
+    # anyway; the strategy engine/watchers can still use them by id).
+    if os.environ.get("SEED_STRATEGIES_ON_SIGNUP", "0").strip().lower() in ("1", "true", "yes"):
+        try:
+            from app.scripts.seed_strategies import seed_user_strategies
+            await seed_user_strategies(db, user.id)
+        except Exception as e:
+            logger.warning(f'[auth.register] strategy seed failed: {e}')
 
     # Welcome the new user
     background.add_task(email_service.send_welcome_email, user.email, user.username)

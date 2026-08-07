@@ -130,14 +130,49 @@ async def _quality_map(db, uid: str) -> dict:
     return out
 
 
+# ── STRATEGY-VISIBILITY-V1 ───────────────────────────────────────────────────
+# strategies.origin marks platform-seeded rows ('seeded') vs user-created
+# (NULL or 'user'). List surfaces hide seeded rows so every user only sees
+# strategies they created themselves (Ryan's rule). VISIBILITY ONLY: status is
+# never touched and by-id access (watchers, trade sessions, the auto-execute
+# scan loop, backtest/optimization detail, GET /strategies/{id}) is unchanged,
+# so signal emails and forward-tests on hidden rows keep working.
+# The authoritative ALTER+backfill runs at deploy via
+# scripts/backfill_strategy_origin.py; this runtime lazy-ALTER (same pattern as
+# app.engines.entry_guard.ensure_strategy_columns) makes the filtered routes
+# order-independent if a request lands before the deploy step has run.
+async def ensure_origin_column() -> None:
+    if getattr(ensure_origin_column, "_done", False):
+        return
+    try:
+        from app.database import async_session_factory
+        async with async_session_factory() as db:
+            await db.execute(text(
+                "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS origin VARCHAR(16)"
+            ))
+            await db.commit()
+        ensure_origin_column._done = True  # type: ignore[attr-defined]
+    except Exception as e:
+        from loguru import logger
+        logger.warning(f"[strategies] ensure_origin_column failed: {e}")
+
+
 @router.get("/", response_model=list[StrategyResponse])
 async def list_strategies(
+    include_seeded: bool = False,
     current_user: User = Depends(require_paid_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Strategy).where(Strategy.user_id == current_user.id)
-    )
+    await ensure_origin_column()
+    query = select(Strategy).where(Strategy.user_id == current_user.id)
+    # STRATEGY-VISIBILITY-V1: hide platform-seeded rows from every list-driven
+    # picker (backtest, paper, live, optimization, watcher-create, how-to-trade
+    # all consume this endpoint). NULL counts as user-created (IS DISTINCT
+    # FROM), so an unpatched create path can never hide a user's own strategy.
+    # ?include_seeded=1 is an admin-only support escape hatch.
+    if not (include_seeded and getattr(current_user, "is_admin", False)):
+        query = query.where(Strategy.origin.is_distinct_from("seeded"))
+    result = await db.execute(query)
     _qmap = await _quality_map(db, str(current_user.id))  # QUALITY-GATE-V1
     return [
         StrategyResponse(
@@ -215,9 +250,15 @@ async def create_strategy(
             detail=f"Invalid status {_status_raw!r}. Must be one of: "
                    + ", ".join(s.value for s in StrategyStatus),
         )
+    await ensure_origin_column()
     strategy = Strategy(
         user_id=current_user.id,
         status=_status_enum,
+        # STRATEGY-VISIBILITY-V1: explicit user provenance (belt+suspenders —
+        # NULL would already count as user-created). Covers the visual builder
+        # AND the AI/plain-english builder: generate-v2 only returns a payload,
+        # the client persists it through this route.
+        origin="user",
         **payload,
     )
     db.add(strategy)
@@ -561,8 +602,12 @@ async def import_shared_strategy(
     src_user = (await db.execute(select(User).where(User.id == src.user_id))).scalar_one_or_none()
     sharer_name = src_user.username if src_user else "another trader"
 
+    await ensure_origin_column()
     copy = Strategy(
         user_id=current_user.id,
+        # STRATEGY-VISIBILITY-V1: an imported copy is a deliberate user action
+        # — it must show up in the importer's lists.
+        origin="user",
         name=src.name + " (shared)",
         description=(src.description or "") + f"\n\n---\n📤 Shared by @{sharer_name}",
         instruments=src.instruments,
