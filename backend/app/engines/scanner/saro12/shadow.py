@@ -242,6 +242,21 @@ _spawned_scan_dates: set[str] = set()
 _spawned_oi_dates: set[str] = set()
 
 
+# GC-PROOF TASK RETENTION (2026-08-07 maiden-run incident): the event loop
+# only weak-refs tasks - a naked asyncio.create_task() can be garbage-
+# collected mid-flight (silent: latch set, zero logs, no traceback). Same
+# bug family as the 7/16 fast-theta-loop death. Every spawn goes through
+# _spawn_retained().
+_RETAINED: set = set()
+
+
+def _spawn_retained(coro):
+    t = asyncio.create_task(coro)
+    _RETAINED.add(t)
+    t.add_done_callback(_RETAINED.discard)
+    return t
+
+
 def maybe_spawn_saro12_shadow(*, _now_et_fn=None) -> bool:
     """Called from the premarket fast loop each 60s tick (the loop runs 24/7
     with no window gate of its own, so ALL gating lives here). Mirrors
@@ -272,7 +287,7 @@ def maybe_spawn_saro12_shadow(*, _now_et_fn=None) -> bool:
                 except Exception as e:  # belt & braces — run already swallows
                     logger.error(f"[saro12-shadow] task crashed: {e}")
 
-            asyncio.create_task(_scan_task())
+            _spawn_retained(_scan_task())
             logger.info(f"[saro12-shadow] spawned daily scan task for {date_key}")
             return True
 
@@ -287,7 +302,7 @@ def maybe_spawn_saro12_shadow(*, _now_et_fn=None) -> bool:
                 except Exception as e:
                     logger.error(f"[saro12-oi] task crashed: {e}")
 
-            asyncio.create_task(_oi_task())
+            _spawn_retained(_oi_task())
             logger.info(f"[saro12-oi] spawned nightly OI snapshot task for {date_key}")
             return True
         return False
