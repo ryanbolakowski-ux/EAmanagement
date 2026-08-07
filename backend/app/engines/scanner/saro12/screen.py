@@ -267,6 +267,14 @@ async def run_screen(*, r=None, date_key: Optional[str] = None,
         prescr = await asyncio.gather(*(_yf_prescreen(str(x["symbol"]).upper()) for x in pre))
 
         from app.engines.scanner.saro12.indicators import rvol as _rvol
+        # Time-adjusted RVOL: pro-rate the 3-month-avg denominator by session
+        # progress (floored at 5%) — a raw cumulative/3m-avg ratio at 09:33
+        # would reject everything 3 minutes into RTH. Still the spec's
+        # "current volume >= 4.0x the 3-month average", measured pro-rata.
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _zi
+        _now_et = _dt.now(_zi("America/New_York"))
+        _sess_frac = max(0.05, min(1.0, ((_now_et.hour * 60 + _now_et.minute) - 570) / 390.0))
         scored = []
         for row, yfd in zip(pre, prescr):
             sym = str(row["symbol"]).upper()
@@ -274,6 +282,8 @@ async def run_screen(*, r=None, date_key: Optional[str] = None,
             if fs is not None and float(fs) >= C.FLOAT_MAX_SHARES:
                 continue  # hard float reject (authoritative recheck after FMP enrich)
             rv = _rvol(row.get("volume"), yfd.get("avg_volume_3m"))
+            if rv is not None:
+                rv = rv / _sess_frac  # pro-rated intraday RVOL (see above)
             if rv is None:
                 logger.info(f"[saro12-screen] {sym}: no 3m avg volume — RVOL unknown, drop (hard screen)")
                 continue
@@ -297,8 +307,13 @@ async def run_screen(*, r=None, date_key: Optional[str] = None,
             enr = await _fmp_enrich(r, date_key, sym)
             fmp_calls += enr.get("fmp_calls", 0)
             cand["float_shares"] = enr.get("float_shares") or cand.get("float_shares")
-            cand["market_cap"] = enr.get("market_cap")
-            cand["exchange"] = enr.get("exchange") or ""
+            # Only overwrite screener-verified fields when enrichment actually
+            # returned data — a failed profile call must not hard-reject a
+            # candidate the bulk screener already validated.
+            if enr.get("market_cap") is not None:
+                cand["market_cap"] = enr.get("market_cap")
+            if enr.get("exchange"):
+                cand["exchange"] = enr.get("exchange")
             cand["ownership_evidence"] = enr.get("ownership_evidence")
             cand["has_options_chain"] = await _yf_has_options_chain(sym)
             cand["shortable"] = None  # no shortability source on this plan

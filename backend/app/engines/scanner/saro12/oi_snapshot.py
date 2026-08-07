@@ -105,17 +105,19 @@ async def otm_call_oi_surge(ticker: str, *, r=None) -> Optional[float]:
 
 # ── nightly snapshot ───────────────────────────────────────────────────────
 async def _find_tradier_account(db):
-    """Any active tradier BrokerAccount, preferring sandbox/demo for data
-    reads (chains/OI are identical either way)."""
+    """SANDBOX/DEMO tradier BrokerAccount ONLY. We never open a session with a
+    customer's LIVE brokerage credentials for background data reads — if no
+    sandbox account exists the nightly snapshot skips with a log (owner rule,
+    2026-08-06 verify finding)."""
     from sqlalchemy import select
     from app.models.user import BrokerAccount
     rows = (await db.execute(
         select(BrokerAccount).where(BrokerAccount.broker == "tradier",
                                     BrokerAccount.is_active == True)  # noqa: E712
     )).scalars().all()
+    rows = [a for a in rows if bool(a.is_demo or a.sandbox_mode)]
     if not rows:
         return None
-    rows.sort(key=lambda a: (not bool(a.is_demo or a.sandbox_mode)))
     return rows[0]
 
 
