@@ -36,14 +36,14 @@ SHADOW ONLY: no emails, no orders, no routing.
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger  # stdlib INFO invisible in prod
 import os
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from app.engines.scanner.saro13 import config as C
 
-logger = logging.getLogger(__name__)
+# (loguru imported above)
 
 
 # ── pure tenor / ATM / rank math (unit-tested, no I/O) ─────────────────────

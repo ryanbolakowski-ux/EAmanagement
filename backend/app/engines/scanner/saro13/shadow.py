@@ -49,13 +49,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+from loguru import logger  # stdlib INFO invisible in prod
 import os
 from datetime import datetime, timezone
 
 from app.engines.scanner.saro13 import config as C
 
-logger = logging.getLogger(__name__)
+# (loguru imported above)
 
 # email_signals_history is missing BOTH of these in prod (the `source` ALTER
 # from saro12 never ran — its maiden run was GC-killed 2026-08-07 before

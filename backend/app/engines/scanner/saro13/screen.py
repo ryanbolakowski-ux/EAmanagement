@@ -27,7 +27,7 @@ never emails, never orders, never routes.
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger  # stdlib INFO invisible in prod
 import os
 import re
 from datetime import datetime, timedelta
@@ -35,7 +35,7 @@ from typing import Optional
 
 from app.engines.scanner.saro13 import config as C
 
-logger = logging.getLogger(__name__)
+# (loguru imported above)
 
 MA_KEYWORD_RE = re.compile(C.MA_KEYWORD_PATTERN, re.IGNORECASE)
 
