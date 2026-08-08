@@ -1529,6 +1529,10 @@ async def admin_send_test_trade_email(
             contracts=qty, reason=why,
             strategy_name="Saro heartbeat-test",
             mode="paper",
+            # TRADE-HORIZON-V1: futures sample renders the SWING pill so the
+            # heartbeat test exercises both label variants; stock/options
+            # samples render the default DAY pill.
+            trade_horizon=("swing" if asset == "futures" else "day"),
         ))
     except Exception as exc:
         return {"sent": False, "error": f"{type(exc).__name__}", "recipient": admin_email}

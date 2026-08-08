@@ -100,6 +100,22 @@ def _send(to: str, subject: str, html: str) -> bool:
     return _send_tracked(to, subject, html)["sent"]
 
 
+def _killswitch_allows(subject: str) -> bool:
+    """Pure predicate for the EMAIL_KILL_SWITCH whitelist (see the audit block
+    in _send_tracked_impl for the full why). Substring-anywhere semantics:
+    appending suffixes (e.g. the TRADE-HORIZON-V1 ' · Day Trade' /
+    ' · Swing Trade' labels) after a whitelisted prefix can never break
+    delivery. Extracted so tests can assert subject-pass without a send."""
+    s = subject or ""
+    transactional_keywords = ["Reset your", "Verify your", "Welcome to", "2FA",
+                               "verification", "Comp ", "tier change", "Daily digest",
+                               "Daily summary", "[Admin]", "URGENT"]
+    if any(k in s for k in transactional_keywords):
+        return True
+    # Saro = 2026-07 scanner rebrand (Ryan)
+    return ("Theta Scanner" in s) or ("Saro" in s)
+
+
 def _send_tracked(to: str, subject: str, html: str, signal_id: str | None = None, inline_png: bytes | None = None, inline_cid: str = "tradechart") -> dict:
     """Public entry point. Records a single [trade-audit] line for every
     decision so we never again have to grep 5 different log patterns to
@@ -170,12 +186,9 @@ def _send_tracked_impl(to: str, subject: str, html: str, inline_png: bytes | Non
         # │ path — re-enabling those emails today would send 10+ duplicate   │
         # │ emails per user per signal.                                      │
         # └──────────────────────────────────────────────────────────────────┘
-        transactional_keywords = ["Reset your", "Verify your", "Welcome to", "2FA",
-                                   "verification", "Comp ", "tier change", "Daily digest",
-                                   "Daily summary", "[Admin]", "URGENT"]
-        is_transactional = any(k in s for k in transactional_keywords)
-        is_theta = ("Theta Scanner" in s) or ("Saro" in s)  # Saro = 2026-07 scanner rebrand (Ryan)
-        if not is_transactional and not is_theta:
+        # Decision logic lives in _killswitch_allows (pure, testable) — the
+        # semantics are UNCHANGED from the audited inline version.
+        if not _killswitch_allows(s):
             # WARN (not info) so this is visible in default log scrapes —
             # admins repeatedly missed the legacy-pattern drops with info-level.
             logger.warning(
@@ -595,15 +608,32 @@ def send_pending_trade_confirm_email(*, to: str, username: str, ticker: str,
 def send_trade_receipt_email(*, to: str, username: str, ticker: str,
                                direction: str, entry: float, stop: float,
                                target: float, contracts: int, reason: str,
-                               strategy_name: str, mode: str = "paper") -> bool:
+                               strategy_name: str, mode: str = "paper",
+                               trade_horizon: str = "day") -> bool:
     """Signal email: bot has entered (or would enter in paper). Urgent format
-    so the user can mirror manually on a prop-firm account."""
-    # Firewall: drop email if outside session window or cap hit
-    allowed, reason = _fw_check(to)
+    so the user can mirror manually on a prop-firm account.
+
+    trade_horizon (TRADE-HORIZON-V1): 'day' | 'swing'. Renders the prominent
+    DAY TRADE / SWING TRADE pill + the imperative action line and appends
+    ' · Day Trade' / ' · Swing Trade' AFTER the whitelisted subject prefix.
+    Defaults to 'day' so legacy call sites (admin heartbeat test, the diverged
+    prod premarket_scheduler momo path) need zero changes.
+    """
+    # Firewall: drop email if outside session window or cap hit.
+    # NOTE: the firewall local is deliberately NOT named `reason` — it used to
+    # clobber the `reason` keyword parameter, so the template's "Why:" rows
+    # rendered the firewall session label (e.g. 'NY_AM') instead of the trade
+    # rationale.
+    allowed, _fw_reason = _fw_check(to)
     if not allowed:
-        logger.info(f"[email-firewall] DROPPED {ticker} -> {to} reason={reason}")
+        logger.info(f"[email-firewall] DROPPED {ticker} -> {to} reason={_fw_reason}")
         return False
-    logger.info(f"[email-firewall] ALLOWED {ticker} -> {to} session={reason}")
+    logger.info(f"[email-firewall] ALLOWED {ticker} -> {to} session={_fw_reason}")
+    from app.services.trade_horizon import (
+        get_trade_horizon, horizon_subject_suffix, horizon_block_html,
+    )
+    _horizon = get_trade_horizon(trade_horizon)
+    _horizon_html = horizon_block_html(_horizon)
     side_color = "#16a34a" if direction == "long" else "#dc2626"
     side_word  = "LONG" if direction == "long" else "SHORT"
     mode_pill  = "PAPER" if mode == "paper" else "LIVE"
@@ -615,7 +645,10 @@ def send_trade_receipt_email(*, to: str, username: str, ticker: str,
     # 2026-06-04: re-prefixed with "Theta Scanner" so the killswitch whitelist lets these through.
     # 2026-07: subject rebranded to "Saro" — also whitelisted (see is_theta in _send_tracked_impl).
     # Duplicates are guarded at every call site via Redis-backed session+daily cap claims.
-    subject = f"\U0001F525 Saro Signal \u00b7 {side_word} {ticker} @ {entry:.2f} (+{target_pct:.1f}% target)"
+    # TRADE-HORIZON-V1: suffix APPENDED after the whitelisted "Saro" prefix \u2014
+    # killswitch check is substring-anywhere, so this is provably safe.
+    subject = (f"\U0001F525 Saro Signal \u00b7 {side_word} {ticker} @ {entry:.2f} "
+               f"(+{target_pct:.1f}% target){horizon_subject_suffix(_horizon)}")
     urgency_line = (
         f"Bot is targeting +{target_pct:.1f}% continuation in this session. "
         f"Enter NOW at ${entry:.2f} or close to it \u2014 the longer you wait, the worse the entry."
@@ -636,6 +669,8 @@ def send_trade_receipt_email(*, to: str, username: str, ticker: str,
         </div>
         <div style="font-size:13px;color:#cbd5e1;margin-top:8px;line-height:1.5;">{urgency_line}</div>
       </div>
+
+      {_horizon_html}
 
       <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:18px;margin-bottom:14px;">
         <table style="width:100%;font-size:14px;border-collapse:collapse;">

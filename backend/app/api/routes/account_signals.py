@@ -418,6 +418,7 @@ def send_signal_email(
     stop_reason: Optional[str] = None,
     target_reason: Optional[str] = None,
     price_basis: Optional[str] = None,
+    trade_horizon: Optional[str] = "day",
 ) -> bool:
     """Send a futures entry-signal email.
 
@@ -440,6 +441,13 @@ def send_signal_email(
     price_basis (recommended for futures): human note of the bar source the
     signal priced from (e.g. 'live QQQ IEX proxy scaled to NQ (Alpaca)'),
     rendered in the email so overnight recipients can judge price relevance.
+
+    trade_horizon (TRADE-HORIZON-V1): 'day' | 'swing' — the strategy's
+    trade_horizon column, resolved by the CALLER (runner._emit_signal does the
+    async DB lookup before the to_thread hop; this fn stays fully sync).
+    Renders the DAY TRADE / SWING TRADE pill + action line and appends
+    ' · Day Trade' / ' · Swing Trade' after the whitelisted subject prefix.
+    Default 'day' — additive-only signature change for legacy callers.
     """
     from loguru import logger as _lg
     from datetime import datetime as _dt_fs, date as _date_fs, timezone as _tz_fs
@@ -608,12 +616,22 @@ def send_signal_email(
         f'Price basis: {price_basis}</p>'
         if price_basis else ""
     )
-    subject = f"🎯 Saro (Futures): {side_word} {instrument} @ {entry:.2f} · {strategy_name}"
+    # TRADE-HORIZON-V1: Day/Swing pill + action line; subject suffix APPENDED
+    # after the whitelisted "🎯 Saro" prefix (killswitch is substring-anywhere).
+    from app.services.trade_horizon import (
+        get_trade_horizon, horizon_subject_suffix, horizon_block_html,
+    )
+    _horizon = get_trade_horizon(trade_horizon)
+    _horizon_html = horizon_block_html(_horizon)
+    subject = (f"🎯 Saro (Futures): {side_word} {instrument} @ {entry:.2f} "
+               f"· {strategy_name}{horizon_subject_suffix(_horizon)}")
     html = f"""
     <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
       {_logo_header()}
       <h1 style="margin:0 0 4px;font-size:22px;">Position update — {account_label}</h1>
       <p style="margin:0 0 18px;color:#94a3b8;font-size:13px;">{strategy_name} · {fired_at}</p>
+
+      {_horizon_html}
 
       <p style="margin:0 0 18px;font-size:15px;line-height:1.55;color:#0f172a;">
         Theta Algos has logged an internal {side_word.lower()} position in <strong>{instrument}</strong> at <strong>{entry:.2f}</strong>, with stop loss price <strong style="color:#dc2626;">{stop:.2f}</strong> ({stop_reason}) and take profit price <strong style="color:#16a34a;">{target:.2f}</strong> ({target_reason}). This message is a record of our system's activity. Whether you replicate any portion of it in your own account is entirely your decision and your responsibility.

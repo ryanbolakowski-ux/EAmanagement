@@ -58,6 +58,10 @@ class StrategyCreate(BaseModel):
     breakeven_mode: str = "off"
     breakeven_at_r: float = 0.0
     rule_tree: dict = {}
+    # TRADE-HORIZON-V1: 'day' | 'swing' — drives the Day/Swing pill on entry
+    # emails. None = leave untouched (a client that omits the field can never
+    # clobber a horizon set via SQL). No UI yet — API pass-through only.
+    trade_horizon: Optional[str] = None
 
 
 class StrategyResponse(BaseModel):
@@ -241,6 +245,10 @@ async def create_strategy(
 ):
     payload = data.model_dump()
     _reject_offensive_name(payload.get("name"))  # NAME-MODERATION-V1
+    # TRADE-HORIZON-V1: popped from payload so a NULL/omitted value is never
+    # written (INSERT/UPDATE only reference the lazily-added column when the
+    # client explicitly sets 'day'/'swing').
+    _trade_horizon = payload.pop("trade_horizon", None)
     _status_raw = (payload.pop("status", None) or "active")
     try:
         _status_enum = StrategyStatus(_status_raw)
@@ -261,6 +269,10 @@ async def create_strategy(
         origin="user",
         **payload,
     )
+    if _trade_horizon in ("day", "swing"):
+        from app.services.trade_horizon import ensure_trade_horizon_column
+        await ensure_trade_horizon_column()
+        strategy.trade_horizon = _trade_horizon
     db.add(strategy)
     await db.flush()
     return StrategyResponse(
@@ -315,9 +327,17 @@ async def update_strategy(
 
     payload = data.model_dump()
     _reject_offensive_name(payload.get("name"))  # NAME-MODERATION-V1
+    # TRADE-HORIZON-V1: only an explicit 'day'/'swing' writes the column —
+    # clients that omit the field (the current strategy editor) can never
+    # reset a horizon that was set via SQL.
+    _trade_horizon = payload.pop("trade_horizon", None)
     _status_raw = payload.pop("status", None)
     for key, value in payload.items():
         setattr(strategy, key, value)
+    if _trade_horizon in ("day", "swing"):
+        from app.services.trade_horizon import ensure_trade_horizon_column
+        await ensure_trade_horizon_column()
+        strategy.trade_horizon = _trade_horizon
     if _status_raw is not None:
         try:
             strategy.status = StrategyStatus(_status_raw)

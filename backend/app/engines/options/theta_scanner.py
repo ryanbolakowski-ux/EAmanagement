@@ -745,10 +745,25 @@ def _retain_push_task(task):
 
 async def emit_theta_pick(db, user, pick: dict) -> bool:
     from app.services.email import _send, _send_tracked
+    from app.services.trade_horizon import (
+        get_trade_horizon, horizon_subject_suffix, horizon_block_html,
+    )
     qty = max(1, int(1000 / pick["price"]))
     _watch = bool(pick.get("watch_only"))
     _qr = pick.get("quality_reasons") or []
-    subject = f"🎯 Saro — Today's Pick: {pick['ticker']} +{pick['projected_move_pct']:.0f}% target"
+    # TRADE-HORIZON-V1 (Ryan's rule): stock scanner picks are ALWAYS Day
+    # Trades — the platform force-closes them at 15:55 ET unconditionally
+    # (3:55 PM ET, 5 min before the bell), regardless of any strategy column,
+    # so the horizon is HARD-CODED here via source='stock_pick'. Watch-only
+    # picks are explicitly NOT trades: they get no pill/action line (the
+    # WATCH ONLY banner already says "not a trade") and no subject suffix,
+    # so we never instruct action on a non-trade.
+    _horizon = get_trade_horizon(None, source="stock_pick")  # always 'day'
+    _horizon_html = "" if _watch else horizon_block_html(_horizon)
+    # Suffix APPENDED after the whitelisted "🎯 Saro" prefix — killswitch is a
+    # substring-anywhere check, so appending is provably safe.
+    subject = (f"🎯 Saro — Today's Pick: {pick['ticker']} "
+               f"+{pick['projected_move_pct']:.0f}% target{horizon_subject_suffix(_horizon)}")
     if _watch:
         subject = f"🎯 Saro: 👀 WATCH ONLY — {pick['ticker']} (no clean setup today)"
     alt_html = ""
@@ -822,7 +837,7 @@ async def emit_theta_pick(db, user, pick: dict) -> bool:
         logger.info(f"[ThetaScanner] chart skipped (invalid geometry) {pick.get('ticker')} e={pick.get('entry')} s={pick.get('stop')} t={pick.get('target')}")
     html = f"""<div style="font-family:-apple-system,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0f172a;">
       <h1 style="margin:0 0 8px;color:#7c3aed;">🎯 Saro — Today's Pick</h1>
-      {watch_banner}{reasons_html}
+      {watch_banner}{_horizon_html}{reasons_html}
       <p style="color:#64748b;font-size:12px;margin:0 0 20px;">STT-style single highest-conviction setup for {datetime.now(timezone.utc).date()}</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <tr><td style="padding:8px;color:#475569;">Ticker</td><td style="text-align:right;font-weight:700;font-size:18px;">{pick['ticker']}</td></tr>

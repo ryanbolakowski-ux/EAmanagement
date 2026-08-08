@@ -477,6 +477,11 @@ class PaperTrader:
                 async with _asf() as db:
                     u = (await db.execute(_sel(_U).where(_U.id == self.user_id))).scalar_one_or_none()
                 if u and u.email:
+                    # TRADE-HORIZON-V1: self.strategy is the engine CONFIG
+                    # object (not the ORM row), so the Day/Swing horizon is
+                    # fetched by strategy_id here — async, fail-safe to 'day'.
+                    from app.services.trade_horizon import fetch_strategy_horizon
+                    _horizon = await fetch_strategy_horizon(self.strategy_id)
                     send_trade_receipt_email(
                         to=u.email, username=u.username or "",
                         ticker=traded_instrument,
@@ -488,6 +493,7 @@ class PaperTrader:
                         reason=(signal.metadata or {}).get("note") or self.strategy.config.name,
                         strategy_name=self.strategy.config.name,
                         mode="paper",
+                        trade_horizon=_horizon,
                     )
             _asyncio.create_task(_send())
         except Exception as e:

@@ -1106,6 +1106,13 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
             await db.execute(text("UPDATE account_signals SET queued_at = :q WHERE id = :id"),
                              {"q": queued_at, "id": sid})
             await db.commit()
+        # TRADE-HORIZON-V1: per-strategy Day/Swing horizon (strategies.
+        # trade_horizon, NULL -> 'day'). Resolved HERE — async, before the
+        # to_thread hop — so the sync email builder never touches the DB.
+        # Internally capped at 3s and fail-safe to 'day', so a slow/down DB
+        # can never delay or block the signal email.
+        from app.services.trade_horizon import fetch_strategy_horizon
+        _trade_horizon = await fetch_strategy_horizon(strategy_id)
         try:
             # to_thread: send_signal_email is fully sync (sync redis gate,
             # _fetch_bars_sync bar pulls, matplotlib chart render, httpx POST
@@ -1121,6 +1128,7 @@ async def _emit_signal(watcher_id, strategy_id, user_id, account_label, channels
                 signal_id=sid, entry_detected_at=detected_at,
                 stop_reason=strat_stop_reason, target_reason=strat_target_reason,
                 price_basis=_price_basis,
+                trade_horizon=_trade_horizon,
             )
         except Exception as e:
             result = {"sent": False, "provider_status": "exception", "error": f"{type(e).__name__}: {e}",

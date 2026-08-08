@@ -92,6 +92,15 @@ class Strategy(Base):
     # ensure_origin_column() first.
     origin: Mapped[str | None] = mapped_column(String(16), nullable=True, deferred=True)
 
+    # TRADE-HORIZON-V1: 'day' | 'swing' (NULL = 'day'). Drives the Day/Swing
+    # pill + action line on every entry email (Ryan's rule: recipients must
+    # know whether to be flat by the close). Stock scanner picks IGNORE this
+    # column — they are force-closed at 15:55 ET unconditionally. Reaches the
+    # live DB via the lazy ALTER in app.services.trade_horizon
+    # (ensure_trade_horizon_column). deferred=True — origin precedent — so
+    # plain entity SELECTs never reference the column before the ALTER lands.
+    trade_horizon: Mapped[str | None] = mapped_column(String(8), nullable=True, deferred=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
