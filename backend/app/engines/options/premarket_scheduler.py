@@ -1777,9 +1777,14 @@ async def _check_end_of_day_close():
     if et is None:
         return
 
-    # Fire at 15:55 ET; allow a 5-min slop window so a sleep-blip doesn't
-    # skip us. The idempotency set keeps us from double-firing.
-    if not (_dtime(15, 55) <= et.time() <= _dtime(16, 0)):
+    # 2026-08-08 DV incident: a bounded 15:55-16:00 window is MISSABLE —
+    # one slow loop tick (multi-minute yfinance/FMP scans) jumps it and the
+    # close silently never runs (DV held Fri->Mon). Fire on the FIRST tick
+    # at/after 15:55 for the rest of the ET day; the idempotency set still
+    # prevents double-fires. After ~16:00 the market sell queues to the
+    # next open (same effect as the overnight guard, but claimed early and
+    # ALERTED). Late fires page the admin via the URGENT pipeline alert.
+    if et.time() < _dtime(15, 55):
         return
     # Weekdays only (Sat=5, Sun=6)
     if et.weekday() >= 5:
@@ -1789,6 +1794,20 @@ async def _check_end_of_day_close():
     if today_key in _eod_fired_for_date:
         return
     _eod_fired_for_date.add(today_key)
+
+    if et.time() > _dtime(16, 5):
+        # LATE fire — the 15:55 pass was missed; sells below will queue to
+        # the next session open. Make it loud so nobody finds out Saturday.
+        try:
+            from app.engines.pipeline_alerts import send_pipeline_failure_alert
+            await send_pipeline_failure_alert(
+                reason=f"EOD close firing LATE at {et.strftime('%H:%M ET')} — open positions held past the close",
+                context={"job": "premarket_scheduler._check_end_of_day_close",
+                         "fired_at_et": et.isoformat()},
+                traceback_str=None,
+            )
+        except Exception:
+            pass
 
     logger.info(f"[EOD-close] starting auto-close pass for {today_key} (15:55 ET)")
 
