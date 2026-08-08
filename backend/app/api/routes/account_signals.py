@@ -622,7 +622,7 @@ def send_signal_email(
         get_trade_horizon, horizon_subject_suffix, horizon_block_html,
     )
     _horizon = get_trade_horizon(trade_horizon)
-    _horizon_html = horizon_block_html(_horizon)
+    _horizon_html = horizon_block_html(_horizon, surface="futures")
     subject = (f"🎯 Saro (Futures): {side_word} {instrument} @ {entry:.2f} "
                f"· {strategy_name}{horizon_subject_suffix(_horizon)}")
     html = f"""

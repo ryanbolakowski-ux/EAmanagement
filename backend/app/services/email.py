@@ -109,7 +109,8 @@ def _killswitch_allows(subject: str) -> bool:
     s = subject or ""
     transactional_keywords = ["Reset your", "Verify your", "Welcome to", "2FA",
                                "verification", "Comp ", "tier change", "Daily digest",
-                               "Daily summary", "[Admin]", "URGENT"]
+                               "Daily summary", "[Admin]", "URGENT",
+                               "[Theta Algos Support]"]  # support routing fix (prod 2026-08-06)
     if any(k in s for k in transactional_keywords):
         return True
     # Saro = 2026-07 scanner rebrand (Ryan)
@@ -633,7 +634,8 @@ def send_trade_receipt_email(*, to: str, username: str, ticker: str,
         get_trade_horizon, horizon_subject_suffix, horizon_block_html,
     )
     _horizon = get_trade_horizon(trade_horizon)
-    _horizon_html = horizon_block_html(_horizon)
+    from app.services.trade_horizon import surface_for_instrument
+    _horizon_html = horizon_block_html(_horizon, surface=surface_for_instrument(ticker))
     side_color = "#16a34a" if direction == "long" else "#dc2626"
     side_word  = "LONG" if direction == "long" else "SHORT"
     mode_pill  = "PAPER" if mode == "paper" else "LIVE"

@@ -44,6 +44,26 @@ DAY_ACTION_LINE = (
     "(auto-close at 15:55 ET, 5 minutes before the bell). "
     "If you mirror it manually, be flat before the close."
 )
+# Futures + paper books have NO time-based auto-close — the 15:55 ET force-
+# close exists ONLY for stock picks (open_positions_watch). The day copy must
+# never promise an exit the platform does not perform (2026-08-08 verify).
+DAY_ACTION_LINE_FUTURES = (
+    "This is an intraday setup \u2014 the bot manages the stop/target exits but does "
+    "NOT auto-close futures at a set time. If you mirror it manually, plan to be "
+    "flat within your session."
+)
+FUTURES_ROOTS = {"ES", "NQ", "YM", "RTY", "MES", "MNQ", "M2K", "MYM",
+                 "CL", "GC", "SI", "6E", "6J", "ZB", "ZN"}
+
+
+def surface_for_instrument(instrument) -> str:
+    """'futures' when the ticker is a known futures root, else 'stock'."""
+    try:
+        return "futures" if str(instrument or "").upper() in FUTURES_ROOTS else "stock"
+    except Exception:
+        return "stock"
+
+
 SWING_ACTION_LINE = (
     "This is a swing setup — holding overnight (and over weekends) is "
     "expected. The bot manages the exit."
@@ -85,12 +105,20 @@ def horizon_subject_suffix(horizon: str) -> str:
     return SUBJECT_SUFFIX.get(get_trade_horizon(horizon), SUBJECT_SUFFIX["day"])
 
 
-def horizon_action_line(horizon: str) -> str:
+def horizon_action_line(horizon: str, surface: str = "stock") -> str:
+    """surface='futures' swaps the day line for the no-auto-close truth."""
+    h = get_trade_horizon(horizon)
+    if h == "day" and surface == "futures":
+        return DAY_ACTION_LINE_FUTURES
+    return ACTION_LINE.get(h, DAY_ACTION_LINE)
+
+
+def _legacy_horizon_action_line(horizon: str) -> str:
     """The one imperative instruction line for this horizon (plain text)."""
     return ACTION_LINE.get(get_trade_horizon(horizon), DAY_ACTION_LINE)
 
 
-def horizon_block_html(horizon: str) -> str:
+def horizon_block_html(horizon: str, surface: str = "stock") -> str:
     """Prominent pill + action line block, injected near the top of every
     entry-email template. Inline-styled (email-safe), no images."""
     h = get_trade_horizon(horizon)
@@ -102,7 +130,7 @@ def horizon_block_html(horizon: str) -> str:
         f'font-weight:900;font-size:11px;letter-spacing:0.12em;'
         f'padding:4px 10px;border-radius:6px;">{s["label"]}</span>'
         f'<div style="margin-top:8px;color:{s["text"]};font-size:13px;'
-        f'line-height:1.55;font-weight:600;">{ACTION_LINE[h]}</div>'
+        f'line-height:1.55;font-weight:600;">{horizon_action_line(h, surface)}</div>'
         f'</div>'
     )
 

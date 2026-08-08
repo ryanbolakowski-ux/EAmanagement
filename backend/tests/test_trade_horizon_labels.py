@@ -46,6 +46,8 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 DAY_SUFFIX = " · Day Trade"
 SWING_SUFFIX = " · Swing Trade"
 DAY_MARKERS = ("DAY TRADE", "3:55 PM ET", "flat before the close")
+# Futures/receipt-on-futures day surface: honest copy — no auto-close claim.
+DAY_MARKERS_FUT = ("DAY TRADE", "NOT auto-close futures", "flat within your session")
 SWING_MARKERS = ("SWING TRADE", "holding overnight", "weekends")
 
 
@@ -143,8 +145,8 @@ def test_receipt_email():
               captured.get("subject", ""))
         check("receipt(day): killswitch still passes suffixed subject",
               email_mod._killswitch_allows(captured["subject"]))
-        check("receipt(day): pill + action line rendered",
-              all(m in captured["html"] for m in DAY_MARKERS))
+        check("receipt(day): pill + action line rendered (futures surface — honest copy)",
+              all(m in captured["html"] for m in DAY_MARKERS_FUT))
         check("receipt(day): 'Why' rows show the trade rationale (clobber fix)",
               reason_text in captured["html"] and "NY_AM" not in captured["html"])
 
@@ -216,8 +218,8 @@ def test_futures_signal_email():
               captured["subject"].startswith("\U0001F3AF Saro (Futures):")
               and captured["subject"].endswith(DAY_SUFFIX),
               captured.get("subject", ""))
-        check("futures(day-default): pill + action line rendered",
-              all(m in captured["html"] for m in DAY_MARKERS))
+        check("futures(day-default): pill + action line rendered (honest copy)",
+              all(m in captured["html"] for m in DAY_MARKERS_FUT))
 
         captured.clear()
         res = acct_mod.send_signal_email(signal_id="th-test-2", trade_horizon="swing", **common)
@@ -232,7 +234,7 @@ def test_futures_signal_email():
         res = acct_mod.send_signal_email(signal_id="th-test-3", trade_horizon="garbage", **common)
         check("futures(garbage horizon): safe default day",
               captured["subject"].endswith(DAY_SUFFIX)
-              and all(m in captured["html"] for m in DAY_MARKERS))
+              and all(m in captured["html"] for m in DAY_MARKERS_FUT))
     finally:
         acct_mod._send_tracked = orig_tracked
         acct_mod._candle_cache_window_df = orig_window

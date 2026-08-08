@@ -318,6 +318,14 @@ async def update_strategy(
     current_user: User = Depends(require_paid_user_with_2fa),
     db: AsyncSession = Depends(get_db),
 ):
+    # 2026-08-08 deadlock fix: the lazy ALTER needs ACCESS EXCLUSIVE on
+    # strategies; running it AFTER this route's own SELECT (ACCESS SHARE held
+    # until commit) self-deadlocks the table. Ensure BEFORE any strategies
+    # query in this transaction (list_strategies precedent).
+    if getattr(data, "trade_horizon", None) in ("day", "swing"):
+        from app.services.trade_horizon import ensure_trade_horizon_column
+        await ensure_trade_horizon_column()
+
     result = await db.execute(
         select(Strategy).where(Strategy.id == strategy_id, Strategy.user_id == current_user.id)
     )
