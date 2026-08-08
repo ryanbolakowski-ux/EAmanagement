@@ -24,6 +24,24 @@ class ICTStrategy(BaseStrategy):
     3. Find displacement confirming bias
     4. Enter at FVG CE level (consequent encroachment)
     5. SL at swing low/high, TP at opposing liquidity
+
+    Optional rule_tree overrides (SLTP-OVERRIDES-V1, 2026-08-08 — the SL/TP
+    recalibration experiment). Each key is read ONCE at construction from
+    ``config.rule_tree``; when ABSENT (true for every pre-existing strategy
+    row) the defaults reproduce the pre-override engine byte-identically —
+    proven by tests/test_sltp_overrides.py against a frozen baseline.
+      - ``sl_buffer_ticks`` (int, default 2, sanity-clamped 0-50): buffer
+        placed past the anchoring extreme in BOTH structure stop branches
+        (sweep-level anchor and swing-extreme anchor); was hardcoded 2 ticks.
+      - ``sl_widen_mult`` (float, default 1.0, sanity-clamped 0.5-4.0):
+        multiplies the FINAL computed stop distance after branch selection
+        and BEFORE the max-risk caps (the 400-tick sweep cap and the
+        stop_loss_ticks/200-tick swing cap still bind); the 12-tick
+        fallback stop is multiplied too.
+      - ``max_rr`` (float, default None -> class MAX_RR 3.0, sanity-clamped
+        1.0-10.0): overrides the take-profit R:R clamp in _clamp_tp.
+    Out-of-range values are clamped with a loguru warning; non-numeric/None
+    values are ignored (default kept) with a loguru warning.
     """
 
     def __init__(self, config: StrategyConfig, instrument: str = "ES"):
@@ -61,6 +79,12 @@ class ICTStrategy(BaseStrategy):
         self._last_stop_choice: dict = {}
         self._last_tp_choice: dict = {}
         self._last_htf_tf: str | None = None  # tf label of _get_htf_data's pick
+        # SLTP-OVERRIDES-V1: optional rule_tree knobs (see class docstring),
+        # read ONCE here. Absent keys => (2, 1.0, None) => byte-identical
+        # SL/TP behavior (parity gate: tests/test_sltp_overrides.py).
+        (self._sl_buffer_ticks,
+         self._sl_widen_mult,
+         self._max_rr_override) = self._read_sltp_overrides()
 
     def _build_ictcontext(self, bars):
         """Adapter: wrap on_bar inputs in an ICTContext for a V2 dedicated setup.
@@ -1044,8 +1068,66 @@ class ICTStrategy(BaseStrategy):
             raw = {"htf_fvg": f"{htf} FVG", "swing": f"{primary_tf_label} swing {side}",
                    "range": f"{primary_tf_label} range {side}", "rr": "R:R target"}
             what = raw.get(c.get("raw_branch"), "structure target")
-            return f"{self.MAX_RR:g}R cap {px} ({what} beyond {self.MAX_RR:g}R)"
+            _rr_cap = self._effective_max_rr()  # SLTP-OVERRIDES-V1: truthful label
+            return f"{_rr_cap:g}R cap {px} ({what} beyond {_rr_cap:g}R)"
         return f"strategy target {px}"
+
+    @staticmethod
+    def _sanitize_override(name, raw, lo, hi, cast):
+        """SLTP-OVERRIDES-V1: coerce + sanity-clamp one rule_tree override.
+        Returns None when the value is unusable (caller keeps the default)
+        or the validated number. loguru-warns on every clamp/coercion
+        failure so a mis-typed experiment config is loud, never silent."""
+        try:
+            val = cast(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[SLTP-OVERRIDES] rule_tree.{name}={raw!r} is not numeric — "
+                f"override ignored, default behavior kept")
+            return None
+        if val != val:  # NaN never compares inside the range checks below
+            logger.warning(
+                f"[SLTP-OVERRIDES] rule_tree.{name}=NaN — "
+                f"override ignored, default behavior kept")
+            return None
+        if val < lo or val > hi:
+            clamped = min(max(val, lo), hi)
+            logger.warning(
+                f"[SLTP-OVERRIDES] rule_tree.{name}={val} outside sane range "
+                f"[{lo}, {hi}] — clamped to {clamped}")
+            return clamped
+        return val
+
+    def _read_sltp_overrides(self):
+        """Read the three OPTIONAL SL/TP override keys (class docstring) once
+        at construction, tolerant of an absent/None/non-dict rule_tree.
+        Returns (sl_buffer_ticks, sl_widen_mult, max_rr_override) where the
+        defaults (2, 1.0, None) reproduce pre-override behavior exactly."""
+        rt = getattr(self.config, "rule_tree", None) or {}
+        if not isinstance(rt, dict):
+            rt = {}
+        buf = mult = mrr = None
+        if "sl_buffer_ticks" in rt:
+            buf = self._sanitize_override(
+                "sl_buffer_ticks", rt.get("sl_buffer_ticks"), 0, 50, int)
+        if "sl_widen_mult" in rt:
+            mult = self._sanitize_override(
+                "sl_widen_mult", rt.get("sl_widen_mult"), 0.5, 4.0, float)
+        if "max_rr" in rt:
+            mrr = self._sanitize_override(
+                "max_rr", rt.get("max_rr"), 1.0, 10.0, float)
+        return (2 if buf is None else int(buf),
+                1.0 if mult is None else float(mult),
+                None if mrr is None else float(mrr))
+
+    def _widen_stop(self, entry, sl):
+        """SLTP-OVERRIDES-V1: scale the FINAL stop distance by sl_widen_mult
+        (after branch selection, BEFORE the caps — callers cap afterwards).
+        Guarded so the default 1.0 keeps the ORIGINAL float untouched:
+        entry - (entry - sl) is NOT bit-identical to sl in IEEE754."""
+        if self._sl_widen_mult == 1.0:
+            return sl
+        return entry - (entry - sl) * self._sl_widen_mult
 
     def _compute_stop_loss(self, entry, direction, df, exec_df=None, sweep_level=None):
         """Structure-based stop at the recent 1m swing extreme.
@@ -1067,7 +1149,9 @@ class ICTStrategy(BaseStrategy):
         # 2-tick buffer. That's the sweep low/high that defined the
         # inversion — exactly where the user said the stop belongs.
         if sweep_level is not None:
-            buffer = 2 * self.tick_size
+            # SLTP-OVERRIDES-V1: buffer was hardcoded 2 ticks; default
+            # _sl_buffer_ticks IS 2, so absent key = identical float math.
+            buffer = self._sl_buffer_ticks * self.tick_size
             # Sweep-level stops come from the inversion trigger and reference
             # an exact structural extreme — trust it further than the swing
             # scan default. Cap at 400 ticks (= 100 NQ pts / 50 ES pts) so
@@ -1075,7 +1159,7 @@ class ICTStrategy(BaseStrategy):
             # 1m inversion bars (40-80 pts) survive.
             sweep_cap_ticks = max(max_sl_ticks, 400)
             if direction == "long":
-                sl = float(sweep_level) - buffer
+                sl = self._widen_stop(entry, float(sweep_level) - buffer)
                 max_sl = entry - (sweep_cap_ticks * self.tick_size)
                 capped = sl < max_sl
                 sl = max(sl, max_sl)
@@ -1087,7 +1171,7 @@ class ICTStrategy(BaseStrategy):
                     }
                     return sl
             else:
-                sl = float(sweep_level) + buffer
+                sl = self._widen_stop(entry, float(sweep_level) + buffer)
                 max_sl = entry + (sweep_cap_ticks * self.tick_size)
                 capped = sl > max_sl
                 sl = min(sl, max_sl)
@@ -1112,7 +1196,9 @@ class ICTStrategy(BaseStrategy):
                 # Anchor to the LOWEST swing low in the window (the actual
                 # sweep low that defined the inversion). 2-tick buffer below.
                 anchor = min(s.price for s in swing_lows)
-                sl = anchor - (2 * self.tick_size)
+                # SLTP-OVERRIDES-V1: buffer (default 2t) + widen (default x1)
+                sl = self._widen_stop(
+                    entry, anchor - (self._sl_buffer_ticks * self.tick_size))
                 max_sl = entry - (max_sl_ticks * self.tick_size)
                 capped = sl < max_sl
                 sl = max(sl, max_sl)
@@ -1124,15 +1210,20 @@ class ICTStrategy(BaseStrategy):
                     }
                     return sl
             # Fallback: 12-tick stop (wider than the old 8 so it survives normal noise)
-            sl = entry - (12 * self.tick_size)
+            # SLTP-OVERRIDES-V1: fallback distance widened too (x1.0 default
+            # is bit-exact: (12*tick)*1.0 == 12*tick in IEEE754).
+            sl = entry - (12 * self.tick_size * self._sl_widen_mult)
             self._last_stop_choice = {"branch": "ticks_fallback", "level": float(sl),
-                                      "ticks": 12, "df_used": _df_used}
+                                      "ticks": self._fallback_ticks_label(),
+                                      "df_used": _df_used}
             return sl
         else:
             swing_highs = find_swing_highs(recent, lookback=2)
             if swing_highs:
                 anchor = max(s.price for s in swing_highs)
-                sl = anchor + (2 * self.tick_size)
+                # SLTP-OVERRIDES-V1: buffer (default 2t) + widen (default x1)
+                sl = self._widen_stop(
+                    entry, anchor + (self._sl_buffer_ticks * self.tick_size))
                 max_sl = entry + (max_sl_ticks * self.tick_size)
                 capped = sl > max_sl
                 sl = min(sl, max_sl)
@@ -1143,18 +1234,32 @@ class ICTStrategy(BaseStrategy):
                         "df_used": _df_used,
                     }
                     return sl
-            sl = entry + (12 * self.tick_size)
+            sl = entry + (12 * self.tick_size * self._sl_widen_mult)
             self._last_stop_choice = {"branch": "ticks_fallback", "level": float(sl),
-                                      "ticks": 12, "df_used": _df_used}
+                                      "ticks": self._fallback_ticks_label(),
+                                      "df_used": _df_used}
             return sl
 
     MAX_RR = 3.0  # user spec: cap take-profit at 3R; > 3R hard to hit cleanly
+
+    def _effective_max_rr(self) -> float:
+        """SLTP-OVERRIDES-V1: rule_tree.max_rr when set, else class MAX_RR."""
+        return self.MAX_RR if self._max_rr_override is None else self._max_rr_override
+
+    def _fallback_ticks_label(self):
+        """Truthful ticks label for the fallback stop: stays the int 12 when
+        sl_widen_mult is 1.0 (byte-identical choice dict / email reason);
+        otherwise the widened distance (int when integral)."""
+        if self._sl_widen_mult == 1.0:
+            return 12
+        t = 12 * self._sl_widen_mult
+        return int(t) if t == int(t) else round(t, 2)
 
     def _clamp_tp(self, entry: float, sl: float, tp: float, direction: str) -> float:
         risk = abs(entry - sl)
         if risk <= 0:
             return tp
-        max_r = risk * self.MAX_RR
+        max_r = risk * self._effective_max_rr()
         if direction == "long":
             return min(tp, entry + max_r)
         return max(tp, entry - max_r)
