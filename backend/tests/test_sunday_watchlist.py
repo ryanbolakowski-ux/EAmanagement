@@ -333,7 +333,7 @@ def test_build_watchlist_budget_cap_is_saro13s():
 def test_subject_passes_killswitch():
     from app.services.email import _killswitch_allows
     for n in (5, 3, 1):
-        subject = SW.SUBJECT_FMT.format(n=n)
+        subject = SW.SUBJECT_FMT.format(n=n, plural=("" if n == 1 else "s"))
         assert "Saro" in subject
         assert _killswitch_allows(subject) is True
     # sanity: the predicate really does drop a non-whitelisted subject

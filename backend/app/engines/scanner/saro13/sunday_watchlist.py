@@ -75,6 +75,7 @@ WATCH ONLY — ABSOLUTE:
 from __future__ import annotations
 
 import json
+import html as _html
 import math
 import os
 from datetime import datetime, timezone
@@ -107,7 +108,7 @@ SPAWN_END_S = 19 * 3600 + 30 * 60           # 19:30:00 ET — MUST stay < 20:00
 TOP_N = 5
 MATCHED_STRATEGY = "saro13:sunday_watchlist"   # keeps the saro13: readout prefix
 SOURCE_TAG = "sunwatch"
-SUBJECT_FMT = "\U0001f52e Saro Weekly Watch — {n} coiled names for the week"
+SUBJECT_FMT = "\U0001f52e Saro Weekly Watch — {n} coiled name{plural} for the week"
 NOT_A_SIGNAL_LINE = ("WATCHLIST — NOT TRADE SIGNALS. Nothing here is an "
                      "entry, an order, or advice; no trades are queued.")
 
@@ -417,7 +418,7 @@ def render_watchlist_html(date_key: str, watch: list[dict]) -> str:
         cat = ""
         if c.get("catalyst"):
             cat = (f'<div style="font-size:12px;color:#64748b;margin-top:6px;">'
-                   f'&#128240; {str(c["catalyst"])[:140]}</div>')
+                   f'&#128240; {_html.escape(str(c["catalyst"])[:140])}</div>')
         cards.append(
             f'<div style="border:1px solid #e2e8f0;border-radius:10px;'
             f'padding:12px 14px;margin:10px 0;">'
@@ -498,7 +499,7 @@ async def _send_watchlist_email(watch: list[dict], date_key: str) -> int:
     if not rows:
         logger.info("[sunwatch] no SARO-activated recipients — nothing to send")
         return 0
-    subject = SUBJECT_FMT.format(n=len(watch))
+    subject = SUBJECT_FMT.format(n=len(watch), plural=("" if len(watch) == 1 else "s"))
     html = render_watchlist_html(date_key, watch)
     sent = 0
     for row in rows:
