@@ -352,6 +352,16 @@ _FORBIDDEN_CALL_RE = re.compile(
 
 _PKG = os.path.join(_BACKEND, "app", "engines", "scanner", "saro13")
 
+# The ORIGINAL shadow-only saro13 modules. sunday_watchlist.py (2026-08-18)
+# joined the package as the ONE deliberate emailing exception (Sunday
+# WATCHLIST cohort: killswitch-whitelisted subject, SARO-activated recipients,
+# still ZERO entries) — it carries its own INSERT and an ADAPTED
+# forbidden-token list in tests/test_sunday_watchlist.py. The invariants
+# below stay byte-identical for these core files; do NOT fold
+# sunday_watchlist into this list, and do NOT copy its email allowance here.
+_CORE_FILES = ["__init__.py", "config.py", "indicators.py", "screen.py",
+               "iv_snapshot.py", "shadow.py"]
+
 
 def test_safety_import_graph_clean_subprocess():
     """Import every saro13 module in a CLEAN interpreter and assert none of
@@ -378,7 +388,7 @@ def test_safety_no_forbidden_tokens_in_source():
     """No saro13 source file may IMPORT an email/pick module or CALL an
     email/pick/order function (docstring mentions are fine — this scans
     import statements and call sites)."""
-    for fn in sorted(os.listdir(_PKG)):
+    for fn in _CORE_FILES:
         if not fn.endswith(".py"):
             continue
         src = open(os.path.join(_PKG, fn), encoding="utf-8").read()
@@ -400,7 +410,7 @@ def test_safety_rows_are_unmistakably_shadow():
     assert "detection_ts" in src and "detection_ts timestamptz" in src  # S4 stamp
     assert C.SOURCE_TAG == "saro13_shadow"
     esh_inserts = 0
-    for fn in os.listdir(_PKG):
+    for fn in _CORE_FILES:
         if not fn.endswith(".py"):
             continue
         s = open(os.path.join(_PKG, fn), encoding="utf-8").read()

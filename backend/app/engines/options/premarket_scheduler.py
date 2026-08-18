@@ -943,6 +943,14 @@ async def _fast_theta_loop():
             maybe_spawn_saro13_shadow()
         except Exception as _s13e:
             logger.warning(f"[saro13-shadow] spawn check failed: {_s13e}")
+        # ── SARO SUNDAY WATCHLIST (2026-08-18 — WATCH ONLY: ranked coil email
+        # + shadow rows, NEVER entries). Cheap sync check; Sundays 18:00-19:30
+        # ET (env gate SARO13_SUNWATCH_ENABLED, latch theta:sunwatch:{ET-date}).
+        try:
+            from app.engines.scanner.saro13.sunday_watchlist import maybe_spawn_sunday_watchlist
+            maybe_spawn_sunday_watchlist()
+        except Exception as _swe:
+            logger.warning(f"[sunwatch] spawn check failed: {_swe}")
         await _aio.sleep(60)
 
 
