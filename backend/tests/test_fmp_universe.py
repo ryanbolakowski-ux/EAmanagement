@@ -40,6 +40,17 @@ import inspect
 import json
 
 import pytest
+
+
+# SARO_PICK_ENGINE (2026-08-18): the default pick engine is now the saro13
+# COMPRESSION path; these tests exercise the LEGACY momentum/funnel engine,
+# so pin the env per-test (monkeypatch restores it — no cross-module leak).
+import pytest as _pytest_engine_pin
+
+
+@_pytest_engine_pin.fixture(autouse=True)
+def _pin_legacy_momentum_engine(monkeypatch):
+    monkeypatch.setenv("SARO_PICK_ENGINE", "momentum")
 from loguru import logger
 
 import app.engines.data_feeds.fmp_universe as fu

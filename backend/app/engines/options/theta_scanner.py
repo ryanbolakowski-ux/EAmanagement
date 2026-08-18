@@ -516,6 +516,24 @@ async def find_best_pick_via_funnel(db):
 
 
 async def find_best_premarket_pick(db) -> Optional[dict]:
+    # ── SARO_PICK_ENGINE dispatch (2026-08-18, owner-approved replacement) ─
+    # 'compression' (the DEFAULT): Saro 1.3 predictive-consolidation live
+    # engine (app/engines/scanner/saro13/live_pick.py) — CANDIDATE SELECTION
+    # only changes; everything downstream of the returned dict (emit path,
+    # dedup keys, redis latches, entry/stop/target semantics) is this
+    # module's untouched code. 'momentum': the legacy funnel/gapper path
+    # below, byte-for-byte intact — one env flip + `up -d` reverts
+    # completely. BOTH scheduler call sites (_check_and_run_theta_scanner
+    # and run_theta_scanner_for_all_users' post-latch re-call) route through
+    # this function, so this single seam covers both.
+    # EXPECTATION (owner-informed): compression alerts are RARE — more
+    # no-pick days is the intended behavior, not a defect.
+    _engine = (os.environ.get("SARO_PICK_ENGINE") or "compression").strip().lower()
+    if _engine != "momentum":
+        if _engine != "compression":
+            logger.warning(f"[ThetaScanner] unknown pick-engine value {_engine!r} — defaulting to 'compression'")
+        from app.engines.scanner.saro13.live_pick import find_compression_pick
+        return await find_compression_pick(db)
     # SCANNER-V1: prefer the promoted multi-strategy funnel (broad, liquidity-
     # aware, structure-vetted) over the legacy premarket-gapper scan. Falls back
     # to legacy below if nothing is promoted or the funnel surfaces no pick.
