@@ -205,8 +205,8 @@ def test_compression_state_safe_on_bad_input():
 
 # ── screen: base filter + M&A polarity ─────────────────────────────────────
 def _good_row(**over):
-    row = {"symbol": "ABCD", "price": 50.0, "volume": 3_000_000,
-           "marketCap": 5_000_000_000, "exchangeShortName": "NASDAQ",
+    row = {"symbol": "ABCD", "price": 12.0, "volume": 3_000_000,
+           "marketCap": 200_000_000, "exchangeShortName": "NASDAQ",
            "isEtf": False, "isActivelyTrading": True}
     row.update(over)
     return row
@@ -215,10 +215,10 @@ def _good_row(**over):
 def test_base_screen_accepts_and_rejects():
     ok, why = passes_base_screen(_good_row())
     assert ok is True, why
-    assert passes_base_screen(_good_row(price=5.0))[0] is False       # < $10
-    assert passes_base_screen(_good_row(price=900.0))[0] is False     # > $500
-    assert passes_base_screen(_good_row(volume=500_000))[0] is False  # < 1M
-    assert passes_base_screen(_good_row(marketCap=500_000_000))[0] is False
+    assert passes_base_screen(_good_row(price=0.50))[0] is False      # < $1
+    assert passes_base_screen(_good_row(price=20.0))[0] is False      # > $15
+    assert passes_base_screen(_good_row(volume=300_000))[0] is False  # < 500k
+    assert passes_base_screen(_good_row(marketCap=10_000_000))[0] is False  # < $30M
     assert passes_base_screen(_good_row(exchangeShortName="OTC"))[0] is False
     assert passes_base_screen(_good_row(isEtf=True))[0] is False
     assert passes_base_screen(_good_row(isActivelyTrading=False))[0] is False

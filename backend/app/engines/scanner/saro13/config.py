@@ -67,11 +67,11 @@ APNS_ENABLED_ENV = "APNS_ENABLED"            # still 0 — commented hook only
 # optionable mid/large caps (tight chains, real IV) — unlike saro12's
 # low-float rockets. Reuses saro12's bulk company-screener approach with
 # client-side NASDAQ/NYSE filtering.
-PRICE_MIN = 10.00                   # below ~$10 option strikes are too coarse
-PRICE_MAX = 500.00
-DAILY_VOLUME_MIN = 1_000_000        # liquidity floor (contraction is judged
+PRICE_MIN = 1.00                    # Ryan spec (1.2 SS1): $1 hard floor — penny-adjacent movers allowed, junk filtered by mcap/exchange/M&A gates
+PRICE_MAX = 15.00                   # Ryan spec: the ~20%-pop universe lives under $15
+DAILY_VOLUME_MIN = 500_000          # Ryan spec: >500k shares/day (contraction is judged
                                     # vs the ticker's OWN 20-day MA, not this)
-MARKET_CAP_MIN = 1_000_000_000      # $1B+ — junk never has a theta-worthy chain
+MARKET_CAP_MIN = 30_000_000         # Ryan spec: >=$30M purges shells; float<20M cap = reviewed fast-follow
 ALLOWED_EXCHANGES = ("NASDAQ", "NYSE")
 SCREENER_LIMIT = 10_000             # whole sweep in one page
 

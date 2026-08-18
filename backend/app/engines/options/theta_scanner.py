@@ -529,11 +529,15 @@ async def find_best_premarket_pick(db) -> Optional[dict]:
     # EXPECTATION (owner-informed): compression alerts are RARE — more
     # no-pick days is the intended behavior, not a defect.
     _engine = (os.environ.get("SARO_PICK_ENGINE") or "compression").strip().lower()
-    if _engine != "momentum":
-        if _engine != "compression":
-            logger.warning(f"[ThetaScanner] unknown pick-engine value {_engine!r} — defaulting to 'compression'")
+    if _engine == "compression":
+        # Ryan 2026-08-10: compression is the live engine. Rollback = env
+        # SARO_PICK_ENGINE=momentum + up -d.
         from app.engines.scanner.saro13.live_pick import find_compression_pick
         return await find_compression_pick(db)
+    if _engine != "momentum":
+        # Unknown value: fail to the KNOWN-GOOD legacy path (verify major
+        # 2026-08-18), loudly — a typo must never silently select an engine.
+        logger.warning(f"[ThetaScanner] unknown SARO_PICK_ENGINE={_engine!r} — using legacy momentum path")
     # SCANNER-V1: prefer the promoted multi-strategy funnel (broad, liquidity-
     # aware, structure-vetted) over the legacy premarket-gapper scan. Falls back
     # to legacy below if nothing is promoted or the funnel surfaces no pick.

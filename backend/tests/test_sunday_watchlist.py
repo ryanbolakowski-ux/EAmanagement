@@ -272,13 +272,13 @@ def _seed_cache() -> dict:
     coil_rows = _fmp_rows(_compression_regime())
     trend_rows = _fmp_rows(_trending_regime())
     screener = [
-        {"symbol": "COIL", "price": 100.2, "volume": 3_000_000,
+        {"symbol": "COIL", "price": 12.4, "volume": 3_000_000,
          "marketCap": 5_000_000_000, "exchangeShortName": "NASDAQ",
          "isEtf": False, "isActivelyTrading": True},
-        {"symbol": "TRND", "price": 242.0, "volume": 2_500_000,
+        {"symbol": "TRND", "price": 9.8, "volume": 2_500_000,
          "marketCap": 8_000_000_000, "exchangeShortName": "NYSE",
          "isEtf": False, "isActivelyTrading": True},
-        {"symbol": "MACO", "price": 100.2, "volume": 3_000_000,
+        {"symbol": "MACO", "price": 12.4, "volume": 3_000_000,
          "marketCap": 5_000_000_000, "exchangeShortName": "NASDAQ",
          "isEtf": False, "isActivelyTrading": True},
         {"symbol": "PENY", "price": 2.0, "volume": 9_000_000,   # anti-junk fail

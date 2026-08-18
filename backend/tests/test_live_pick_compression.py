@@ -529,8 +529,8 @@ def test_missing_eod_cache_means_rvol_unknown_and_no_alert():
 def test_dispatch_seam_scope_is_minimal_and_single_site():
     src_ts = inspect.getsource(TS)
     body = inspect.getsource(TS.find_best_premarket_pick)
-    assert src_ts.count("SARO_PICK_ENGINE") == body.count("SARO_PICK_ENGINE") == 2, \
-        "the dispatch seam lives ONLY inside find_best_premarket_pick (header comment + env read)"
+    assert src_ts.count("SARO_PICK_ENGINE") == body.count("SARO_PICK_ENGINE") == 4, \
+        "the dispatch seam lives ONLY inside find_best_premarket_pick (env read + rollback comment + unknown-value warning)"
     # the seam sits BEFORE the legacy body; the legacy funnel + momentum
     # code remains present and reachable (env='momentum')
     assert body.index("SARO_PICK_ENGINE") < body.index("SCANNER-V1")
