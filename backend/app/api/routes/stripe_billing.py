@@ -137,6 +137,16 @@ async def create_checkout_session(
             client_reference_id=str(current_user.id),
             customer_email=current_user.email,
             metadata={"user_id": str(current_user.id), "tier": req.tier},
+            # Also stamp the tier onto the SUBSCRIPTION (not just the checkout
+            # session). session.metadata never reaches the subscription object,
+            # so customer.subscription.updated could not read it. This lands
+            # metadata.tier on the sub as a fallback; the primary re-sync path
+            # in that webhook resolves the tier from the price ID (below),
+            # since a Portal plan change swaps the price but leaves metadata
+            # untouched.
+            subscription_data={
+                "metadata": {"user_id": str(current_user.id), "tier": req.tier}
+            },
         )
         return {"checkout_url": session.url}
     except Exception as e:
@@ -189,15 +199,32 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     elif event.get("type") == "customer.subscription.updated":
         sub = event["data"]["object"]
         sub_id = sub.get("id")
-        # Stripe sends metadata on the subscription itself when changed via
-        # Portal; the tier we synced at checkout still lives on user.subscription_tier
-        # but the price may have changed. Re-sync if metadata.tier is present.
-        new_tier_key = (sub.get("metadata") or {}).get("tier")
-        if sub_id and new_tier_key:
+        tier_map = {"tier_2": SubscriptionTier.TIER_2, "tier_3": SubscriptionTier.TIER_3, "tier_4": SubscriptionTier.TIER_4, "tier_5": SubscriptionTier.TIER_5}
+        # Resolve the new tier PRIMARILY from the subscription's PRICE ID. A
+        # Portal plan change swaps the price on the subscription but leaves
+        # custom metadata untouched, so metadata.tier alone can never reflect a
+        # Portal upgrade/downgrade. Map price_id -> tier_key via _price_ids
+        # (populated on startup / first checkout; refresh here if empty).
+        new_tier_key = None
+        try:
+            items = (sub.get("items") or {}).get("data") or []
+            price_id = (items[0].get("price") or {}).get("id") if items else None
+            if price_id:
+                if not _price_ids:
+                    await ensure_stripe_products()
+                price_to_tier = {pid: tk for tk, pid in _price_ids.items()}
+                new_tier_key = price_to_tier.get(price_id)
+        except Exception as e:  # never let resolution crash the webhook
+            logger.warning(f"[stripe] price->tier resolution failed for sub={sub_id}: {e}")
+            new_tier_key = None
+        # Fallback to subscription metadata.tier (now stamped at checkout via
+        # subscription_data) if the price lookup didn't resolve.
+        if not new_tier_key:
+            new_tier_key = (sub.get("metadata") or {}).get("tier")
+        if sub_id and new_tier_key in tier_map:
             result = await db.execute(select(User).where(User.stripe_subscription_id == sub_id))
             user = result.scalar_one_or_none()
-            tier_map = {"tier_2": SubscriptionTier.TIER_2, "tier_3": SubscriptionTier.TIER_3, "tier_4": SubscriptionTier.TIER_4, "tier_5": SubscriptionTier.TIER_5}
-            if user and new_tier_key in tier_map:
+            if user:
                 user.subscription_tier = tier_map[new_tier_key]
                 await db.commit()
 

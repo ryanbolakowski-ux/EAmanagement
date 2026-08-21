@@ -10,9 +10,18 @@ Run standalone (pytest may be absent):
     python tests/test_billing_deleted_webhook.py
 """
 import asyncio
+import os
+import sys
 
-from app.models.user import SubscriptionTier
-import app.api.routes.stripe_billing as sb
+# Bootstrap: ensure the backend root is importable when this test is invoked
+# directly (python tests/test_billing_deleted_webhook.py) — mirrors the other
+# direct-invoke tests in this suite.
+_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+from app.models.user import SubscriptionTier  # noqa: E402
+import app.api.routes.stripe_billing as sb  # noqa: E402
 
 
 class _Result:

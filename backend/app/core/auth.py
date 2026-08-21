@@ -78,6 +78,49 @@ def _raise_2fa_required() -> None:
     )
 
 
+# Trial-expiry gate helpers
+# The tier gates below check ONLY subscription_tier; nothing blocks a
+# free-trial user once trial_ends_at passes, so expired trials kept full
+# access indefinitely. This helper closes that hole WITHOUT mutating the row
+# (no downgrade write in the request path).
+#
+# The ONLY trial tier is SubscriptionTier.FREE_TRIAL ("free_trial"); every
+# other value (tier_2..tier_5, tier_1 legacy alias) is a paid/non-trial tier
+# and is NEVER affected here. trial_ends_at is DateTime(timezone=True) (stored
+# UTC). Fail-OPEN by design: a NULL trial_ends_at on a trial user is treated
+# as NON-expired (legacy comps predate the column), and any non-trial tier
+# short-circuits to False before we ever look at the date.
+def _trial_expired(current_user: User) -> bool:
+    """Return True only when the user is on the free-trial tier AND
+    trial_ends_at is set AND already in the past (UTC-correct)."""
+    tier = (current_user.subscription_tier or "").strip().lower()
+    if tier != SubscriptionTier.FREE_TRIAL.value:
+        return False  # paid / non-trial tiers can never expire here
+    trial_ends = getattr(current_user, "trial_ends_at", None)
+    if trial_ends is None:
+        return False  # fail-open: legacy trial rows with no end date
+    now = datetime.now(timezone.utc)
+    # Column is tz-aware (stored UTC); guard any naive legacy value by
+    # interpreting it as UTC so the comparison can never raise.
+    if trial_ends.tzinfo is None:
+        trial_ends = trial_ends.replace(tzinfo=timezone.utc)
+    return trial_ends < now
+
+
+def _raise_trial_expired() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "trial_expired",
+            "message": (
+                "Your free trial has ended. Upgrade to a paid plan to "
+                "continue using this feature."
+            ),
+            "upgrade_url": "/pricing",
+        },
+    )
+
+
 async def require_2fa_when_paid(
     current_user: User = Depends(get_current_user),
 ) -> User:
@@ -98,6 +141,11 @@ def require_tier(*tiers: SubscriptionTier):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"This feature requires one of: {[t.value for t in tiers]}",
             )
+        # Trial-expiry gate: an expired free trial loses feature access and is
+        # routed to /pricing (checked before 2FA so we don't send an expired
+        # trial user to set up 2FA they no longer need). Paid tiers unaffected.
+        if _trial_expired(current_user):
+            _raise_trial_expired()
         if _user_needs_2fa(current_user):
             _raise_2fa_required()
         return current_user
@@ -111,6 +159,10 @@ def require_live_trading(current_user: User = Depends(get_current_user)) -> User
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Live trading requires a paid plan.",
         )
+    # Defense-in-depth: free_trial is not a live tier so this is a no-op today,
+    # but keeps the trial-expiry gate uniform if live_tiers ever changes.
+    if _trial_expired(current_user):
+        _raise_trial_expired()
     if _user_needs_2fa(current_user):
         _raise_2fa_required()
     return current_user
