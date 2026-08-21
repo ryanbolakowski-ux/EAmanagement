@@ -1,0 +1,70 @@
+{
+  "_comment": "Captured from the PRE-OVERRIDE engine (worktree commit 51fd433) via `python tests/test_sltp_overrides.py --capture-baseline`. Do NOT regenerate from an engine that already contains SLTP-OVERRIDES-V1.",
+  "scenarios": {
+    "fallback_long": {
+      "branch": "ticks_fallback",
+      "hex": "0x1.3874000000000p+14",
+      "value": 19997.0
+    },
+    "fallback_short": {
+      "branch": "ticks_fallback",
+      "hex": "0x1.388c000000000p+14",
+      "value": 20003.0
+    },
+    "sweep_long": {
+      "branch": "sweep",
+      "hex": "0x1.382e000000000p+14",
+      "value": 19979.5
+    },
+    "sweep_long_capped": {
+      "branch": "sweep",
+      "hex": "0x1.36f0000000000p+14",
+      "value": 19900.0
+    },
+    "sweep_short": {
+      "branch": "sweep",
+      "hex": "0x1.38d2000000000p+14",
+      "value": 20020.5
+    },
+    "swing_long": {
+      "branch": "swing",
+      "hex": "0x1.3842000000000p+14",
+      "value": 19984.5
+    },
+    "swing_long_ticks_capped": {
+      "branch": "swing",
+      "hex": "0x1.386c000000000p+14",
+      "value": 19995.0
+    },
+    "swing_short": {
+      "branch": "swing",
+      "hex": "0x1.38be000000000p+14",
+      "value": 20015.5
+    },
+    "tp_clamp_long": {
+      "branch": "rr_cap",
+      "hex": "0x1.38bc000000000p+14",
+      "value": 20015.0
+    },
+    "tp_rr_long": {
+      "branch": "rr",
+      "hex": "0x1.38d0000000000p+14",
+      "value": 20020.0
+    },
+    "tp_rr_short": {
+      "branch": "rr",
+      "hex": "0x1.3830000000000p+14",
+      "value": 19980.0
+    },
+    "tp_swing_long": {
+      "branch": "swing",
+      "hex": "0x1.389e000000000p+14",
+      "value": 20007.5
+    },
+    "tp_swing_short": {
+      "branch": "swing",
+      "hex": "0x1.3862000000000p+14",
+      "value": 19992.5
+    }
+  }
+}

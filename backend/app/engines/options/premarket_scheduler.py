@@ -913,6 +913,38 @@ async def _fast_theta_loop():
             return
         except Exception as _e:
             logger.warning(f"[ThetaScanner-fast] check failed: {_e}")
+        # ── EXIT-SAFETY on the 60s fast loop (2026-08-21) ───────────────────
+        # The trailing/hard-stop watcher + EOD flatten previously ran ONLY on
+        # the MAIN scheduler loop, which _run_scan_cycle starves to a ~2.3h
+        # cadence (BABA flattened 2.5h late w/ NULL fill; DELL 39m late). Real
+        # stops must not sit unchecked for hours, so both checks now ALSO ride
+        # this 60s loop. They are IDEMPOTENT across BOTH loops — the trail
+        # watcher via its 30s debounce + the _trail_watcher_active re-entrancy
+        # guard, EOD via the atomic _eod_fired_for_date latch — so the main-loop
+        # calls (still present) stay as a backstop and neither action can
+        # double-fire the same market SELL. Gated to the market window to
+        # exactly mirror where the main loop calls them (no new after-hours or
+        # weekend selling). Each call is isolated in its own try/except so a
+        # failure here can never break the 60s loop (which also runs the
+        # scanner spawn hooks below).
+        try:
+            if _within_market_window(_today_et()):
+                # Trail/hard-stop watcher: gated behind a cheap open-position
+                # count so the loop stays light when there's nothing to price
+                # (guard fails SAFE → runs on any error).
+                try:
+                    if await _any_open_positions():
+                        await _check_trail_watcher()
+                except Exception as _twf:
+                    logger.warning(f"[ThetaScanner-fast] trail-watch check failed: {_twf}")
+                # EOD flatten: self-returns before 15:55 ET so it is cheap every
+                # tick; the _eod_fired_for_date latch makes it single-fire.
+                try:
+                    await _check_end_of_day_close()
+                except Exception as _eodf:
+                    logger.warning(f"[ThetaScanner-fast] EOD-close check failed: {_eodf}")
+        except Exception as _exsafe:
+            logger.warning(f"[ThetaScanner-fast] exit-safety block failed: {_exsafe}")
         # ── IGNITION SHADOW (2026-07-14, owner approved — SHADOW ONLY) ──
         # Hooked into THIS fast loop (60s cadence) because the main scheduler
         # loop can stretch ~90 min and would miss the 09:30:20-09:36 ET
@@ -1743,19 +1775,51 @@ async def _run_trailing_stop_watcher(reprice_only: bool = False):
         await db.commit()
 
 
+async def _any_open_positions() -> bool:
+    """Cheap LIMIT-1 guard so the 60s fast loop only prices positions when
+    some exist (the trailing/hard-stop watcher makes one sequential HTTP call
+    per open row). Fails SAFE: on ANY error it returns True so the watcher
+    still runs — the main-loop backstop also calls _check_trail_watcher
+    unconditionally, so a breached stop is never skipped."""
+    try:
+        from app.database import async_session_factory as _sf
+        from sqlalchemy import text as _t
+        async with _sf() as _db:
+            row = (await _db.execute(_t(
+                "SELECT 1 FROM open_positions_watch WHERE status = 'open' LIMIT 1"
+            ))).first()
+        return row is not None
+    except Exception as _e:
+        logger.warning(f"[TrailWatch] open-position guard failed ({_e}) — running watcher anyway")
+        return True
+
+
 _trail_last_run = None
+# RE-ENTRANCY GUARD (dual-loop safety, 2026-08-21): the watcher now ticks on
+# BOTH the 60s fast loop and the main loop. It can price up to 100 positions
+# over sequential HTTP calls and run LONGER than the 30s debounce, so the
+# debounce alone cannot stop a second loop from starting a concurrent run and
+# market-SELLing the same open row twice. This in-process flag guarantees only
+# ONE watcher run executes at a time (single-threaded asyncio → the check-and-
+# set below is atomic, no await between the guard test and setting the flag).
+_trail_watcher_active = False
 async def _check_trail_watcher():
     """Tick the trail watcher every 30s during market hours."""
-    global _trail_last_run
+    global _trail_last_run, _trail_watcher_active
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     now = _dt.now(_tz.utc)
     if _trail_last_run and (now - _trail_last_run) < _td(seconds=30):
         return
+    if _trail_watcher_active:
+        return
+    _trail_watcher_active = True
     _trail_last_run = now
     try:
         await _run_trailing_stop_watcher()
     except Exception as e:
         logger.warning(f"[TrailWatch] failed: {e}")
+    finally:
+        _trail_watcher_active = False
 
 
 

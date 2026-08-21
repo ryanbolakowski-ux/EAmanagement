@@ -77,7 +77,7 @@ export default function Login() {
         </div>
 
         <div className="grid grid-cols-3 gap-4 relative">
-          {[['64%', 'Avg Win Rate'], ['2.4x', 'Profit Factor'], ['<8%', 'Max Drawdown']].map(([v, l]) => (
+          {[['Automated', 'ICT model engine'], ['Multi-asset', 'Futures + Options'], ['Backtest', 'Replay & paper trade']].map(([v, l]) => (
             <div key={l} className="rounded-xl p-4 bg-white/10 backdrop-blur-sm border border-white/20">
               <div className="text-white font-bold text-xl">{v}</div>
               <div className="text-violet-100 text-xs mt-0.5">{l}</div>

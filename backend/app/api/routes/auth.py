@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from loguru import logger
 from app.core.auth import get_current_user
+from app.api.routes.admin import require_admin_with_passcode
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -118,6 +119,10 @@ async def register(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    # THROTTLE: reuse the same per-IP limiter as /login. Blocks registration
+    # -based user enumeration (400 'Email already registered') and the
+    # welcome / owner-notify email flood. 5 / IP / minute, fail-open on Redis.
+    _enforce_login_rate_limit(request)
     # Emails are case-insensitive — normalize on store and check uniqueness
     # against the lowercased form so Ryan.bolakowski@ and ryan.bolakowski@
     # can never become two different accounts.
@@ -354,25 +359,29 @@ async def disable_2fa(
     return {"status": "ok", "totp_enabled": False}
 
 
-# Diagnostic: tells you if a login attempt would succeed without actually issuing a JWT.
-# Use this when 'invalid credentials' is mysterious — quickly proves whether backend rejects you
-# vs the frontend never reaching the backend.
+# Diagnostic: for an authenticated ADMIN only. Reports whether a login WOULD
+# succeed for the submitted credentials, WITHOUT issuing a token.
+#
+# SECURITY: this was previously PUBLIC and un-rate-limited, and returned
+# distinct NO_USER_FOUND / WRONG_PASSWORD(+email,is_active) / WOULD_SUCCEED
+# (+requires_2fa) results — a credential-stuffing + user-enumeration oracle.
+# It is now gated behind admin + passcode AND returns only a single generic
+# boolean, so it can never reveal whether an account exists, its email, its
+# active state, or its 2FA status.
 @router.post('/diag-login')
 async def diag_login(
     form: OAuth2PasswordRequestForm = Depends(),
+    _admin: User = Depends(require_admin_with_passcode),
     db: AsyncSession = Depends(get_db),
 ):
-    """Diagnostic: same logic as /login but returns reason + masked info. Never issues a token."""
+    """Admin-only diagnostic: same verify logic as /login but issues no token
+    and leaks no per-account detail — returns only {'ok': bool}."""
     typed_email = (form.username or '').strip()
     result = await db.execute(select(User).where(func.lower(User.email) == typed_email.lower()))
     user = result.scalar_one_or_none()
-    if not user:
-        return {'ok': False, 'reason': 'NO_USER_FOUND', 'hint': f'no user with email matching (case-insensitive): {typed_email}'}
-    if not await asyncio.to_thread(verify_password, form.password, user.hashed_password):
-        return {'ok': False, 'reason': 'WRONG_PASSWORD',
-                'hint': 'email matched a user but the password does not — your password manager may be filling an old value',
-                'user_email': user.email, 'is_active': user.is_active}
-    if not user.is_active:
-        return {'ok': False, 'reason': 'ACCOUNT_DISABLED', 'user_email': user.email}
-    return {'ok': True, 'reason': 'WOULD_SUCCEED', 'user_email': user.email,
-            'requires_2fa': bool(user.totp_enabled and user.totp_secret)}
+    would_succeed = bool(
+        user
+        and await asyncio.to_thread(verify_password, form.password, user.hashed_password)
+        and user.is_active
+    )
+    return {'ok': would_succeed}

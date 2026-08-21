@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.user import User
 from app.core.auth import get_current_user
+from app.api.routes.admin import require_admin
 from app.services import email as email_svc
 
 router = APIRouter()
@@ -235,15 +236,16 @@ async def get_my_audit(current_user: User = Depends(get_current_user),
 
 
 @router.get("/audit-summary")
-async def audit_summary(current_user: User = Depends(get_current_user),
+async def audit_summary(current_user: User = Depends(require_admin),
                         db: AsyncSession = Depends(get_db)):
-    """Admin (tier_5): consolidated security/trading audit — counts by event type
+    """Admin (is_admin): consolidated security/trading audit — counts by event type
     over 30 days + the most recent events. Covers agreement acceptance, automation
     enable/disable, risk-increasing changes, trade approvals/declines, blocked
-    auto-trade attempts, and signal routing."""
-    tier = current_user.subscription_tier.value if hasattr(current_user.subscription_tier, "value") else str(current_user.subscription_tier)
-    if tier != "tier_5":
-        raise HTTPException(status_code=403, detail="Admin only.")
+    auto-trade attempts, and signal routing.
+
+    SECURITY: previously gated on subscription_tier == 'tier_5' (a paid CUSTOMER
+    plan), which exposed the whole platform's security audit log — including
+    other users' IPs and event detail — to any tier_5 subscriber."""
     by_type = (await db.execute(text("""
         SELECT event_type, count(*) AS n, max(created_at) AS last_at
           FROM security_audit_log WHERE created_at > now() - interval '30 days'

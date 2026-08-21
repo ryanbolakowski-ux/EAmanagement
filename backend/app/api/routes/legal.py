@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.user import User
 from app.core.auth import get_current_user
+from app.api.routes.admin import require_admin
 
 router = APIRouter()
 
@@ -328,13 +329,12 @@ async def get_my_ack_status(
 async def admin_list_acknowledgments(
     user_id: Optional[str] = None,
     kind: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    # Admin gate — only tier_5 can hit this
-    tier = current_user.subscription_tier.value if hasattr(current_user.subscription_tier, "value") else str(current_user.subscription_tier)
-    if tier != "tier_5":
-        raise HTTPException(status_code=403, detail="Admin only.")
+    # Admin gate — require is_admin. SECURITY: this previously gated on
+    # subscription_tier == 'tier_5', a $399 CUSTOMER plan, so any tier_5
+    # subscriber could read every user's acknowledgment PII (email, IP).
     where = []
     params = {}
     if user_id:

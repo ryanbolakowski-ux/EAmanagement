@@ -38,6 +38,7 @@ def _fw_session_label() -> str:
     t = et.hour * 60 + et.minute
     if t >= 18*60 or t < 3*60:      return "ASIA"
     if 3*60 <= t < 9*60:            return "LONDON"
+    if 9*60 <= t < 9*60+30:         return "NY_OPEN"   # 09:00-09:30 cash-open handoff (was a DEAD gap dropping real 9:05-9:29 futures receipts)
     if 9*60+30 <= t < 11*60:        return "NY_AM"
     if 13*60+30 <= t < 16*60+30:    return "NY_PM"
     return "DEAD"
@@ -69,20 +70,66 @@ async def _fw_claim_async(to: str) -> tuple[bool, str]:
     return True, sess
 
 
+# Synchronous firewall path (2026-08-21 v2-redesign fix).
+# The previous _fw_check ran _fw_claim_async on a throwaway event loop and,
+# when called from inside a running loop, fell back to a ThreadPool that
+# reused the module-global redis.asyncio client bound to the main loop —
+# raising "Cannot run the event loop while another loop is running" /
+# "attached to a different loop" and silently eating legit emails. Even the
+# pure-sync path broke after the first call: it closed the loop but kept the
+# loop-bound async redis client cached. Trade-receipt / consolidated sends are
+# plain sync functions, so we now do the claim with a SYNC redis client: no
+# event loop, correct from BOTH sync and async call sites.
+_fw_redis_sync = None
+def _fw_get_redis_sync():
+    global _fw_redis_sync
+    if _fw_redis_sync is None:
+        import redis as _redis_sync_lib  # sync client (redis pkg already present)
+        url = os.environ.get("REDIS_URL", "redis://edge_redis:6379")
+        _fw_redis_sync = _redis_sync_lib.from_url(url, decode_responses=True)
+    return _fw_redis_sync
+
+
+def _fw_claim_sync(to: str) -> tuple[bool, str]:
+    """Atomic claim via a synchronous redis client. Mirrors _fw_claim_async's
+    per-session + per-day cap semantics exactly; no event loop involved."""
+    sess = _fw_session_label()
+    if sess == "DEAD":
+        return False, "DEAD_ZONE"
+    r = _fw_get_redis_sync()
+    day = _dt_fw.now(_tz_fw.utc).date().isoformat()
+    # Per-session cap (1 trade receipt per user per session)
+    sess_key = f"fw:{to}:{sess}:{day}"
+    sess_claimed = r.set(sess_key, "1", ex=4*3600, nx=True)
+    if not sess_claimed:
+        return False, f"SESSION_CAP_{sess}"
+    # Per-day cap (4 trade receipts total per user per day)
+    day_key = f"fw:day:{to}:{day}"
+    cur = r.incr(day_key)
+    if cur == 1:
+        r.expire(day_key, 86400)
+    if cur > 4:
+        # Roll back the session claim so a higher-scored signal in the same
+        # session later isn't permanently blocked by an over-cap one.
+        try: r.delete(sess_key)
+        except Exception: pass
+        return False, "DAILY_CAP_4"
+    return True, sess
+
+
 def _fw_check(to: str) -> tuple[bool, str]:
-    """Sync wrapper around the async claim. Returns (allowed, reason)."""
+    """Robust firewall check. Uses a synchronous redis call so it is safe from
+    BOTH sync and async call sites (no event-loop entanglement). FAILS OPEN on
+    any internal error and never raises into the send path — a firewall bug
+    must never silently eat a legit email."""
     try:
-        loop = _asyncio_lib.new_event_loop()
-        try:
-            return loop.run_until_complete(_fw_claim_async(to))
-        finally:
-            loop.close()
-    except RuntimeError:
-        # Already inside an event loop — fall back to running inline
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as ex:
-            fut = ex.submit(lambda: _asyncio_lib.run(_fw_claim_async(to)))
-            return fut.result(timeout=5)
+        return _fw_claim_sync(to)
+    except Exception as _fw_e:
+        logger.warning(
+            f"[email-firewall] check errored, failing OPEN for {to}: "
+            f"{type(_fw_e).__name__}: {_fw_e}"
+        )
+        return True, "FW_ERROR_OPEN"
 
 
 def _ensure_configured() -> bool:
@@ -110,7 +157,18 @@ def _killswitch_allows(subject: str) -> bool:
     transactional_keywords = ["Reset your", "Verify your", "Welcome to", "2FA",
                                "verification", "Comp ", "tier change", "Daily digest",
                                "Daily summary", "[Admin]", "URGENT",
-                               "[Theta Algos Support]"]  # support routing fix (prod 2026-08-06)
+                               "[Theta Algos Support]",  # support routing fix (prod 2026-08-06)
+                               # 2026-08-21 (v2-redesign): real platform emails whose subjects
+                               # matched NO keyword and were silently dropped while the switch
+                               # was on. Each is a substring of exactly one legit subject family
+                               # and never of the legacy "... signal" pattern.
+                               "top pick",               # send_consolidated_signals_email
+                               "pre-market signal",      # send_pending_trade_confirm_email
+                               "granted free",           # send_comp_granted_email
+                               "plan has been",          # send_tier_change_email (up/down)
+                               "consistency limit",      # send_consistency_hit_email
+                               "free access has ended",  # send_comp_revoked_email
+                               ]
     if any(k in s for k in transactional_keywords):
         return True
     # Saro = 2026-07 scanner rebrand (Ryan)
@@ -878,3 +936,44 @@ def send_comp_revoked_email(to: str, username: str, prior_tier: str) -> bool:
     </div>
     """
     return _send(to, subject, html)
+
+
+# ---------------------------------------------------------------------------
+# Regression guard (2026-08-21 v2-redesign): every real platform email subject
+# must survive the EMAIL_KILL_SWITCH whitelist. One representative subject per
+# send_* function, kept in lockstep with the f-string templates above. Not a
+# pytest fixture (pytest may be absent in the container) — direct-invoke:
+#   python -c "from app.services.email import _killswitch_selftest as t; t()"
+# ---------------------------------------------------------------------------
+def _killswitch_selftest():
+    """Assert _killswitch_allows() passes every real platform subject.
+    Returns the list of (name, subject, allowed); raises AssertionError on any
+    drop."""
+    subjects = [
+        ("send_welcome_email",               "Welcome to Theta Algos"),
+        ("send_admin_new_user_notification", "[Admin] New Theta Algos signup: alice"),
+        ("send_verification_code_email",     "Your Theta Algos verification code"),
+        ("send_password_reset_email",        "Reset your Theta Algos password"),
+        ("send_consistency_hit_email",       "Theta Algos \u2014 Eval 50K paused (daily consistency limit hit)"),
+        ("send_daily_digest_email",          "Daily summary \u2014 2026-08-21 \u2014 +1,234.00 P&L"),
+        ("send_tier_change_email(up)",       "Your Theta Algos plan has been upgraded to Tier 2 (Futures Signals)"),
+        ("send_tier_change_email(down)",     "Your Theta Algos plan has been changed to Tier 1 (Free Trial)"),
+        ("send_pending_trade_confirm_email", "Theta Algos \u2014 pre-market signal \u00b7 SHORT NVDA \u00b7 confirm by 08:45 AM ET"),
+        ("send_trade_receipt_email",         "\U0001F525 Saro Signal \u00b7 LONG ES @ 5123.50 (+0.8% target) \u00b7 Day Trade"),
+        ("send_consolidated_signals_email",  "Theta Algos \u2014 top pick: LONG NVDA + 3 more"),
+        ("send_comp_granted_email",          "You've been granted free Tier 2 (Futures Signals) access on Theta Algos"),
+        ("send_comp_revoked_email",          "Your Theta Algos free access has ended"),
+    ]
+    results = [(name, subj, _killswitch_allows(subj)) for name, subj in subjects]
+    dropped = [(name, subj) for name, subj, ok in results if not ok]
+    if dropped:
+        raise AssertionError(
+            "EMAIL_KILL_SWITCH would DROP these real platform subjects: "
+            + "; ".join(f"{n}: {s!r}" for n, s in dropped)
+        )
+    return results
+
+
+if __name__ == "__main__":
+    _res = _killswitch_selftest()
+    print(f"[killswitch-selftest] OK \u2014 {len(_res)} real platform subjects all pass")

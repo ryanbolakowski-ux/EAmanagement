@@ -16,7 +16,6 @@ import { Skeleton, ToastProvider } from './components/v2'
 // V1 pages are code-split: each route downloads only its own chunk instead of
 // every visitor paying for the whole app in one bundle. Every page file uses
 // a default export, so plain lazy(() => import(...)) works throughout.
-const Landing = lazy(() => import('./pages/Landing'))
 const Kyc = lazy(() => import('./pages/Kyc'))
 const Profile = lazy(() => import('./pages/Profile'))
 const Pricing = lazy(() => import('./pages/Pricing'))
@@ -208,8 +207,6 @@ export default function App() {
     <Routes>
       {/* Public routes */}
       <Route path="/"         element={<V2Route><LandingV2 /></V2Route>} />
-      {/* V1 landing kept during the V2 transition (Ryan 2026-07-03: "make everything v2") */}
-      <Route path="/classic"  element={<Landing />} />
       <Route path="/pricing"  element={<Pricing />} />
       <Route path="/login"           element={<Login />} />
       <Route path="/register"        element={<Register />} />

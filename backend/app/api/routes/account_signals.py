@@ -19,6 +19,7 @@ from app.database import get_db, async_session_factory
 from app.models.user import User
 from app.models.strategy import Strategy
 from app.core.auth import require_2fa_when_paid as get_current_user
+from app.api.routes.admin import require_admin
 from app.services.email import _send, _send_tracked, _logo_header
 from app.config import settings
 
@@ -927,14 +928,15 @@ async def signals_stats(
 
 @router.get("/resolution-report")
 async def resolution_report(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Admin: how SENT Email Signals have resolved + how many are still pending,
-    by age. Surfaces whether the backlog is being cleared."""
-    tier = current_user.subscription_tier.value if hasattr(current_user.subscription_tier, "value") else str(current_user.subscription_tier)
-    if tier != "tier_5":
-        raise HTTPException(status_code=403, detail="Admin only.")
+    by age. Surfaces whether the backlog is being cleared.
+
+    SECURITY: previously gated on subscription_tier == 'tier_5' (a paid CUSTOMER
+    plan), exposing platform-wide signal resolution to any tier_5 subscriber;
+    now requires is_admin."""
     from sqlalchemy import text as _text
     by = (await db.execute(_text("""
         SELECT COALESCE(outcome, 'pending') AS o, count(*) AS n

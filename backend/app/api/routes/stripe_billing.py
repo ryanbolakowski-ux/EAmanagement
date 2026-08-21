@@ -54,6 +54,14 @@ TIER_PRICES = {
 
 _price_ids: dict[str, str] = {}
 
+# Tier a subscription is downgraded to when Stripe reports it
+# deleted/cancelled. NOTE: the SubscriptionTier enum has no `FREE`
+# member -- the previous `SubscriptionTier.FREE` raised AttributeError
+# -> 500 on every cancellation/refund webhook (cancelled users kept
+# paid access; sustained 500s can make Stripe auto-disable the
+# endpoint). FREE_TRIAL is the real lowest/free tier.
+CANCELLED_TIER = SubscriptionTier.FREE_TRIAL
+
 
 async def ensure_stripe_products():
     """Create or fetch Stripe products/prices on startup."""
@@ -200,7 +208,7 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
             result = await db.execute(select(User).where(User.stripe_subscription_id == sub_id))
             user = result.scalar_one_or_none()
             if user:
-                user.subscription_tier = SubscriptionTier.FREE
+                user.subscription_tier = CANCELLED_TIER
                 user.stripe_subscription_id = None
                 await db.commit()
 

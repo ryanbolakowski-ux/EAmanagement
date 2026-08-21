@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -14,6 +16,11 @@ router = APIRouter()
 
 MASTER_CODE = ""  # disabled — was a hardcoded promo bypass
 FREETRIAL_CODE = "FREETRIAL"
+# Kill-switch for the FREETRIAL promo. Defaults OFF: the path was
+# unconditional + repeatable (unlimited 30-day resets) and would even
+# downgrade a paying subscriber who entered the code. Set
+# PROMO_FREETRIAL_ENABLED=1 only to intentionally launch the promo.
+PROMO_FREETRIAL_ENABLED = os.getenv("PROMO_FREETRIAL_ENABLED", "0") == "1"
 
 TIER_INFO = {
     "free_trial": {"name": "Tier 1 (Free Trial)", "price": 0},
@@ -111,9 +118,30 @@ async def upgrade_tier(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if data.promo_code == FREETRIAL_CODE:
+    if PROMO_FREETRIAL_ENABLED and data.promo_code == FREETRIAL_CODE:
+        # Guard 1: never downgrade / strip access from a paying subscriber
+        # who enters the promo code. Paid tiers outrank the free trial.
+        current_tier = current_user.subscription_tier or "free_trial"
+        if current_tier in ("tier_2", "tier_3", "tier_4", "tier_5"):
+            raise HTTPException(
+                status_code=400,
+                detail="Promo code not applicable to an active paid plan.",
+            )
+        # Guard 2: single-use while active -- do not let a user repeatedly
+        # reset/stack the 30-day trial (was unlimited free access).
+        now = datetime.utcnow()
+        trial_ends = current_user.trial_ends_at
+        if trial_ends is not None:
+            te = trial_ends.replace(tzinfo=None) if trial_ends.tzinfo else trial_ends
+            if te > now:
+                raise HTTPException(
+                    status_code=400,
+                    detail="A free trial is already active on this account.",
+                )
         current_user.subscription_tier = "free_trial"
-        current_user.trial_ends_at = datetime.utcnow() + timedelta(days=30)
+        if current_user.trial_started_at is None:
+            current_user.trial_started_at = now
+        current_user.trial_ends_at = now + timedelta(days=30)
         await db.commit()
         return {"status": "upgraded", "tier": "free_trial", "tier_name": "Free Trial (30 days)", "paid": 0}
 
