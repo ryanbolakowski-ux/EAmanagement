@@ -247,8 +247,16 @@ async def cancel_subscription(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # 2026-08-26: free-trial / comped users have NO Stripe subscription, so the
+    # old hard-400 made cancellation IMPOSSIBLE for them. Cancel locally — end
+    # the trial now (the trial-expiry gate then removes access) and drop a comped
+    # paid tier to the free floor. Cancellation must ALWAYS succeed.
     if not current_user.stripe_subscription_id:
-        raise HTTPException(status_code=400, detail="No active subscription")
+        from datetime import datetime as _dt, timezone as _tz
+        current_user.subscription_tier = CANCELLED_TIER
+        current_user.trial_ends_at = _dt.now(_tz.utc)
+        await db.commit()
+        return {"message": "Your subscription has been cancelled."}
 
     try:
         stripe.Subscription.modify(
@@ -268,7 +276,7 @@ async def customer_portal(
     try:
         customers = stripe.Customer.list(email=current_user.email, limit=1)
         if not customers.data:
-            raise HTTPException(status_code=400, detail="No billing account found")
+            raise HTTPException(status_code=400, detail="You're on a free trial with no paid billing account to manage. Use Cancel to end your trial.")
 
         session = stripe.billing_portal.Session.create(
             customer=customers.data[0].id,
