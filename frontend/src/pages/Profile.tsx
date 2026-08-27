@@ -55,6 +55,37 @@ export default function Profile() {
   const [selectedTier, setSelectedTier] = useState('')
   const [promoCode, setPromoCode] = useState('')
   const [upgradeMsg, setUpgradeMsg] = useState('')
+  const [billingBusy, setBillingBusy] = useState(false)
+  // Cancel / manage: paying customers -> Stripe Customer Portal (cancel there,
+  // no future charge). Free-trial / comped users have NO Stripe account, so the
+  // portal 400s; tell them plainly (no card on file = cannot be charged) and
+  // offer a local cancel that ends the trial now. (2026-08-26: trial users had
+  // no working cancel at all.)
+  const handleManageBilling = async () => {
+    if (billingBusy) return
+    setBillingBusy(true)
+    try {
+      const res = await billingApi.getPortal()
+      window.location.href = res.data.portal_url
+      return
+    } catch {
+      const ok = window.confirm(
+        "You're on a free trial with no card on file, so you can't be charged \u2014 " +
+        "your access simply ends when the trial expires. Cancel now and end your trial access immediately?"
+      )
+      if (ok) {
+        try {
+          await billingApi.cancelSubscription()
+          await qc.invalidateQueries({ queryKey: ['profile'] })
+          window.alert('Your subscription has been cancelled.')
+        } catch (err: any) {
+          window.alert('Could not cancel right now: ' + (err?.response?.data?.detail || 'please try again or email support@thetaalgos.com'))
+        }
+      }
+    } finally {
+      setBillingBusy(false)
+    }
+  }
 
   const { data: profile, isLoading } = useQuery({
     queryKey: ['profile'],
@@ -111,13 +142,8 @@ export default function Profile() {
           </div>
           {!user?.is_admin && (
             <div className="flex gap-2">
-              <button onClick={async () => {
-                try {
-                  const res = await billingApi.getPortal()
-                  window.location.href = res.data.portal_url
-                } catch {}
-              }} className="px-4 py-1.5 border border-slate-200 text-slate-600 text-sm rounded-lg hover:bg-slate-50 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-800">
-                Manage Billing
+              <button disabled={billingBusy} onClick={handleManageBilling} className="px-4 py-1.5 border border-slate-200 text-slate-600 text-sm rounded-lg hover:bg-slate-50 disabled:opacity-50 dark:text-slate-300 dark:border-slate-700 dark:hover:bg-slate-800">
+                {billingBusy ? 'Opening\u2026' : 'Manage / Cancel'}
               </button>
               <button onClick={() => setShowUpgrade(!showUpgrade)} className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">
                 {showUpgrade ? 'Cancel' : 'Change Plan'}
